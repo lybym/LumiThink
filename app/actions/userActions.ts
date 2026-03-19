@@ -1,13 +1,12 @@
 "use server";
 
 import { db } from "@/lib/db";
+import { buildMockParentEmail } from "./userActions.utils";
 
 export async function createMockParentAndChild() {
-  const suffix = Date.now();
-
   const parent = await db.parent.create({
     data: {
-      email: `demo.parent.${suffix}@lumithink.local`,
+      email: buildMockParentEmail(),
       children: {
         create: {
           name: "Ava",
