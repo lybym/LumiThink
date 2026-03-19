@@ -7,6 +7,13 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum RawEventType {
+  PARENT_UPLOAD
+  KID_INTERACTION_TRACE
+  LLM_EVALUATION
+  PROFILE_SNAPSHOT
+}
+
 model Parent {
   id        String   @id @default(cuid())
   email     String   @unique
@@ -16,31 +23,43 @@ model Parent {
 }
 
 model Child {
-  id                String           @id @default(cuid())
-  parentId          String
-  name              String
-  age               Int
-  initialMathLevel  String
-  activeWeaknesses  Json
-  createdAt         DateTime         @default(now())
+  id        String   @id @default(cuid())
+  parentId  String
+  name      String
+  age       Int
+  createdAt DateTime @default(now())
 
-  parent            Parent           @relation(fields: [parentId], references: [id], onDelete: Cascade)
-  activityRecords   ActivityRecord[]
+  parent            Parent             @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  rawEvents         RawEvent[]
+  cognitiveProfile  CognitiveProfile?
 
   @@index([parentId])
 }
 
-model ActivityRecord {
-  id                    String   @id @default(cuid())
-  childId               String
-  date                  DateTime
-  uploadedImageContext  String?
-  llmDiagnosis          String
-  interactionResult     String
-  createdAt             DateTime @default(now())
+model RawEvent {
+  id        String       @id @default(cuid())
+  childId   String
+  eventType RawEventType
+  payload   Json
+  createdAt DateTime     @default(now())
 
-  child                 Child    @relation(fields: [childId], references: [id], onDelete: Cascade)
+  child Child @relation(fields: [childId], references: [id], onDelete: Cascade)
 
-  @@index([childId])
-  @@index([date])
+  @@index([childId, createdAt])
+  @@index([eventType])
+}
+
+model CognitiveProfile {
+  id                     String   @id @default(cuid())
+  childId                String   @unique
+  numberSenseScore       Float    @default(0)
+  spatialScore           Float    @default(0)
+  logicScore             Float    @default(0)
+  strategyScore          Float    @default(0)
+  latestDiagnosisSummary String?
+  updatedAt              DateTime @updatedAt
+
+  child Child @relation(fields: [childId], references: [id], onDelete: Cascade)
+
+  @@index([updatedAt])
 }

@@ -11,13 +11,24 @@ export async function createMockParentAndChild() {
         create: {
           name: "Ava",
           age: 8,
-          initialMathLevel: "Grade 3",
-          activeWeaknesses: ["borrowing in subtraction", "multi-step word problems"],
+          cognitiveProfile: {
+            create: {
+              numberSenseScore: 0,
+              spatialScore: 0,
+              logicScore: 0,
+              strategyScore: 0,
+              latestDiagnosisSummary: "Initial profile created.",
+            },
+          },
         },
       },
     },
     include: {
-      children: true,
+      children: {
+        include: {
+          cognitiveProfile: true,
+        },
+      },
     },
   });
 
