@@ -1,0 +1,46 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Parent {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  createdAt DateTime @default(now())
+
+  children  Child[]
+}
+
+model Child {
+  id                String           @id @default(cuid())
+  parentId          String
+  name              String
+  age               Int
+  initialMathLevel  String
+  activeWeaknesses  Json
+  createdAt         DateTime         @default(now())
+
+  parent            Parent           @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  activityRecords   ActivityRecord[]
+
+  @@index([parentId])
+}
+
+model ActivityRecord {
+  id                    String   @id @default(cuid())
+  childId               String
+  date                  DateTime
+  uploadedImageContext  String?
+  llmDiagnosis          String
+  interactionResult     String
+  createdAt             DateTime @default(now())
+
+  child                 Child    @relation(fields: [childId], references: [id], onDelete: Cascade)
+
+  @@index([childId])
+  @@index([date])
+}
