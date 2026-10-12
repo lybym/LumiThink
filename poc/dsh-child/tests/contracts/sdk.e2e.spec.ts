@@ -11,7 +11,7 @@
  */
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { MockMessagesServer } from '../../src/mock-model.ts'
+import { MockMessagesServer, SYNTHETIC_API_KEY } from '../../src/mock-model.ts'
 import { disposeTempHome, startChildHarness } from '../../src/child-runtime.ts'
 import { canSpawnPipedChild } from '../../src/dump-config.ts'
 import type { StartedChild } from '../../src/child-runtime.ts'
@@ -20,6 +20,11 @@ const SYNTHETIC_SESSION = 'child_demo_001'
 const PIPES_UNAVAILABLE = 'piped stdio child processes are unavailable in this execution environment; run the suite in a normal shell or CI for SDK e2e evidence'
 
 const pipedOk = canSpawnPipedChild()
+
+/** The `type` field of each collected turn event, in order. */
+function eventTypes(events: readonly unknown[]): string[] {
+  return events.map(event => (event as { type?: string }).type ?? '(none)')
+}
 
 describe('R0-01 SDK contract over the lumithink-child profile', { skip: pipedOk ? false : PIPES_UNAVAILABLE }, () => {
   let mock: MockMessagesServer
@@ -50,12 +55,35 @@ describe('R0-01 SDK contract over the lumithink-child profile', { skip: pipedOk 
       first.events.some(event => JSON.stringify(event).includes('"assistant"')),
       'the collected event stream must contain the committed assistant message',
     )
+    const firstTypes = eventTypes(first.events)
+    // The first turn emits the deterministic pre-request sequence; the exact
+    // tail depends on streaming timing, so only the stable prefix is pinned.
+    assert.deepEqual(
+      firstTypes.slice(0, 6),
+      ['agent/inbox/spliced', 'turn/start', 'agent/inbox/spliced', 'step/start', 'system/message', 'user/message'],
+      'the first turn must emit the deterministic pre-request event sequence',
+    )
+    for (const required of ['request/header', 'assistant/message', 'turn/end']) {
+      assert.ok(firstTypes.includes(required), `the first turn must stream a ${required} event (saw ${firstTypes.join(', ')})`)
+    }
 
     const second = await started.harness.run('一道数学题不会，其他作业也不想写。', { sessionId: first.sessionId })
     assert.ok(second.finalResponse.includes('MOCK-OK'))
     // The second turn carries the accumulated history: user + assistant + user.
     assert.ok(second.finalResponse.includes('messages=3'))
-    assert.ok(second.events.length > first.events.length)
+    // The second turn replays the session surface instead of re-deriving it,
+    // so its event set differs from the first turn's pre-request frames. What
+    // the contract actually requires is that the turn is fully streamed and
+    // bracketed by turn/step boundaries.
+    const secondTypes = eventTypes(second.events)
+    for (const required of ['turn/start', 'step/start', 'user/message', 'assistant/message', 'step/end', 'turn/end']) {
+      assert.ok(secondTypes.includes(required), `the second turn must stream a ${required} event (saw ${secondTypes.join(', ')})`)
+    }
+    assert.ok(
+      second.events.some(event => JSON.stringify(event).includes('MOCK-OK')),
+      'the streamed assistant message must carry the synthetic model text',
+    )
+    assert.equal(second.sessionId, first.sessionId, 'multi-turn runs must stay in the same synthetic session')
   })
 
   it('refuses further runs after close() and leaves no running subprocess', async () => {
@@ -78,9 +106,23 @@ describe('R0-01 SDK contract over the lumithink-child profile', { skip: pipedOk 
     for (const record of records) {
       assert.equal(record.method, 'POST')
       assert.ok(record.path.endsWith('/v1/messages'), `unexpected egress path: ${record.path}`)
-      assert.ok(record.authorization.includes('dsh-poc-synthetic-key'))
+      // The pinned deepseek adapter authenticates with `x-api-key`. The mock
+      // records only the sanitized shape, so this proves the synthetic
+      // credential was used without the value ever being stored.
+      assert.equal(
+        record.apiKeyHeader,
+        SYNTHETIC_API_KEY,
+        'every model request must carry exactly the synthetic credential placeholder',
+      )
+      assert.equal(record.apiKeyLength, SYNTHETIC_API_KEY.length)
+      assert.ok(
+        !JSON.stringify(records).includes('sk-'),
+        'no real-looking provider credential may appear in the egress evidence',
+      )
       // The model never saw a tool schema: the profile mounts no tool providers.
       assert.deepEqual(record.advertisedTools, [])
     }
+    // The only endpoint reached is the loopback mock.
+    assert.match(started.mockBaseUrl, /^http:\/\/127\.0\.0\.1:\d+$/)
   })
 })
