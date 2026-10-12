@@ -128,17 +128,20 @@ pnpm run test:r0:egress     # 意外外发（非 loopback 模型端点）阻断
   上传工件失败不至于让必要检查通过（`Fail the job if any gate step failed` 统一判定）。
 - 无产物 / 空报告 / 截断报告 / 不可解析报告 / 缺失必需测试 / 出现 skip 一律 fail-closed。
 
-### 5.1 实测 CI 结果（PR HEAD `0f5af085fe007c06225c1a7ec71924e12ae41b3e`）
+### 5.1 实测 CI 结果（本 PR 双平台已通过的运行）
 
-Run: <https://github.com/lybym/LumiThink/actions/runs/38284852142>
+Run: <https://github.com/lybym/LumiThink/actions/runs/38285080377>
 
 | 平台 | 状态 | 实测结果 | Job URL |
 | --- | --- | --- | --- |
-| ubuntu-latest | **PASS** | tests 35 / pass 35 / fail 0 / skipped 0；门禁 PASS（baseline 35，required 4/4）；门禁自证 23 PASS；外发守卫 PASS | <https://github.com/lybym/LumiThink/actions/runs/38284852142/job/114930642101> |
-| windows-latest | **PASS** | tests 35 / pass 35 / fail 0 / skipped 0；门禁 PASS（baseline 35，required 4/4）；门禁自证 23 PASS；外发守卫 PASS | <https://github.com/lybym/LumiThink/actions/runs/38284852142/job/114930642371> |
+| ubuntu-latest（`Linux` / `X64`） | **PASS** | tests 35 / pass 35 / fail 0 / skipped 0；门禁 PASS（baseline 35，required 4/4）；门禁自证 23 PASS / 0 skipped；外发守卫 PASS | <https://github.com/lybym/LumiThink/actions/runs/38285080377/job/114931396178> |
+| windows-latest（`Windows` / `X64`） | **PASS** | tests 35 / pass 35 / fail 0 / skipped 0；门禁 PASS（baseline 35，required 4/4）；门禁自证 23 PASS / 0 skipped；外发守卫 PASS | <https://github.com/lybym/LumiThink/actions/runs/38285080377/job/114931395670> |
 
 两个平台都断言安装后的实际版本为 `node v24.21.0` / `pnpm 10.34.7`，并让
 `pnpm install --frozen-lockfile` 以 "Lockfile is up to date" 通过。
+
+前一次同样双绿的运行（内容等价、仅本文件与运行时诊断步骤不同）：
+<https://github.com/lybym/LumiThink/actions/runs/38284852142>。
 
 ### 5.2 首轮 CI 发现并修复的问题（记录以免回归）
 
@@ -153,7 +156,7 @@ PR HEAD `f1dfbdb` 的首轮 CI：`windows-latest` PASS，`ubuntu-latest` FAIL。
   判据触发，导致断言信息误导。门禁自证现已**从加载到的报告推导**期望值并先归一化无关
   结果，因此即使基线报告是红的，也仍能证明"被测的那条规则会 BLOCK"。
 
-PR: <https://github.com/lybym/LumiThink/pull/9> · 最终 HEAD SHA：见 PR HEAD。
+PR: <https://github.com/lybym/LumiThink/pull/9> · 最终 HEAD SHA 以 PR 页面为准（本文件为证据记录，仅在其自身内容变更时更新）。
 
 ## 6. 防回归与组合配置检查（`--dump-config` 组合树）
 
