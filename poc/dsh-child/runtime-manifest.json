@@ -1,0 +1,20 @@
+{
+  "issueUrl": "https://github.com/lybym/LumiThink/issues/6",
+  "dshTag": "dsh-v0.2.0-rc.2",
+  "packages": {
+    "@deepseek-ai/dsh": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-sdk-client": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-subprocess": "0.2.0-rc.2"
+  },
+  "profile": {
+    "name": "lumithink-child",
+    "bundles": [],
+    "patchFile": "profiles/lumithink-child/cordis.patch.yml"
+  },
+  "lockfile": "pnpm-lock.yaml",
+  "nodeEngines": ">=22",
+  "verifiedNode": "v24.21.0",
+  "platform": "win32-x64",
+  "syntheticOnly": true,
+  "notes": "Verified against npm dist-tag next: 0.2.0-rc.2 == GitHub release dsh-v0.2.0-rc.2 (2026-09-29 UTC). The 0.2.1-alpha.2 alpha line is explicitly NOT used as the default baseline per docs/DSH_UPSTREAM.md. Regenerate evidence with: pnpm install && pnpm run test:r0"
+}

@@ -1,0 +1,26 @@
+{
+  "name": "@lumithink/poc-dsh-child",
+  "version": "0.1.0",
+  "private": true,
+  "description": "R0-01 PoC: validate the pinned DeepSeek Harness TypeScript SDK against an isolated, explicitly allowlisted lumithink-child profile. Synthetic data only — never import real child data.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test-isolation=none --test tests/manifest.spec.ts tests/mock-model.spec.ts tests/privacy/child-env.spec.ts tests/security/profile-whitelist.spec.ts tests/contracts/sdk.e2e.spec.ts tests/security/negative-tool.spec.ts",
+    "test:r0": "node -e \"fs.mkdirSync('reports',{recursive:true})\" && node --experimental-strip-types --test-isolation=none --test --test-reporter=junit --test-reporter-destination=reports/r0-01-acceptance.xml --test-reporter=spec --test-reporter-destination=stdout tests/manifest.spec.ts tests/mock-model.spec.ts tests/privacy/child-env.spec.ts tests/security/profile-whitelist.spec.ts tests/contracts/sdk.e2e.spec.ts tests/security/negative-tool.spec.ts"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-sdk-client": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-subprocess": "0.2.0-rc.2"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^24.0.0",
+    "js-yaml": "^4.1.0",
+    "typescript": "^5.6.0"
+  }
+}

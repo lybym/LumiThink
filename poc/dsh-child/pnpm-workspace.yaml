@@ -1,0 +1,13 @@
+# Single-package project file; in pnpm >=10 it also hosts install settings.
+# The bundled runtime and CI runners resolve modules through a plain
+# node_modules tree; pnpm's isolated junction layout breaks ESM resolution on
+# this Windows sandbox. A hoisted (npm-like) layout keeps the pinned
+# dependency graph from pnpm-lock.yaml while keeping resolution portable.
+nodeLinker: hoisted
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': false
+  '@google/genai': false
+  esbuild: false
+  koffi: false
+  node-pty: false
+  protobufjs: false

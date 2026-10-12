@@ -1,0 +1,10 @@
+{
+  "name": "lumithink-child-profile",
+  "private": true,
+  "description": "LumiThink R0-01 minimal-permission child profile: explicit Cordis allowlist, no bundles. Composition is fully declared in cordis.patch.yml and must never include Shell/PTY, generic FS, arbitrary HTTP fetch, auto plugin install, session-log upload, or feedback telemetry services.",
+  "dsh": {
+    "profile": {
+      "bundles": []
+    }
+  }
+}

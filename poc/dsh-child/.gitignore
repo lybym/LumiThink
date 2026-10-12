@@ -1,0 +1,6 @@
+# PoC runtime state and generated reports stay out of the repository.
+node_modules/
+.pnpm-store/
+.r0/
+reports/
+*.log
