@@ -11,7 +11,8 @@
     "test:r0:gate": "node --experimental-strip-types src/report-gate-cli.ts summarize reports/r0-01-acceptance.xml && node --experimental-strip-types src/report-gate-cli.ts check reports/r0-01-acceptance.xml",
     "test:r0:gate-tests": "node --experimental-strip-types --test-isolation=none --test tests/gate/report-gate.spec.ts",
     "test:r0:egress": "node --experimental-strip-types src/egress-cli.ts",
-    "test:r0": "pnpm run test:r0:run && pnpm run test:r0:gate && pnpm run test:r0:gate-tests && pnpm run test:r0:egress"
+    "test:r0:sanitize": "node --experimental-strip-types src/sanitize-artifact.ts reports/r0-01-acceptance.xml reports/r0-01-acceptance.sanitized.xml",
+    "test:r0": "pnpm run test:r0:run && pnpm run test:r0:gate && pnpm run test:r0:gate-tests && pnpm run test:r0:egress && pnpm run test:r0:sanitize"
   },
   "engines": {
     "node": "24.x"

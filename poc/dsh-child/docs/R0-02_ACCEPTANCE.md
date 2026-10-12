@@ -48,9 +48,10 @@ pnpm run test:r0:run        # 生成 reports/r0-01-acceptance.xml
 pnpm run test:r0:gate       # 写入报告合同 + 基线/零 SKIP/4 项必需测试门禁（fail-closed）
 pnpm run test:r0:gate-tests # 证明门禁本身在缺失/空/不可解析/不一致/跳过报告上会 BLOCK
 pnpm run test:r0:egress     # 意外外发（非 loopback 模型端点）阻断
+pnpm run test:r0:sanitize   # 上传前脱敏：绝对路径 → 仓库相对路径，hostname 抹除
 ```
 
-`pnpm run test:r0` 串行执行上述四步（测试 → 合同+门禁 → 门禁自证 → 外发守卫）。
+`pnpm run test:r0` 串行执行上述五步（测试 → 合同+门禁 → 门禁自证 → 外发守卫 → 报告脱敏）。
 
 ## 3. 35 项测试清单（本次本地运行）
 

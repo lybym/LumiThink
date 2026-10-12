@@ -47,7 +47,7 @@ cd poc/dsh-child
 pnpm install --frozen-lockfile   # 固定 lockfile 安装；不运行任何依赖构建脚本
 pnpm run typecheck               # TypeScript 严格检查
 pnpm test                        # R0 验收套件（35 项，含 4 项曾 SKIP 的 E2E/负向工具测试）
-pnpm run test:r0                 # 官方验收入口：跑测试 → 写报告合同 → 零 SKIP 门禁 → 门禁自证 → 外发守卫
+pnpm run test:r0                 # 官方验收入口：跑测试 → 合同+零 SKIP 门禁 → 门禁自证 → 外发守卫 → 报告脱敏
 ```
 
 `pnpm run test:r0` 依次执行（报告基线为 **35 项**；另有 23 项门禁自证测试单独运行）：
@@ -58,6 +58,7 @@ pnpm run test:r0                 # 官方验收入口：跑测试 → 写报告�
 | `test:r0:gate` | 写入报告合同（`tests` / `skipped` / `r0-contract-version`，由解析行推导）并执行 fail-closed 门禁：基线总数、failed=0、errors=0、**skipped=0**、4 项必需测试存在且实际执行 |
 | `test:r0:gate-tests` | 证明门禁本身在缺失/空/截断/不可解析/不一致/跳过/失败报告上会 BLOCK |
 | `test:r0:egress` | 意外外发守卫：模型端点必须是 loopback，凭据必须是合成占位符 |
+| `test:r0:sanitize` | 上传前脱敏：把报告中的绝对路径改写为仓库相对路径、抹除 hostname，残留绝对路径即 BLOCK |
 
 要求：Node **24.x**（验证基线 v24.21.0，win32-x64；`package.json` `engines.node` 固定为 `24.x`），
 pnpm **10**（验证基线 10.34.7；pnpm 11 会改变 lockfile/install 语义），能访问 npm registry。

@@ -150,10 +150,8 @@ jobs:
 
       - name: Sanitize the JUnit artifact (strip absolute paths)
         if: ${{ !cancelled() }}
-        continue-on-error: true
         working-directory: poc/dsh-child
-        run: |
-          node -e "const fs=require('node:fs');const src='reports/r0-01-acceptance.xml';const dst='reports/r0-01-acceptance.sanitized.xml';if(!fs.existsSync(src)){console.error('no report to sanitize');process.exit(1)}let raw=fs.readFileSync(src,'utf8');raw=raw.replace(/(?:[A-Za-z]:)?[\\\\/](?:[^\"<>\\s]*[\\\\/])*(poc[\\\\/]dsh-child[\\\\/][^\"<>\\s]*)/g,'\$1');raw=raw.replace(/hostname=\"[^\"]*\"/g,'hostname=\"(redacted)\"');fs.writeFileSync(dst,raw);console.log('sanitized report written to '+dst)"
+        run: pnpm run test:r0:sanitize
 
       - name: Upload sanitized report and diagnostics
         if: always()
