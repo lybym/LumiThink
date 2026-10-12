@@ -38,6 +38,8 @@ R0-01 在受限沙箱中因 piped stdio 不可用被 SKIP 的 4 项测试，本�
 | DSH | `@deepseek-ai/dsh` / `-sdk-client` / `-subprocess` = **0.2.0-rc.2** |
 | 模型路由 | 仅本机合成 Messages mock（`127.0.0.1:<临时端口>`），无任何真实 API Key |
 | DSH_HOME | 每次运行使用**全新的临时目录**（`<tmp>/lumithink-child-home-*` 或显式的 `DSH_HOME`），从不读取开发者真实的 `~/.dsh` |
+| 被测代码版本（git SHA） | 本地证据取自本分支提交 `9009afd896352de76ef1d63a699e5e9c00e022cb`（此后仅有本文件与运行时诊断步骤的文档性改动） |
+| 安装 | `pnpm install --frozen-lockfile`（"Lockfile is up to date"，`git status` 无 lockfile 改动） |
 
 执行命令（仓库内 `poc/dsh-child`）：
 
