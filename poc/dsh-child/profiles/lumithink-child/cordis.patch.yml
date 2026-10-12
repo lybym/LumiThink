@@ -1,0 +1,117 @@
+# lumithink-child — LumiThink R0-01 explicit minimal-permission profile.
+#
+# Composition contract (Issue #6 / R0_DSH_POC.md R0-B):
+#   * This profile declares ZERO bundles; every service row below is the
+#     complete, explicit allowlist. Nothing else may be mounted.
+#   * Only these capabilities are listed: SDK JSON-RPC serving, the agent
+#     kernel (agent loop, prompt assembly, model adapter, session), safety
+#     invariants, and the (empty) restricted tool registry.
+#   * Deliberately NOT mounted (each omission is a security decision):
+#       - @deepseek-ai/dsh-session-log-deepseek  (session log upload; default enabled:true upstream)
+#       - @deepseek-ai/dsh-plugin-package-inventory-deepseek (auto plugin install path)
+#       - @deepseek-ai/dsh-sandbox-local / dsh-sandbox-policy (upstream default is danger-full-access)
+#       - @deepseek-ai/dsh-subprocess-local / dsh-terminal / dsh-terminal-bash (PTY/Shell)
+#       - @deepseek-ai/dsh-tool-bash-persistent / dsh-tool-pwsh-persistent (Shell tools)
+#       - @deepseek-ai/dsh-mcp-resources / dsh-mcp-client (unrestricted MCP)
+#       - any tool-fs / tool-web / tool-subagent providers (generic FS, HTTP fetch, subagents)
+#       - feedback / product-telemetry-otel / session-telemetry-otel plugins
+#   * The model adapter (llm-deepseek) routes ONLY to $DSH_POC_MOCK_BASE_URL
+#     (a local synthetic Messages mock). If the variable is absent the profile
+#     falls back to the loopback discard port, which always fails closed —
+#     it can never fall back to the public DeepSeek API.
+
+- insert:
+    # --- SDK JSON-RPC serving -------------------------------------------------
+    - id: sdk-app-startup
+      name: '@deepseek-ai/dsh-sdk-app'
+      config:
+        profile: lumithink-child
+
+    - id: sdk-jsonrpc-server
+      name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
+      inject: [sdkAppStartup, loader]
+      config:
+        maxTokensAsSuccess: false
+
+    # --- Model adapter (synthetic-only route) ---------------------------------
+    - id: deepseek-llm-api-extensions
+      name: '@deepseek-ai/dsh-deepseek-llm-api-extensions'
+
+    - id: llm-deepseek
+      name: '@deepseek-ai/dsh-llm-deepseek-api-key'
+      config:
+        apiKeyEnv: DEEPSEEK_API_KEY
+        baseURL: !!js process.env.DSH_POC_MOCK_BASE_URL ?? 'http://127.0.0.1:9'
+        reasoningEffort: 'off'
+        defaultContextWindow: 32768
+        streamIdleTimeoutMs: 60000
+
+    # --- Agent kernel ----------------------------------------------------------
+    - id: timer
+      name: '@deepseek-ai/cordis-plugin-timer'
+
+    - id: llm
+      name: '@deepseek-ai/dsh-llm'
+
+    - id: session
+      name: '@deepseek-ai/dsh-session'
+
+    - id: session-title
+      name: '@deepseek-ai/dsh-session-title'
+      config:
+        fallbackMaxWords: 5
+        fallbackMaxBytes: 40
+        maxTitleBytes: 80
+
+    - id: session-projection
+      name: '@deepseek-ai/dsh-session-projection'
+
+    - id: system-prompt
+      name: '@deepseek-ai/dsh-system-prompt'
+      config:
+        includeHarnessIdentity: false
+        includeRuntimeContext: false
+        personaPrefix: >-
+          你是 LumiThink 合成测试环境中的助手（R0-01 PoC）。你明确标识自己是 AI，
+          只进行文本对话；环境中没有注册任何工具，你不能执行命令、读写文件或访问网络。
+          不要声称自己具有执行代码或访问文件系统的能力。
+
+    - id: tools
+      name: '@deepseek-ai/dsh-tools'
+
+    - id: agent
+      name: '@deepseek-ai/dsh-agent'
+
+    - id: llm-retry
+      name: '@deepseek-ai/dsh-llm-retry'
+
+    - id: jobs
+      name: '@deepseek-ai/dsh-jobs-local'
+
+    # --- Safety invariants (kept from the upstream kernel) ---------------------
+    - id: invariants
+      name: '@deepseek-ai/dsh-invariants'
+
+    - id: session-invariant
+      name: '@deepseek-ai/dsh-session/invariant'
+
+    - id: agent-invariant
+      name: '@deepseek-ai/dsh-agent/invariant'
+
+    - id: scope-invariant
+      name: '@deepseek-ai/dsh-scope/invariant'
+
+    - id: agent-loop-invariant
+      name: '@deepseek-ai/dsh-agent-loop/invariant'
+
+    - id: agent-loop
+      name: '@deepseek-ai/dsh-agent-loop'
+      config:
+        agents: []
+
+    # --- Session persistence (isolated DSH_HOME only) --------------------------
+    - id: sessions
+      name: '@deepseek-ai/dsh-session-persistence-jsonl'
+      config:
+        root: !!js dshHomePath('sessions')
+        compression: none
