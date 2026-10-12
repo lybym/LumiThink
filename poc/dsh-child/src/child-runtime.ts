@@ -26,16 +26,27 @@ export function isolatedDshHome(): string {
   return join(pocWorkDir(), 'dsh-home')
 }
 
-/** The profile directory as DSH resolves it: `$DSH_HOME/profiles/<name>`. */
-export async function materializeProfileIntoHome(): Promise<string> {
-  const home = isolatedDshHome()
-  const profileDir = join(home, 'profiles', 'lumithink-child')
+/**
+ * Materialize the committed `lumithink-child` profile files into a DSH home
+ * (the profile directory as DSH resolves it: `$DSH_HOME/profiles/<name>`).
+ *
+ * Callers MUST await this before spawning the runtime: the child resolves its
+ * profile from disk at boot, and an unmaterialized home fails with
+ * `profile "lumithink-child" does not exist`.
+ */
+export async function materializeProfileInto(dshHome: string): Promise<string> {
+  const profileDir = join(dshHome, 'profiles', 'lumithink-child')
   await mkdir(profileDir, { recursive: true })
   const source = join(import.meta.dirname, '..', 'profiles', 'lumithink-child')
   const { copyFile } = await import('node:fs/promises')
   await copyFile(join(source, 'package.json'), join(profileDir, 'package.json'))
   await copyFile(join(source, 'cordis.patch.yml'), join(profileDir, 'cordis.patch.yml'))
   return profileDir
+}
+
+/** Materialize the profile into the PoC's default isolated home. */
+export function materializeProfileIntoHome(): Promise<string> {
+  return materializeProfileInto(isolatedDshHome())
 }
 
 export interface StartedChild {
@@ -61,16 +72,7 @@ export async function startChildHarness(options: {
   const dshHome = options.sharedHome === true
     ? isolatedDshHome()
     : await mkdtemp(join(tmpdir(), 'lumithink-child-home-'))
-  if (options.sharedHome === true) {
-    await materializeProfileIntoHome()
-  } else {
-    const { mkdir, copyFile } = await import('node:fs/promises')
-    const profileDir = join(dshHome, 'profiles', 'lumithink-child')
-    await mkdir(profileDir, { recursive: true })
-    const source = join(import.meta.dirname, '..', 'profiles', 'lumithink-child')
-    await copyFile(join(source, 'package.json'), join(profileDir, 'package.json'))
-    await copyFile(join(source, 'cordis.patch.yml'), join(profileDir, 'cordis.patch.yml'))
-  }
+  await materializeProfileInto(dshHome)
   const harness = new DeepSeekHarness({
     profile: 'lumithink-child',
     dshHome,

@@ -13,7 +13,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import yaml from 'js-yaml'
 import { buildChildEnv } from './child-env.ts'
-import { isolatedDshHome, materializeProfileIntoHome } from './child-runtime.ts'
+import { isolatedDshHome, materializeProfileInto } from './child-runtime.ts'
 
 /** The dump renders DSH's custom `!!js` config expressions verbatim; parse them as literal strings. */
 const jsExpressionTag = new yaml.Type('tag:yaml.org,2002:js', {
@@ -73,13 +73,20 @@ function resolvePocPackageManifest(req: NodeRequire, packageName: string): strin
 /**
  * Run the dump for the isolated lumithink-child profile and parse the rows.
  *
+ * The profile is fully materialized into the exact home the child uses
+ * BEFORE the spawn below: `spawnSync` blocks the event loop, so any pending
+ * asynchronous continuation cannot run until after the child has exited. On
+ * a clean environment (fresh clone / CI, where `.r0/` is gitignored and
+ * absent) an unawaited materialization leaves the home empty and the child
+ * fails with `profile "lumithink-child" does not exist`.
+ *
  * Output is captured through file-descriptor redirection (`stdio: ['ignore',
  * fd, fd]`), which works in every environment — including confined sandboxes
  * where piped child stdio is unavailable.
  */
-export function dumpProfileConfig(options: { dshHome?: string } = {}): DumpResult {
+export async function dumpProfileConfig(options: { dshHome?: string } = {}): Promise<DumpResult> {
   const dshHome = options.dshHome ?? isolatedDshHome()
-  void materializeProfileIntoHome()
+  await materializeProfileInto(dshHome)
   const bin = resolveDshBin()
   const scratch = mkdtempSync(join(tmpdir(), 'lumithink-dump-'))
   const outPath = join(scratch, 'dump.txt')

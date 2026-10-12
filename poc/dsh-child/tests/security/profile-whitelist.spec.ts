@@ -5,9 +5,13 @@
  * arbitrary HTTP fetch, auto plugin install, session-log upload, feedback
  * telemetry, or subagent capabilities.
  */
-import { describe, it } from 'node:test'
+import { existsSync } from 'node:fs'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { dumpProfileConfig, type DumpEntry } from '../../src/dump-config.ts'
+import { dumpProfileConfig, type DumpEntry, type DumpResult } from '../../src/dump-config.ts'
 
 /** Plugin package names that must never be mounted in the child profile. */
 const FORBIDDEN_PLUGIN_NAMES = [
@@ -91,7 +95,10 @@ function findRow(entries: DumpEntry[], id: string): DumpEntry | undefined {
 }
 
 describe('lumithink-child composed profile whitelist (dump-config evidence)', () => {
-  const dump = dumpProfileConfig()
+  let dump: DumpResult
+  before(async () => {
+    dump = await dumpProfileConfig()
+  })
 
   it('mounts exactly the explicit allowlist rows', () => {
     const names = dump.entries.map(entry => entry.name).filter((name): name is string => typeof name === 'string')
@@ -139,5 +146,40 @@ describe('lumithink-child composed profile whitelist (dump-config evidence)', ()
     const sessions = findRow(dump.entries, 'sessions')
     assert.ok(sessions !== undefined)
     assert.ok(String(sessions.config?.root).includes("dshHomePath('sessions')"))
+  })
+})
+
+/**
+ * Regression for Review P1-1: `spawnSync` blocks the event loop, so the
+ * profile materialization must be awaited into the exact home the dump uses
+ * BEFORE the child process starts. On a clean environment (fresh clone / CI,
+ * where `.r0/` is gitignored and absent) the first run previously failed with
+ * `profile "lumithink-child" does not exist`. A home that never contained the
+ * profile must therefore still produce a complete, allowlisted dump.
+ */
+describe('clean DSH_HOME first run (fresh clone / CI regression)', () => {
+  it('materializes the profile into an empty home and dumps the allowlist', async () => {
+    const cleanHome = await mkdtemp(join(tmpdir(), 'lumithink-clean-home-'))
+    try {
+      const cleanDump = await dumpProfileConfig({ dshHome: cleanHome })
+
+      // The profile files must have landed in the exact home the child used.
+      const materialized = join(cleanHome, 'profiles', 'lumithink-child')
+      assert.equal(existsSync(join(materialized, 'package.json')), true, 'profile package.json not materialized into the clean home')
+      assert.equal(existsSync(join(materialized, 'cordis.patch.yml')), true, 'profile patch file not materialized into the clean home')
+
+      const names = cleanDump.entries.map(entry => entry.name).filter((name): name is string => typeof name === 'string')
+      assert.ok(names.length > 0, 'the composed tree must not be empty on a clean first run')
+      for (const required of REQUIRED_ROWS) {
+        const row = findRow(cleanDump.entries, required.id)
+        assert.ok(row !== undefined, `required row ${required.id} missing on clean first run`)
+        assert.ok(!row.disabled, `required row ${required.id} must not be disabled on clean first run`)
+      }
+      const agentLoop = findRow(cleanDump.entries, 'agent-loop')
+      assert.ok(agentLoop !== undefined, 'agent-loop row missing on clean first run')
+      assert.deepEqual(agentLoop.config?.agents, [])
+    } finally {
+      await rm(cleanHome, { recursive: true, force: true })
+    }
   })
 })
