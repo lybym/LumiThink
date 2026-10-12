@@ -10,6 +10,8 @@
 - **先打通一条垂直闭环，再扩展其他场景**；每一个阶段都要有端到端使用价值。
 - **设备、固件、模型与 UI 是可替换的边缘能力**，不能成为儿童成长平台的核心依赖。
 - **单用户、单 Linux 云服务器、模块化单体优先**；不因“未来可能有千台设备”而预先上微服务、IoT 平台和消息总线。
+- **主 Harness 已选型为 DeepSeek Harness（DSH）**：一切皆插件、最小权限自定义 Profile、SDK 集成、版本锁定；LangGraph 和其他候选不再是默认路线。
+- **跟踪上游但不自动升级**：官方 RC / Stable 出现时进行变更审查，发布 LumiThink 兼容性评估后才可人工升级。
 - **评测、安全和数据治理从 R1 开始，不是交付末期补丁。**
 - R0–R2 用合成测试数据开发；未完成隐私/权限验收之前，不导入真实的儿童历史对话、录音或敏感家庭信息。
 - 研发可重排，但任何被后置的 P0 安全门槛不能因此绕开。
@@ -43,6 +45,11 @@
 - [ ] 审查现有 Next.js 页面、Prisma `RawEvent` 与 `CognitiveProfile`；标记为“可迁移 / 重写 / 废弃”。
 - [ ] 更新 README 以正确指向 2.0（现有 README 描述旧版产品，尚未更新）。
 - [ ] 发布 `ADR`：设备无关、模型无关、循证优先、模块化单体、隐私规则。
+- [x] 确定主 Harness：DSH / Cordis（架构决策见 [ADR-001](./adr/0001-deepseek-harness.md)）；下一步验收其儿童环境可用性。
+- [ ] 审核 DSH `web` / `sdk` / `sdk-minimal` 默认功能及 Session/遥测数据流；生成最小权限 `lumithink-child` Profile，并证明不暴露 Shell、文件系统和未经批准的外部网络访问。
+- [ ] 验证 TypeScript SDK 与 Next.js/Fastify/Node API 之间的流式请求、取消、会话恢复、工具权限和隔离策略。
+- [ ] 锁定 DSH 精确版本及 Cordis 插件兼容矩阵；实现不修改上游核心的覆写和注入。
+- [ ] 建立 [DSH_UPSTREAM.md](./DSH_UPSTREAM.md) 的版本监控、评估、发布与回退制度。
 - [ ] 确立私有开发数据边界：真实儿童信息不得进入公开示例、Issue、日志和 CI 工件。
 
 ### 退出门槛
@@ -63,7 +70,8 @@
 | --- | --- | --- |
 | R1-01 | 统一 `InteractionEvent` / `AgentResponse`、Session、request_id | JSON Schema/类型契约测试；错误输入被拒绝 |
 | R1-02 | Model Gateway（Provider、Mock、超时、取消、预算） | 可替换模型；故障时清晰降级 |
-| R1-03 | Harness 主链路：Input Gate / Context Builder / Orchestrator / Tool Gate / Output Gate | Trace 可见规则、模型、工具和时间 |
+| R1-03 | DSH/Cordis 插件组合：Input Gate / Context Builder / Skill Router / Tool Gate / Output Gate | Trace 可见规则、模型、工具和时间；未改上游 Agent Loop |
+| R1-03a | 专用 `lumithink-child` Profile 的最小权限与 SDK 接入 | 实测无 Shell/PTY/任意读写、无非必要会话/反馈上传；白名单工具越权被拒绝 |
 | R1-04 | Persona v0：身份、表达风格与儿童关系边界 | Persona 稳定性场景回归 |
 | R1-05 | 最小 Web 儿童端：文字输入、流式回复、停止、清空本轮 | 电脑和触屏浏览器可完成完整交互 |
 | R1-06 | 监护人最小权限与隐私告知、功能开关 | 未授权访问和跨角色访问被拒绝 |
@@ -250,17 +258,17 @@
 
 ## 11. 首阶段技术路线：先讨论、再冻结
 
-### 候选默认值（尚未做正式 ADR）
+### 已确定主架构及待验证的实现细节（ADR-001）
 
 | 主题 | 当前倾向 | 尚待确认 |
 | --- | --- | --- |
-| 架构 | Linux 云服务器上的模块化单体 | 首选 Python FastAPI Agent Core + Next.js Web，R0 完成 PoC 冻结 |
+| 架构 | Linux 云服务器 + Next.js Web + Node/TypeScript DSH Runtime | API/SDK 进程与部署拓扑仍需 PoC |
 | 儿童 Web | 复用 Next.js + TypeScript | 现有目录复用程度与升级成本 |
 | 数据存储 | SQLite 作为首期事实源 | 版本、迁移、备份和并发边界 |
-| Agent | **LangGraph + LangChain（Python）** 复用状态编排、Checkpoint、人工中断及模型工具生态 | R0 用双专业场景验证模型兼容与治理边界；不重写 Agent Loop |
-| 完整 Harness 候选 | Deep Agents 作为可选技术来源/研究基线 | 不默认开放通用 Shell、文件读写、自动改写记忆与子 Agent |
-| Evaluation | `pytest` + 开源 DeepEval + 人工审核合成案例 | LLM Judge 辅助评分，严重儿童安全测试使用确定性阻断与人工审核 |
-| Tracing | 最小化本地结构化 Trace + OpenTelemetry | Langfuse 可选，不因自托管追踪堆叠数据库服务 |
+| Agent | **DeepSeek Harness（DSH）+ Cordis 插件**，复用 Agent Loop/Session/SDK/Tool Pipeline | 固定精确版本，使用自定义儿童最小权限 Profile；R0 进行实机安全与插件集成验收 |
+| Harness 扩展 | 自建 LumiThink Cordis 插件 + 经审核的 MCP/Skill | 不开放 Shell、通用文件写入、自动插件安装、未授权子 Agent；插件版本锁定 |
+| Evaluation | TypeScript 测试（Vitest）+ 合成场景回放 + 人工审核；DeepEval 视兼容性选用 | 安全断言与权限测试不可仅依赖 LLM Judge |
+| Tracing | DSH Session/Trace + 本地脱敏审计；非必要遥测禁用 | Session JSONL/Checkpoint/备份的保留和删除须独立验收；Langfuse 非首期必需 |
 | 接口 | Schema-first JSON / HTTP，按需 SSE/WS | 事件定义和流式传输细节 |
 | Eval | 固定合成场景、策略断言、模型辅助评估 | 人工校验标准及基线 |
 | 部署 | 单台 Linux + 容器或受控进程 | 访问域名、TLS、监控和备份 |
@@ -270,7 +278,7 @@
 
 1. **R1 第一个儿童体验究竟是什么？** 普通陪伴式探索对话、阅读理解，还是困难任务启动支持。
 2. **首版是否需要长期记忆？** 推荐只做明确授权的偏好示范与纠错预留，不自动形成人格判断。
-3. **开源 Harness 如何落地？** 默认 FastAPI + LangGraph/ LangChain（Python）+ Next.js，PoC 核查跨模型调用、Checkpoint、工具限制与授权。
+3. **DSH 如何安全落地？** 已选 DSH + TypeScript；PoC 检查 Cordis 插件、SDK Profile、版本锁定、模型兼容、Session/遥测最小化、工具白名单与授权。
 4. **模型服务的选择与数据边界？** 中国境内可用的 API、成本、留存、敏感儿童信息的外发策略。
 5. **首发验收基线怎样制定？** 先挑选可人工审核的合成对话样例，并明确不能出现的行为。
 
@@ -289,5 +297,6 @@
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
 | 2.0.0-draft | 2026-10-12 | 从单一数学诊断工具重构为儿童成长 Agent 平台；引入 Harness、Memory、Evidence、Persona、安全评估和多模态路线 |
+| 2.0.0-draft.2 | 2026-10-12 | 冻结 DSH/Cordis 主 Harness 架构与插件化理念；引入上游 RC/Stable 版本治理与最小权限 Profile 验收 |
 
 **下一步讨论主题：R0 收口与 R1 MVP 的具体需求、后端语言、模型/API、数据结构及第一批验收测试。**
