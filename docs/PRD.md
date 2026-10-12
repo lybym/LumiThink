@@ -25,6 +25,7 @@
 5. **Multimodal and device-agnostic**：文字、语音、触屏、鼠标及可视化场景共享会话和儿童模型；核心不依赖 ESP32、XVF3800 或某一家模型。
 6. **Human-governed evolution**：策略、人格、记忆规则的高影响变更必须经过评价和适当的监护人审核；系统不得自动改写自己的顶层规则。
 7. **Privacy by design**：最小收集、默认不长期留存原始音频、凭据与儿童数据分离、可审计和可删除。
+8. **Everything is a plugin（架构决策）**：主 Agent Runtime 选择 DeepSeek Harness（DSH）与 Cordis 插件组合；LumiThink 的领域规则、记忆、证据和客户端协议采用独立接口与可审计插件实现，而不是修改 DSH 上游核心。
 
 ## 2. 用户、角色与任务
 
@@ -110,6 +111,17 @@
 | FR-015 | 游戏化复杂场景与自定义内容创作 | P2 | 具有明确教育目标和退出/停用机制 |
 
 ## 5. Harness 行为契约
+
+### 5.0 运行时基座决策（ADR-001）
+
+- **已确定**：采用 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）作为主 Harness Runtime。核心设计原则是 Cordis **Everything is a Plugin**，尽可能复用官方 Agent Loop、Session、Prompt、模型 Adapter、受控 Tool Pipeline 和 SDK。
+- **架构边界**：LumiThink 的 Persona、Evidence/Skill Registry、Child Memory、Safety Policy、场景命令及客户端协议属于项目领域能力；通过 SDK/自定义 Cordis 插件/受控服务与 DSH 集成。业务数据不可直接依赖 DSH 私有事件格式，避免上游升级造成数据绑定。
+- **首选技术路径**：复用现有 Next.js/TypeScript 前端；TypeScript 作为首期 Core/插件语言。是否采用独立 Node API 进程或 Next.js API 与 DSH SDK 的组合，由 R0 容器和生命周期 PoC 确定；不引入非必要 Python 服务。
+- **不直接使用官方默认 Profile**：单独构造/验证 `lumithink-child`，默认不得拥有 Shell、PTY、通用文件读写、外部任意网络、自动插件安装、未授权子 Agent、系统命令与管理员操作；所有工具通过正向白名单和服务端角色鉴权。
+- **数据保护**：DSH 当前是 Developer Preview 且未经安全审计，官方默认 `session-log-deepseek` 可能上传会话日志，默认反馈遥测也可能包含会话前缀。儿童专用 Profile 必须禁用非必要日志/遥测上传，并对任何实际模型 API 外发独立审查；Session JSONL、Checkpoint/持久化及备份纳入删除策略。
+- **版本治理**：监控 [GitHub Releases](https://github.com/deepseek-ai/deepseek-harness/releases) 中 RC 和正式版，生产固定经验收的精确版本及插件版本；升级采用隔离测试 → 兼容性审查 → 安全/隐私回归 → 人工审批 → 灰度/回退。详见 [ADR-001](./adr/0001-deepseek-harness.md) 与 [DSH_UPSTREAM.md](./DSH_UPSTREAM.md)。
+
+
 
 每轮请求采用可观测、可中断的流水线：
 
@@ -246,7 +258,7 @@
 | 旧仓库认知评分误用 | 冻结旧 `CognitiveProfile` 逻辑，迁移为证据结构 | R0/R2 |
 | 第三方 API 处理儿童数据 | 数据流审计、脱敏/最小化与授权 | R0/R1 |
 | 首个专业场景怎么选 | 阅读 vs 困难任务启动，先统一验收后选 | 下一轮讨论 |
-| Core 框架与语言 | 优先复用活跃的开源 LangGraph（Python）实现可审计 Harness；Next.js 保留 Web。Deep Agents 仅选配所需能力，不开放通用 shell/文件写入。 | R0/R1 做技术验证与 ADR |
+| DSH 框架与语言 | **已选择 DSH（Cordis，TypeScript）** 为主运行时；Next.js 作为 Web 入口，专用低权限 Profile 及 SDK 集成需先通过 R0 PoC；LangGraph 不作为默认路线。 | R0 验证/ADR-001 |
 | 是否一开始加入视觉场景 | 先文本 Harness，尽早验证一个场景契约 | 下一轮讨论 |
 
 ## 14. 相关设计文档（待建立）
