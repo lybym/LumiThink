@@ -131,17 +131,23 @@ pnpm run test:r0:sanitize   # 上传前脱敏：绝对路径 → 仓库相对路
 
 ### 5.1 实测 CI 结果（本 PR 双平台已通过的运行）
 
-Run: <https://github.com/lybym/LumiThink/actions/runs/38285080377>
+Run: <https://github.com/lybym/LumiThink/actions/runs/38285704740>
 
 | 平台 | 状态 | 实测结果 | Job URL |
 | --- | --- | --- | --- |
-| ubuntu-latest（`Linux` / `X64`） | **PASS** | tests 35 / pass 35 / fail 0 / skipped 0；门禁 PASS（baseline 35，required 4/4）；门禁自证 23 PASS / 0 skipped；外发守卫 PASS | <https://github.com/lybym/LumiThink/actions/runs/38285080377/job/114931396178> |
-| windows-latest（`Windows` / `X64`） | **PASS** | tests 35 / pass 35 / fail 0 / skipped 0；门禁 PASS（baseline 35，required 4/4）；门禁自证 23 PASS / 0 skipped；外发守卫 PASS | <https://github.com/lybym/LumiThink/actions/runs/38285080377/job/114931395670> |
+| ubuntu-latest（`Linux` / `X64`） | **PASS** | tests 35 / pass 35 / fail 0 / skipped 0；门禁 PASS（baseline 35，required 4/4）；门禁自证 23 PASS / 0 skipped；外发守卫 PASS；脱敏报告已上传 | <https://github.com/lybym/LumiThink/actions/runs/38285704740/job/114933440593> |
+| windows-latest（`Windows` / `X64`） | **PASS** | tests 35 / pass 35 / fail 0 / skipped 0；门禁 PASS（baseline 35，required 4/4）；门禁自证 23 PASS / 0 skipped；外发守卫 PASS；脱敏报告已上传 | <https://github.com/lybym/LumiThink/actions/runs/38285704740/job/114933440983> |
 
 两个平台都断言安装后的实际版本为 `node v24.21.0` / `pnpm 10.34.7`，并让
 `pnpm install --frozen-lockfile` 以 "Lockfile is up to date" 通过。
 
-前一次同样双绿的运行（内容等价、仅本文件与运行时诊断步骤不同）：
+本次两个平台的工件 `r0-acceptance-{ubuntu,windows}-latest` 都包含
+`r0-01-acceptance.sanitized.xml`：`file="poc/dsh-child/tests/..."`（绝对路径已改写）、
+`hostname="(redacted)"`，并带合同注释 `r0-contract-version 1 / tests 35 / suites 8 /
+pass 35 / fail 0 / errors 0 / cancelled 0 / skipped 0`。
+
+同日更早的双绿运行（内容等价，仅文档与诊断步骤不同）：
+<https://github.com/lybym/LumiThink/actions/runs/38285317552> ·
 <https://github.com/lybym/LumiThink/actions/runs/38284852142>。
 
 ### 5.2 首轮 CI 发现并修复的问题（记录以免回归）
@@ -158,6 +164,16 @@ PR HEAD `f1dfbdb` 的首轮 CI：`windows-latest` PASS，`ubuntu-latest` FAIL。
   结果，因此即使基线报告是红的，也仍能证明"被测的那条规则会 BLOCK"。
 
 PR: <https://github.com/lybym/LumiThink/pull/9> · 最终 HEAD SHA 以 PR 页面为准（本文件为证据记录，仅在其自身内容变更时更新）。
+
+### 5.3 第二处 CI 发现并修复的问题
+
+在 `ubuntu-latest` 首次全绿、而 `windows-latest` 只上传了诊断文件之后确认：把绝对路径
+改写成相对路径的**内联 Node 一行命令是 bash 引号写法**，在 Windows runner 上失败；由于该
+步骤带 `continue-on-error`，job 仍然全绿但**没有上传脱敏报告**——即"成功与失败都要有脱敏
+工件"这条验收标准在同一 PR 里被静默削弱。修复方式：把脱敏逻辑移入
+`src/sanitize-artifact.ts`，通过 `pnpm run test:r0:sanitize` 在每个 OS 上执行，并去掉
+`continue-on-error`（脱敏失败即 job 失败）。脱敏器在输入缺失/为空/不可解析、或改写后仍存在
+绝对路径时一律 BLOCK。
 
 ## 6. 防回归与组合配置检查（`--dump-config` 组合树）
 
