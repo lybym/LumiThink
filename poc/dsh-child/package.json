@@ -2,15 +2,20 @@
   "name": "@lumithink/poc-dsh-child",
   "version": "0.1.0",
   "private": true,
-  "description": "R0-01 PoC: validate the pinned DeepSeek Harness TypeScript SDK against an isolated, explicitly allowlisted lumithink-child profile. Synthetic data only — never import real child data.",
+  "description": "R0-01/R0-02 PoC: validate the pinned DeepSeek Harness TypeScript SDK against an isolated, explicitly allowlisted lumithink-child profile, with a fail-closed zero-skip acceptance gate. Synthetic data only — never import real child data.",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test-isolation=none --test tests/manifest.spec.ts tests/mock-model.spec.ts tests/privacy/child-env.spec.ts tests/security/profile-whitelist.spec.ts tests/contracts/sdk.e2e.spec.ts tests/security/negative-tool.spec.ts",
-    "test:r0": "node -e \"fs.mkdirSync('reports',{recursive:true})\" && node --experimental-strip-types --test-isolation=none --test --test-reporter=junit --test-reporter-destination=reports/r0-01-acceptance.xml --test-reporter=spec --test-reporter-destination=stdout tests/manifest.spec.ts tests/mock-model.spec.ts tests/privacy/child-env.spec.ts tests/security/profile-whitelist.spec.ts tests/contracts/sdk.e2e.spec.ts tests/security/negative-tool.spec.ts"
+    "test": "node --experimental-strip-types --test-isolation=none --test tests/manifest.spec.ts tests/mock-model.spec.ts tests/privacy/child-env.spec.ts tests/security/profile-whitelist.spec.ts tests/security/egress-guard.spec.ts tests/contracts/sdk.e2e.spec.ts tests/security/negative-tool.spec.ts",
+    "test:r0:run": "node -e \"fs.mkdirSync('reports',{recursive:true})\" && node --experimental-strip-types --test-isolation=none --test --test-reporter=junit --test-reporter-destination=reports/r0-01-acceptance.xml --test-reporter=spec --test-reporter-destination=stdout tests/manifest.spec.ts tests/mock-model.spec.ts tests/privacy/child-env.spec.ts tests/security/profile-whitelist.spec.ts tests/security/egress-guard.spec.ts tests/contracts/sdk.e2e.spec.ts tests/security/negative-tool.spec.ts",
+    "test:r0:gate": "node --experimental-strip-types src/report-gate-cli.ts summarize reports/r0-01-acceptance.xml && node --experimental-strip-types src/report-gate-cli.ts check reports/r0-01-acceptance.xml",
+    "test:r0:gate-tests": "node --experimental-strip-types --test-isolation=none --test tests/gate/report-gate.spec.ts",
+    "test:r0:egress": "node --experimental-strip-types src/egress-cli.ts",
+    "test:r0:sanitize": "node --experimental-strip-types src/sanitize-artifact.ts reports/r0-01-acceptance.xml reports/r0-01-acceptance.sanitized.xml",
+    "test:r0": "pnpm run test:r0:run && pnpm run test:r0:gate && pnpm run test:r0:gate-tests && pnpm run test:r0:egress && pnpm run test:r0:sanitize"
   },
   "engines": {
-    "node": ">=22.6.0"
+    "node": "24.x"
   },
   "dependencies": {
     "@deepseek-ai/dsh": "0.2.0-rc.2",

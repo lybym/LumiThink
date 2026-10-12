@@ -21,6 +21,18 @@ export interface MockScript {
    * profile mounts no tools — used by the negative permission test.
    */
   requestBashToolOnce?: boolean
+  /**
+   * Exact `command` string the synthetic `tool_use` block asks the unmounted
+   * `bash` tool to run. Defaults to a harmless synthetic echo. The negative
+   * test points this at a side-effect canary (creating a sentinel file) so an
+   * actually-executed command would be detectable.
+   */
+  bashCommand?: string
+  /**
+   * Tool name the synthetic `tool_use` block requests. Defaults to `bash`;
+   * the negative test also probes other unmounted tools.
+   */
+  bashToolName?: string
 }
 
 /** One sanitized request record kept as egress evidence. */
@@ -29,6 +41,17 @@ export interface MockRequestRecord {
   path: string
   /** `authorization` header reduced to present/absent + placeholder. */
   authorization: string
+  /**
+   * Sanitized `x-api-key` header — the credential header the pinned
+   * `@deepseek-ai/dsh-llm-deepseek-api-key` adapter actually sends.
+   * `undefined` means the header was absent; the placeholder string means it
+   * was present and carried the synthetic key; `'present (non-synthetic)'`
+   * means a value that is not exactly the synthetic key arrived (which the
+   * negative credential tests treat as an egress violation).
+   */
+  apiKeyHeader?: string
+  /** Byte length of the received API key value; `0` when the header was absent. */
+  apiKeyLength: number
   model?: string
   /** Whether the request asked for a streamed response. */
   stream?: boolean
@@ -49,7 +72,10 @@ interface MessagesRequest {
   messages?: Array<{ role?: string; content?: unknown }>
 }
 
-const SYNTHETIC_KEY_PLACEHOLDER = 'dsh-poc-synthetic-key'
+export const SYNTHETIC_API_KEY = 'dsh-poc-synthetic-key'
+const SYNTHETIC_KEY_PLACEHOLDER = SYNTHETIC_API_KEY
+/** Recorded when a non-synthetic credential value arrives (must never happen). */
+const NON_SYNTHETIC_PLACEHOLDER = 'present (non-synthetic)'
 
 function firstText(content: unknown): string {
   if (typeof content === 'string') return content
@@ -62,6 +88,29 @@ function firstText(content: unknown): string {
     }
   }
   return ''
+}
+
+/** Header values arrive as `string | string[] | undefined`; normalize to one string. */
+function headerValue(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) return value[0] ?? ''
+  return value ?? ''
+}
+
+/**
+ * Reduce an `x-api-key` value to sanitized evidence.
+ *
+ * The real credential value is NEVER recorded: the record only says whether
+ * the header was present, whether it was byte-for-byte the synthetic PoC key,
+ * and how long it was.
+ */
+function sanitizeApiKeyHeader(value: string | string[] | undefined): string | undefined {
+  const raw = headerValue(value)
+  if (raw.length === 0) return undefined
+  return raw === SYNTHETIC_API_KEY ? SYNTHETIC_KEY_PLACEHOLDER : NON_SYNTHETIC_PLACEHOLDER
+}
+
+function apiKeyLengthOf(value: string | string[] | undefined): number {
+  return headerValue(value).length
 }
 
 /** The synthetic model server. Always `close()` it after the test. */
@@ -123,6 +172,8 @@ export class MockMessagesServer {
       authorization: (req.headers.authorization ?? '').length > 0
         ? `present (${SYNTHETIC_KEY_PLACEHOLDER})`
         : 'absent',
+      apiKeyHeader: sanitizeApiKeyHeader(req.headers['x-api-key']),
+      apiKeyLength: apiKeyLengthOf(req.headers['x-api-key']),
       model: parsed.model,
       stream: parsed.stream,
       messageCount: Array.isArray(parsed.messages) ? parsed.messages.length : undefined,
@@ -150,7 +201,12 @@ export class MockMessagesServer {
     if (this.script.requestBashToolOnce && !this.bashToolRequested) {
       this.bashToolRequested = true
       // Negative test: ask for a tool that the profile never mounted.
-      blocks.push({ type: 'tool_use', id: `toolu_${randomUUID().slice(0, 8)}`, name: 'bash', input: { command: 'echo pwned' } })
+      blocks.push({
+        type: 'tool_use',
+        id: `toolu_${randomUUID().slice(0, 8)}`,
+        name: this.script.bashToolName ?? 'bash',
+        input: { command: this.script.bashCommand ?? 'echo pwned' },
+      })
       blocks.push({ type: 'text', text: 'TOOL_ATTEMPTED' })
     } else {
       blocks.push({ type: 'text', text: turnText })

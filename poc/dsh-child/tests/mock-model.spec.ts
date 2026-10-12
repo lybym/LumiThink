@@ -7,7 +7,7 @@
  */
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { MockMessagesServer } from '../src/mock-model.ts'
+import { MockMessagesServer, SYNTHETIC_API_KEY } from '../src/mock-model.ts'
 
 interface SseFrame {
   event: string
@@ -127,6 +127,45 @@ describe('synthetic Messages mock wire contract', () => {
       // the negative-permission evidence.
       assert.deepEqual(records[0]!.advertisedTools, ['bash'])
       assert.equal(records[1]!.path, '/other/path')
+    } finally {
+      await server.close()
+      server = undefined
+    }
+  })
+
+  it('records the x-api-key credential in sanitized form only', async () => {
+    server = new MockMessagesServer()
+    const base = await server.listen()
+    try {
+      // The pinned deepseek adapter authenticates with `x-api-key`, not
+      // `authorization`. The record must prove the synthetic placeholder was
+      // used without ever storing a credential value.
+      await fetch(`${base}/v1/messages`, {
+        method: 'POST',
+        headers: { 'x-api-key': SYNTHETIC_API_KEY, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'x' }] }),
+      })
+      await fetch(`${base}/v1/messages`, {
+        method: 'POST',
+        headers: { 'x-api-key': 'sk-a-real-looking-credential' },
+        body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'y' }] }),
+      })
+      await fetch(`${base}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'z' }] }),
+      })
+
+      const records = server.requestRecords
+      assert.equal(records.length, 3)
+      assert.equal(records[0]!.apiKeyHeader, SYNTHETIC_API_KEY)
+      assert.equal(records[0]!.apiKeyLength, SYNTHETIC_API_KEY.length)
+      // A non-synthetic value is flagged by shape only — never stored verbatim.
+      assert.equal(records[1]!.apiKeyHeader, 'present (non-synthetic)')
+      assert.ok(!JSON.stringify(records).includes('sk-a-real-looking-credential'))
+      // An absent header is distinguishable from an empty one.
+      assert.equal(records[2]!.apiKeyHeader, undefined)
+      assert.equal(records[2]!.apiKeyLength, 0)
     } finally {
       await server.close()
       server = undefined

@@ -18,6 +18,7 @@ interface RuntimeManifest {
   lockfile: string
   nodeEngines: string
   verifiedNode: string
+  verifiedPnpm: string
   platform: string
   syntheticOnly: boolean
 }
@@ -32,6 +33,15 @@ function satisfiesMinimum(version: string, minimum: string): boolean {
     if (current !== required) return current > required
   }
   return true
+}
+
+/** True when `version` satisfies an `x.y.z`-style Node range (`24.x`, `>=22.6.0`, `24.21.0`). */
+function satisfiesNodeRange(version: string, range: string): boolean {
+  if (range.startsWith('>=')) return satisfiesMinimum(version, range.slice(2))
+  const parts = range.split('.')
+  if (parts.length === 1) return version.split('.')[0] === parts[0]
+  if (parts[1] === 'x') return version.split('.')[0] === parts[0]
+  return satisfiesMinimum(version, range) && satisfiesMinimum(range, version)
 }
 
 describe('runtime manifest matches the installed world', () => {
@@ -63,13 +73,25 @@ describe('runtime manifest matches the installed world', () => {
     // comparison must cover minor/patch too (Node 22.0–22.5 cannot run the suite).
     const pkg = JSON.parse(readFileSync(join(pocRoot, 'package.json'), 'utf8')) as { engines?: { node?: string } }
     assert.equal(pkg.engines?.node, manifest.nodeEngines, 'manifest nodeEngines must match package.json engines.node')
-    assert.equal(manifest.nodeEngines, '>=22.6.0')
-    const minimum = manifest.nodeEngines.replace('>=', '')
+    assert.equal(manifest.nodeEngines, '24.x')
     assert.ok(
-      satisfiesMinimum(process.version.slice(1), minimum),
+      satisfiesNodeRange(process.version.slice(1), manifest.nodeEngines),
       `node ${process.version} does not satisfy ${manifest.nodeEngines}`,
     )
     assert.equal(manifest.syntheticOnly, true)
     assert.equal(manifest.issueUrl, 'https://github.com/lybym/LumiThink/issues/6')
+  })
+
+  it('pins the exact Node and pnpm builds the R0 evidence was produced with', () => {
+    // Reproducibility (Issue #8 AC-A/AC-D): the local evidence and CI must use
+    // a fixed Node build and a pnpm 10 line. pnpm 11 rewrites lockfile/install
+    // semantics, so the toolchain version is part of the pinned baseline.
+    assert.equal(manifest.verifiedNode, 'v24.21.0')
+    assert.equal(manifest.verifiedPnpm, '10.34.7')
+    assert.match(manifest.verifiedPnpm, /^10\./, 'the R0-02 baseline is the pnpm 10 line')
+    assert.ok(
+      satisfiesNodeRange(process.version.slice(1), manifest.verifiedNode.slice(1)),
+      `the recorded evidence Node ${manifest.verifiedNode} must be the Node actually running the suite (saw ${process.version})`,
+    )
   })
 })
