@@ -1,7 +1,8 @@
 # R0-01 PoC — DSH TypeScript SDK × `lumithink-child` 最小权限 Profile
 
-> Issue: <https://github.com/lybym/LumiThink/issues/6>
+> Issue: <https://github.com/lybym/LumiThink/issues/6> · R0-02 零 SKIP 验收: <https://github.com/lybym/LumiThink/issues/8>
 > 任务书: [R0 DSH PoC 任务书](https://github.com/lybym/LumiThink/blob/docs/v2-product-roadmap-20261012/docs/R0_DSH_POC.md) · 架构决策: [ADR-001](https://github.com/lybym/LumiThink/blob/docs/v2-product-roadmap-20261012/docs/adr/0001-deepseek-harness.md)
+> R0-02 验收摘要: [docs/R0-02_ACCEPTANCE.md](docs/R0-02_ACCEPTANCE.md)（环境、35 项结果、CI 门禁与证据）
 >
 > **只使用合成数据（`child_demo_001`）。禁止导入任何真实儿童数据。**
 
@@ -43,13 +44,24 @@ Cordis 服务树由**显式白名单**（`profiles/lumithink-child/cordis.patch.
 
 ```bash
 cd poc/dsh-child
-pnpm install          # 固定 lockfile 安装；不运行任何依赖构建脚本
-pnpm run typecheck    # TypeScript 严格检查
-pnpm test             # 完整 PoC 验收套件
-pnpm run test:r0      # 同上，并生成 reports/r0-01-acceptance.xml（机器可读 PASS/FAIL）
+pnpm install --frozen-lockfile   # 固定 lockfile 安装；不运行任何依赖构建脚本
+pnpm run typecheck               # TypeScript 严格检查
+pnpm test                        # R0 验收套件（35 项，含 4 项曾 SKIP 的 E2E/负向工具测试）
+pnpm run test:r0                 # 官方验收入口：跑测试 → 写报告合同 → 零 SKIP 门禁 → 门禁自证 → 外发守卫
 ```
 
-要求：Node >= 22.6.0（`--experimental-strip-types` 的最低版本；验证基线 v24.21.0，win32-x64），pnpm >= 10，能访问 npm registry。
+`pnpm run test:r0` 依次执行（报告基线为 **35 项**；另有 23 项门禁自证测试单独运行）：
+
+| 子命令 | 作用 |
+| --- | --- |
+| `test:r0:run` | 运行 35 项测试并生成 `reports/r0-01-acceptance.xml` |
+| `test:r0:gate` | 写入报告合同（`tests` / `skipped` / `r0-contract-version`，由解析行推导）并执行 fail-closed 门禁：基线总数、failed=0、errors=0、**skipped=0**、4 项必需测试存在且实际执行 |
+| `test:r0:gate-tests` | 证明门禁本身在缺失/空/截断/不可解析/不一致/跳过/失败报告上会 BLOCK |
+| `test:r0:egress` | 意外外发守卫：模型端点必须是 loopback，凭据必须是合成占位符 |
+
+要求：Node **24.x**（验证基线 v24.21.0，win32-x64；`package.json` `engines.node` 固定为 `24.x`），
+pnpm **10**（验证基线 10.34.7；pnpm 11 会改变 lockfile/install 语义），能访问 npm registry。
+CI 见 `.github/workflows/r0-zero-skip-gate.yml`（`ubuntu-latest` + `windows-latest`，零 SKIP 硬门禁）。
 模型请求全部指向本机 mock，**不需要也不使用**任何真实 API Key
 （子进程内的 `DEEPSEEK_API_KEY` 是固定占位符 `dsh-poc-synthetic-key`）。
 
@@ -83,17 +95,21 @@ rm -rf .r0 reports
 ```text
 poc/dsh-child/
 ├── profiles/lumithink-child/   # 零 bundle 显式 Profile（package.json + cordis.patch.yml）
+├── docs/R0-02_ACCEPTANCE.md    # R0-02 验收摘要（环境 / 35 项结果 / CI 证据）
 ├── src/
 │   ├── child-env.ts            # 子进程环境清洗与合成路由
 │   ├── child-runtime.ts        # SDK 启动封装（隔离 DSH_HOME + Profile）
 │   ├── dump-config.ts          # --dump-config 运行/解析（组合树取证）
-│   └── mock-model.ts           # 本地合成 Messages mock + 外发记录
+│   ├── mock-model.ts           # 本地合成 Messages mock + 脱敏外发记录
+│   ├── report-gate.ts          # fail-closed JUnit 验收门禁 + 报告合同（基线 / 零 SKIP / 必需测试）
+│   └── egress.ts               # 意外外发守卫（非 loopback 端点 / 真实凭据阻断）
 ├── tests/
 │   ├── contracts/              # SDK 多轮/流式/关闭契约
-│   ├── security/               # 白名单断言 + 负向工具调用
+│   ├── security/               # 白名单断言 + 负向工具调用 + 外发守卫
 │   ├── privacy/                # 环境隔离与遥测关闭
-│   └── manifest.spec.ts        # 版本锁定探测（CI 可复跑）
-├── runtime-manifest.json       # 精确版本 manifest
+│   ├── gate/                   # 门禁自身的 fail-closed 自证
+│   └── manifest.spec.ts        # 版本/工具链锁定探测（CI 可复跑）
+├── runtime-manifest.json       # 精确版本 manifest（DSH 0.2.0-rc.2 / Node 24.x / pnpm 10.34.7）
 └── pnpm-lock.yaml              # 依赖锁文件
 ```
 
