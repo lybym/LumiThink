@@ -32,6 +32,9 @@
 
 ## 2. R0 · Product Reset（文档与存量审查）
 
+> **执行入口：** [R0 DSH PoC 实施与验收合同](./R0_DSH_POC.md)。第一张开发任务：[Issue #6 · DSH SDK + 儿童最小权限 Profile](https://github.com/lybym/LumiThink/issues/6)。
+
+
 ### 目标
 
 让所有开发工作对准 2.0 的新定位，避免旧版数学认知诊断数据模型悄悄成为新的产品假设。
