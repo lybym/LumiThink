@@ -122,17 +122,38 @@ pnpm run test:r0:egress     # 意外外发（非 loopback 模型端点）阻断
 - `pnpm install --frozen-lockfile` → `pnpm run typecheck` → R0 套件 → 报告合同 + 零 SKIP 门禁
   → 门禁自证 → 意外外发守卫。
 - `permissions: contents: read`、`timeout-minutes: 30`、不使用任何真实模型/API Key
-  （`DEEPSEEK_API_KEY=dsh-poc-synthetic-key`）、隔离 `DSH_HOME`。
+  （`DEEPSEEK_API_KEY=dsh-poc-synthetic-key`）、隔离 `DSH_HOME`
+  （`${{ github.workspace }}/.r0-ci/dsh-home`）。
 - 成功与失败均上传**脱敏**报告与诊断工件（`if: always()`，保留 14 天）；
   上传工件失败不至于让必要检查通过（`Fail the job if any gate step failed` 统一判定）。
 - 无产物 / 空报告 / 截断报告 / 不可解析报告 / 缺失必需测试 / 出现 skip 一律 fail-closed。
 
-| 平台 | 状态 | Run URL |
-| --- | --- | --- |
-| ubuntu-latest | _待本次 PR HEAD 的 CI 结果回填_ | _回填_ |
-| windows-latest | _待本次 PR HEAD 的 CI 结果回填_ | _回填_ |
+### 5.1 实测 CI 结果（PR HEAD `0f5af085fe007c06225c1a7ec71924e12ae41b3e`）
 
-PR 与最终 HEAD SHA：_待回填_。
+Run: <https://github.com/lybym/LumiThink/actions/runs/38284852142>
+
+| 平台 | 状态 | 实测结果 | Job URL |
+| --- | --- | --- | --- |
+| ubuntu-latest | **PASS** | tests 35 / pass 35 / fail 0 / skipped 0；门禁 PASS（baseline 35，required 4/4）；门禁自证 23 PASS；外发守卫 PASS | <https://github.com/lybym/LumiThink/actions/runs/38284852142/job/114930642101> |
+| windows-latest | **PASS** | tests 35 / pass 35 / fail 0 / skipped 0；门禁 PASS（baseline 35，required 4/4）；门禁自证 23 PASS；外发守卫 PASS | <https://github.com/lybym/LumiThink/actions/runs/38284852142/job/114930642371> |
+
+两个平台都断言安装后的实际版本为 `node v24.21.0` / `pnpm 10.34.7`，并让
+`pnpm install --frozen-lockfile` 以 "Lockfile is up to date" 通过。
+
+### 5.2 首轮 CI 发现并修复的问题（记录以免回归）
+
+PR HEAD `f1dfbdb` 的首轮 CI：`windows-latest` PASS，`ubuntu-latest` FAIL。
+
+- `tests/privacy/child-env.spec.ts` 的旧断言用 `env.DSH_HOME.includes(homedir())` 作为
+  "不在开发者 home 内" 的判据；该子串判据在 Linux runner 上不成立（workspace 本身位于
+  `/home/runner/work/...`），属**判据错误**而非隔离失效。现改为断言真实策略：子进程
+  `DSH_HOME` 必须是 PoC 工作目录的子目录、不得等于或位于开发者/runner 的 `~/.dsh` 之内，
+  且显式传入的隔离 `DSH_HOME` 必须被原样采用。
+- 首轮该失败使门禁自证前置的报告本身为红，`failures must be 0` 先于 skip/error/suite
+  判据触发，导致断言信息误导。门禁自证现已**从加载到的报告推导**期望值并先归一化无关
+  结果，因此即使基线报告是红的，也仍能证明"被测的那条规则会 BLOCK"。
+
+PR: <https://github.com/lybym/LumiThink/pull/9> · 最终 HEAD SHA：见 PR HEAD。
 
 ## 6. 防回归与组合配置检查（`--dump-config` 组合树）
 

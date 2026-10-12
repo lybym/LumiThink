@@ -88,13 +88,13 @@ jobs:
           mkdir -p "${DSH_HOME}"
           echo "DSH_HOME=${DSH_HOME}"
 
-      - name: Temporary probe (remove before merge)
+      - name: Report the runner identity and isolated home
         shell: bash
         run: |
           set -euo pipefail
-          echo "HOME=${HOME:-unset} USERPROFILE=${USERPROFILE:-unset} RUNNER_TEMP=${RUNNER_TEMP:-unset}"
-          echo "PWD=$(pwd)"
-          node -e "const os=require('node:os');console.log('node homedir=',os.homedir())"
+          echo "runner_os=${RUNNER_OS} runner_arch=${RUNNER_ARCH} runner_temp=${RUNNER_TEMP:-unset}"
+          echo "isolated_dsh_home=${DSH_HOME}"
+          echo "workspace=$(pwd)"
 
       - name: Frozen-lockfile install
         working-directory: poc/dsh-child
