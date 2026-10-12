@@ -12,6 +12,7 @@ import { installedPackageVersion } from '../src/dump-config.ts'
 interface RuntimeManifest {
   issueUrl: string
   dshTag: string
+  commitSha: string
   packages: Record<string, string>
   profile: { name: string; bundles: unknown[]; patchFile: string }
   lockfile: string
@@ -21,6 +22,18 @@ interface RuntimeManifest {
   syntheticOnly: boolean
 }
 
+/** True when `version` (x.y.z) is at least `minimum` (x.y.z), comparing component-wise. */
+function satisfiesMinimum(version: string, minimum: string): boolean {
+  const have = version.split('.').map(Number)
+  const need = minimum.split('.').map(Number)
+  for (let i = 0; i < 3; i++) {
+    const current = have[i] ?? 0
+    const required = need[i] ?? 0
+    if (current !== required) return current > required
+  }
+  return true
+}
+
 describe('runtime manifest matches the installed world', () => {
   const pocRoot = join(import.meta.dirname, '..')
   const manifestPath = join(pocRoot, 'runtime-manifest.json')
@@ -28,6 +41,7 @@ describe('runtime manifest matches the installed world', () => {
 
   it('pins the exact verified DSH versions', () => {
     assert.equal(manifest.dshTag, 'dsh-v0.2.0-rc.2')
+    assert.match(manifest.commitSha, /^[0-9a-f]{40}$/, 'upstream provenance must pin a full 40-hex git commit SHA')
     for (const [name, version] of Object.entries(manifest.packages)) {
       assert.equal(installedPackageVersion(name), version, `${name} drifted from the manifest`)
     }
@@ -44,9 +58,17 @@ describe('runtime manifest matches the installed world', () => {
   })
 
   it('runs on a compliant Node and never touches real data', () => {
-    const major = Number(process.version.slice(1).split('.')[0])
-    const required = Number(manifest.nodeEngines.replace('>=', ''))
-    assert.ok(major >= required, `node ${process.version} does not satisfy ${manifest.nodeEngines}`)
+    // Type stripping (--experimental-strip-types) requires Node >= 22.6.0;
+    // the manifest must agree with package.json engines.node exactly, and the
+    // comparison must cover minor/patch too (Node 22.0–22.5 cannot run the suite).
+    const pkg = JSON.parse(readFileSync(join(pocRoot, 'package.json'), 'utf8')) as { engines?: { node?: string } }
+    assert.equal(pkg.engines?.node, manifest.nodeEngines, 'manifest nodeEngines must match package.json engines.node')
+    assert.equal(manifest.nodeEngines, '>=22.6.0')
+    const minimum = manifest.nodeEngines.replace('>=', '')
+    assert.ok(
+      satisfiesMinimum(process.version.slice(1), minimum),
+      `node ${process.version} does not satisfy ${manifest.nodeEngines}`,
+    )
     assert.equal(manifest.syntheticOnly, true)
     assert.equal(manifest.issueUrl, 'https://github.com/lybym/LumiThink/issues/6')
   })

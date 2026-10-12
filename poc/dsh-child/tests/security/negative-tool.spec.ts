@@ -37,15 +37,15 @@ describe('model cannot invoke unmounted tools', { skip: canSpawnPipedChild() ? f
   it('fails closed when the model requests the unmounted bash tool', async () => {
     started = await startChildHarness({ mock })
 
-    let rejected = false
-    let finalResponse = ''
+    // The turn either rejects (protocol/unknown-tool) or completes with a
+    // handled tool error; both are acceptable fail-closed outcomes, and in
+    // neither case may executed command output leak into the evidence.
+    let outcome: { kind: 'rejected'; error: unknown } | { kind: 'responded'; finalResponse: string }
     try {
       const result = await started.harness.run('请运行 bash 命令 echo pwned', { sessionId: SYNTHETIC_SESSION })
-      finalResponse = result.finalResponse
-    } catch {
-      // A typed rejection (protocol/unknown-tool) is an acceptable
-      // fail-closed outcome; the assertions below cover both.
-      rejected = true
+      outcome = { kind: 'responded', finalResponse: result.finalResponse }
+    } catch (error) {
+      outcome = { kind: 'rejected', error }
     }
 
     // The model was never shown a bash tool schema in any request.
@@ -55,13 +55,17 @@ describe('model cannot invoke unmounted tools', { skip: canSpawnPipedChild() ? f
       assert.deepEqual(record.advertisedTools, [], 'the runtime advertised a tool schema the profile never mounted')
     }
 
-    if (rejected) {
-      // Fail-closed via rejection: no final response to inspect.
-      assert.equal(finalResponse, '')
+    if (outcome.kind === 'rejected') {
+      // Fail-closed via rejection: it must be a real Error carrying a
+      // non-empty message, and that message must never contain executed
+      // command output (a rejection echoing `pwned` would be a leak).
+      assert.ok(outcome.error instanceof Error, `rejection must be an Error, got ${typeof outcome.error}`)
+      assert.ok(outcome.error.message.length > 0, 'rejection must carry a non-empty message')
+      assert.ok(!outcome.error.message.includes('pwned'), 'a rejection must never contain executed command output')
     } else {
       // Fail-closed via handled tool error: the turn still terminates without
       // executing anything, and no bash output can appear in the response.
-      assert.ok(!finalResponse.includes('pwned'), 'a response must never contain executed command output')
+      assert.ok(!outcome.finalResponse.includes('pwned'), 'a response must never contain executed command output')
     }
   })
 })

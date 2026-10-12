@@ -1,6 +1,7 @@
 {
   "issueUrl": "https://github.com/lybym/LumiThink/issues/6",
   "dshTag": "dsh-v0.2.0-rc.2",
+  "commitSha": "639ed015397290b3745d163aafe02ffee4aa3f84",
   "packages": {
     "@deepseek-ai/dsh": "0.2.0-rc.2",
     "@deepseek-ai/dsh-sdk-client": "0.2.0-rc.2",
@@ -12,9 +13,9 @@
     "patchFile": "profiles/lumithink-child/cordis.patch.yml"
   },
   "lockfile": "pnpm-lock.yaml",
-  "nodeEngines": ">=22",
+  "nodeEngines": ">=22.6.0",
   "verifiedNode": "v24.21.0",
   "platform": "win32-x64",
   "syntheticOnly": true,
-  "notes": "Verified against npm dist-tag next: 0.2.0-rc.2 == GitHub release dsh-v0.2.0-rc.2 (2026-09-29 UTC). The 0.2.1-alpha.2 alpha line is explicitly NOT used as the default baseline per docs/DSH_UPSTREAM.md. Regenerate evidence with: pnpm install && pnpm run test:r0"
+  "notes": "Verified against npm dist-tag next: 0.2.0-rc.2 == GitHub release dsh-v0.2.0-rc.2 (2026-09-29 UTC). The 0.2.1-alpha.2 alpha line is explicitly NOT used as the default baseline per docs/DSH_UPSTREAM.md. commitSha is the lightweight tag refs/tags/dsh-v0.2.0-rc.2 on github.com/deepseek-ai/deepseek-harness (committer date 2026-09-29T09:21:31Z); verify with: gh api repos/deepseek-ai/deepseek-harness/commits/dsh-v0.2.0-rc.2 --jq .sha. Regenerate evidence with: pnpm install && pnpm run test:r0"
 }

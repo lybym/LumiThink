@@ -9,17 +9,6 @@
  * configuration are never forwarded.
  */
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
-import { isAbsolute, join } from 'node:path'
-
-/** Absolute path of the PoC package directory (this file's grandparent). */
-export function pocRoot(): string {
-  return resolve('..', import.meta.dirname)
-}
-
-function resolve(base: string, from: string | undefined): string {
-  if (from === undefined) return base
-  return isAbsolute(from) ? from : join(base, from)
-}
 
 /** Knobs the runtime child needs for one synthetic session. */
 export interface ChildEnvOptions {
@@ -48,8 +37,11 @@ export function buildChildEnv(options: ChildEnvOptions): NodeJS.ProcessEnv {
       kept[key] = value
     }
   }
-  // Windows keeps loading crypto/WSL bits without SystemRoot; keep PATH minimal
-  // but non-empty so the child can resolve system DLLs.
+  // Windows keeps loading crypto/WSL bits without SystemRoot. PATH is the one
+  // variable forwarded verbatim from the parent process — it carries directory
+  // names, not credentials, and the child needs it to resolve system DLLs and
+  // toolchain executables. Everything else is a whitelist rebuild, so no
+  // secret-shaped parent variable can reach the child.
   kept.PATH = process.env.PATH ?? ''
   return Object.freeze({
     ...kept,

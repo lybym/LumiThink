@@ -46,10 +46,10 @@ cd poc/dsh-child
 pnpm install          # 固定 lockfile 安装；不运行任何依赖构建脚本
 pnpm run typecheck    # TypeScript 严格检查
 pnpm test             # 完整 PoC 验收套件
-pnpm run test:r0      # 同上，并生成 reports/r0-01-acceptance.json（机器可读 PASS/FAIL）
+pnpm run test:r0      # 同上，并生成 reports/r0-01-acceptance.xml（机器可读 PASS/FAIL）
 ```
 
-要求：Node >= 22（验证基线 v24.21.0，win32-x64），pnpm >= 10，能访问 npm registry。
+要求：Node >= 22.6.0（`--experimental-strip-types` 的最低版本；验证基线 v24.21.0，win32-x64），pnpm >= 10，能访问 npm registry。
 模型请求全部指向本机 mock，**不需要也不使用**任何真实 API Key
 （子进程内的 `DEEPSEEK_API_KEY` 是固定占位符 `dsh-poc-synthetic-key`）。
 
