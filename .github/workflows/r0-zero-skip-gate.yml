@@ -1,0 +1,185 @@
+name: R0 zero-skip gate
+
+# R0-02 (Issue #8): the DSH SDK E2E / negative-permission evidence must run for
+# real, with zero skips, on both Linux and Windows before an R0 change can be
+# merged. Any missing/empty/unparseable report, any skip, and any unexpected
+# egress to a non-loopback model endpoint fails the gate closed.
+on:
+  pull_request:
+    paths:
+      - 'poc/dsh-child/**'
+      - '.github/workflows/r0-zero-skip-gate.yml'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'poc/dsh-child/**'
+      - '.github/workflows/r0-zero-skip-gate.yml'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+  workflow_dispatch:
+
+# Minimal token: the gate only needs to read the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: r0-zero-skip-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Exact pinned toolchain (Issue #8 AC-A/AC-D). pnpm 11 changes install and
+  # lockfile semantics, so the baseline is pinned to the pnpm 10 line.
+  NODE_VERSION: '24.21.0'
+  PNPM_VERSION: '10.34.7'
+  # Synthetic-only model route: no real provider credential is ever provided.
+  DEEPSEEK_API_KEY: 'dsh-poc-synthetic-key'
+  CI: 'true'
+  # The child runtime must never read a developer's real Harness home.
+  DSH_HOME: ${{ github.workspace }}/.r0-ci/dsh-home
+
+jobs:
+  r0:
+    name: R0 acceptance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install exact pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Install exact Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Assert the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_node="$(node --version)"
+          actual_pnpm="$(pnpm --version)"
+          echo "node=${actual_node} pnpm=${actual_pnpm}"
+          if [ "${actual_node}" != "v${NODE_VERSION}" ]; then
+            echo "::error::Node ${actual_node} is not the pinned v${NODE_VERSION}"
+            exit 1
+          fi
+          if [ "${actual_pnpm}" != "${PNPM_VERSION}" ]; then
+            echo "::error::pnpm ${actual_pnpm} is not the pinned ${PNPM_VERSION}"
+            exit 1
+          fi
+
+      - name: Prepare isolated DSH_HOME
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${DSH_HOME}"
+          mkdir -p "${DSH_HOME}"
+          echo "DSH_HOME=${DSH_HOME}"
+
+      - name: Temporary probe (remove before merge)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "HOME=${HOME:-unset} USERPROFILE=${USERPROFILE:-unset} RUNNER_TEMP=${RUNNER_TEMP:-unset}"
+          echo "PWD=$(pwd)"
+          node -e "const os=require('node:os');console.log('node homedir=',os.homedir())"
+
+      - name: Frozen-lockfile install
+        working-directory: poc/dsh-child
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: poc/dsh-child
+        run: pnpm run typecheck
+
+      - name: R0 test suite (JUnit report + spec output)
+        id: r0_tests
+        working-directory: poc/dsh-child
+        continue-on-error: true
+        run: pnpm run test:r0:run
+
+      - name: Attach the report contract and enforce the zero-skip gate
+        id: r0_gate
+        if: ${{ !cancelled() }}
+        working-directory: poc/dsh-child
+        continue-on-error: true
+        run: pnpm run test:r0:gate
+
+      - name: Prove the gate itself fails closed
+        id: r0_gate_tests
+        if: ${{ !cancelled() }}
+        working-directory: poc/dsh-child
+        continue-on-error: true
+        run: pnpm run test:r0:gate-tests
+
+      - name: Enforce the unexpected-egress guard
+        id: r0_egress
+        if: ${{ !cancelled() }}
+        working-directory: poc/dsh-child
+        continue-on-error: true
+        run: pnpm run test:r0:egress
+
+      - name: Write a sanitized diagnostics summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP:-/tmp}/r0-diagnostics.txt"
+          {
+            echo "os=${RUNNER_OS}"
+            echo "runner_image=${ImageOS:-unknown}"
+            echo "node=$(node --version)"
+            echo "pnpm=$(pnpm --version)"
+            echo "git_sha=${GITHUB_SHA}"
+            echo "dsh_home=${DSH_HOME}"
+            echo "vcs_ref=${GITHUB_REF}"
+          } > "${out}"
+          cat "${out}"
+
+      - name: Sanitize the JUnit artifact (strip absolute paths)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        working-directory: poc/dsh-child
+        run: |
+          node -e "const fs=require('node:fs');const src='reports/r0-01-acceptance.xml';const dst='reports/r0-01-acceptance.sanitized.xml';if(!fs.existsSync(src)){console.error('no report to sanitize');process.exit(1)}let raw=fs.readFileSync(src,'utf8');raw=raw.replace(/(?:[A-Za-z]:)?[\\\\/](?:[^\"<>\\s]*[\\\\/])*(poc[\\\\/]dsh-child[\\\\/][^\"<>\\s]*)/g,'\$1');raw=raw.replace(/hostname=\"[^\"]*\"/g,'hostname=\"(redacted)\"');fs.writeFileSync(dst,raw);console.log('sanitized report written to '+dst)"
+
+      - name: Upload sanitized report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r0-acceptance-${{ matrix.os }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            poc/dsh-child/reports/r0-01-acceptance.sanitized.xml
+            ${{ runner.temp }}/r0-diagnostics.txt
+
+      - name: Fail the job if any gate step failed
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          report() {
+            if [ "$2" != "success" ]; then
+              echo "::error::R0 gate step '$1' concluded '$2'"
+              status=1
+            fi
+          }
+          report "R0 test suite" "${{ steps.r0_tests.outcome }}"
+          report "report contract + zero-skip report gate" "${{ steps.r0_gate.outcome }}"
+          report "gate fail-closed self-tests" "${{ steps.r0_gate_tests.outcome }}"
+          report "unexpected-egress guard" "${{ steps.r0_egress.outcome }}"
+          exit "${status}"
