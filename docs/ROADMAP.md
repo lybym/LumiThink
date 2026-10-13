@@ -1,6 +1,6 @@
 # LumiThink 2.0 产品路线图（ROADMAP）
 
-> 版本：2.0.0-draft ｜ 日期：2026-10-12 ｜ 状态：讨论稿  
+> 版本：2.0.1-draft ｜ 日期：2026-10-13 ｜ 状态：讨论稿（R1-V 生命周期先导与 XVF3800 最终硬件选型已更新）  
 > 上游需求：[PRD.md](./PRD.md)  
 > 本文是 **按能力和验收门槛推进的里程碑计划**，不是已完成清单，也不是开发工期承诺。
 
@@ -25,10 +25,11 @@
 | **R2 · Memory Expansion** | 观察/假设/策略反馈的分层长期记忆 | 在 R1 偏好/事实记忆基础上安全扩展 | 来源、冲突、修订、删除和审批实测通过 |
 | **R3 · Evidence & Skills Expansion** | 强化两项首发 Skill 并扩展专业能力 | Reading Coach 等新增 Skill 和证据审查流程 | 有来源的策略选择、边界测试 + 回归报告 |
 | **R4 · Visual Interaction** | 场景引擎与可操作 Web 画布 | 一个可点选/拖动的互动场景 | 前端即时操作与 Agent 语义事件贯通 |
-| **R5 · Voice & Multimodal** | 接入独立语音客户端 | AI-VOX3/小智与 Web 共用 Agent | 设备适配不影响 Core；打断/重连与隐私通过 |
+| **R1-V · Voice Runtime Lifecycle（并行技术先导）** | Turn Fencing + Cordis Runtime Bridge | 合成环境真取消、实时 Delta 与安全输出栅栏 | R1-V1/V2 通过；不等同于设备已交付 |
+| **R5 · Voice & Multimodal** | 私有化语音实机集成 | XVF3800 + ESP32-S3 / 自建小智 → DSH | 小智私有接入、真实打断/重连与隐私通过 |
 | **R6 · Continuous Improvement** | 个体化评估和受控进化 | 可解释的策略变更建议与版本回退 | 线上/离线效果记录和治理闭环有效 |
 
-**阶段依赖：** R0 → R1 → R2；R3 与 R4 可在 R2 基础能力具备后部分并行；R5 不需要等待 R4 的高级动画；R6 的评测基础从 R1 即开始。
+**阶段依赖：** R0 → R1 → R2；**R1-V 是从 R1 时期并行启动的语音基础设施先导**（不改变 R1 的文字双 Skill 首发目标），R5 需要 R1-V2 的完整门禁再做实机上线；R3 与 R4 可在 R2 基础能力具备后部分并行；R5 不必等待 R4 的高级动画，R6 的评测基础从 R1 开始。
 
 ## 2. R0 · Product Reset（文档与存量审查）
 
@@ -99,6 +100,16 @@
 4. 模型超时、请求取消、工具拒绝、鉴权失败均有测试。
 5. 有人工审核的情绪/学习双专业合成测试用例，覆盖适用、无效、拒绝、危机升级和过度介入；每次路由追踪到已核验 Evidence Card。
 6. 能完成偏好记忆“确认 → 跨会话引用 → 更正 → 删除”闭环，且不需要真实儿童数据。
+
+## 3.5 R1-V · Voice Runtime Lifecycle（跨阶段先导、当前计划）
+
+> 详见 [Voice Runtime 设计合同](./VOICE_RUNTIME.md) / [ADR-002](./adr/0002-voice-runtime-bridge.md) / [硬件选型](./VOICE_HARDWARE.md)。**这是提前解除语音架构阻断项的技术先导，不表示提前完成 R5 设备交付。**
+
+- [ ] **R1-V1：Turn Orchestrator + Fencing**。创建独立 `turn_id`、单调 `epoch`、终态不可逆状态机；合成 100 次 ASR 迟到/重复取消/记忆提交竞态无串轮、旧 TTS 和过期写入 0。
+- [ ] **R1-V2：自定义 Cordis Runtime Bridge**。单一 Bridge 独占 Voice Session 生命周期；内部 `agent.cancel()`、`agent.whenIdle()`、`agent/assistant-stream`，实现 `prompt/cancel/stream/close` 和 Unix Domain Socket 受限控制面；支持安全短句增量 TTS、异常 Worker 回收与最小权限验证。
+- [ ] **R1-V3：跨组件接口合同**。与小智 `client_abort`/TTS 队列/Stop 协议的接口契约、版本管理和合成故障注入。实机最后验收留在 R5。
+- **No-Go**：无法保证旧轮次禁止输出/写入、取消/流式接口绕过儿童安全 Gate，或 Bridge 引入默认危险插件/额外未授权外发时，禁止真实儿童语音上线。
+- **R0 维持不变**：`poc/dsh-child` 继续用 SDK 合成 Mock，35/35 PASS 零 SKIP 基线是独立回归，不因 Voice Bridge 设计选择而重构。
 
 ## 4. R2 · Memory Expansion（可修正的长期了解）
 
@@ -177,11 +188,11 @@
 
 ### 交付
 
-- [ ] `Voice Adapter` 接入小智 WebSocket/Opus 或其他可兼容协议。
-- [ ] 协议握手、身份认证、音频转码、ASR/TTS、会话映射与打断。
-- [ ] 首台测试客户端使用已有 AI-VOX3；未来 XVF3800/XU316 可替换，不构成产品阻塞。
+- [ ] `Voice Adapter` 接入自建 xinnan-tech/xiaozhi-esp32-server 的 WebSocket/Opus 协议，完成 R1-V2 → R5 实机贯通。
+- [ ] 协议握手、可信设备身份绑定、音频转码、ASR/TTS、`turn_id`/`epoch` 映射与真取消；**不能把小智连接 `session_id` 当作稳定儿童身份**。
+- [ ] **目标实机为 XVF3800 + ESP32-S3**（小智板级固件适配）；已有 AI-VOX3 可作为早期对照/调试设备，但不是最终选型。
 - [ ] 语音与文本的 persona、记忆、策略与安全判定一致。
-- [ ] 断线、超时、唤醒后无响应、播放中打断有清晰行为。
+- [ ] 端侧 I2S/AEC、私有化 OTA/握手、断线重连与播放中/思考中/连续打断通过实机故障注入，并验证不存在旧轮次文本/TTS/记忆写入。
 - [ ] 不默认保存原始录音；第三方语音供应商的儿童数据处理受授权约束。
 - [ ] 可选：浏览器画布与语音设备加入同一 Session（若超范围可延至 R6）。
 

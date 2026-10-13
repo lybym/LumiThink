@@ -1,7 +1,7 @@
 # ADR-001：采用 DeepSeek Harness（DSH）作为 LumiThink 主 Harness Runtime
 
 > 决策日期：2026-10-12 ｜ 状态：**已采纳（框架选择已确定，生产可用性待 PoC 验证）**  
-> 关联：[PRD](../PRD.md) · [Roadmap](../ROADMAP.md) · [DSH 上游管理](../DSH_UPSTREAM.md)
+> 关联：[PRD](../PRD.md) · [Roadmap](../ROADMAP.md) · [DSH 上游管理](../DSH_UPSTREAM.md) · **[ADR-002 语音 Cordis Bridge](./0002-voice-runtime-bridge.md)**
 
 ## 背景与目标
 
@@ -57,12 +57,20 @@ LumiThink Web (Next.js) / future Voice Adapter
 - 如果 DSH 的最小权限、数据删除、SDK/流式接入或会话日志外发无法在**不侵入核心源码**的前提下解决，则暂停儿童生产数据接入，提交 ADR 修订并重新评估替代框架。
 - DSH 上游发生破坏性变更时，继续运行最后一版已验证版本；不得在儿童生产环境自动滚动升级。
 
+## 2026-10-13 语音扩展决策补充（ADR-002）
+
+ADR-001 的 **“DSH 是主 Harness Runtime、避免 Fork Agent Loop、儿童专用最小权限 Profile”** 保持不变。新增的 [ADR-002](./0002-voice-runtime-bridge.md) 决定：实时语音采用**同进程自定义 Cordis Runtime Bridge**，Bridge 单独持有语音 Session 的 AgentHandle，通过受保护的本地 IPC 暴露受限的 `prompt/cancel/stream/close`。
+
+锁定的 DSH `0.2.0-rc.2` 进程内 Agent 存在 `cancel()`、`whenIdle()` 和 `agent/assistant-stream`；**官方 TypeScript SDK 尚无 mid-turn cancel**，也不能将 `assistant/message` 的重建误称为实时 Token。保留现有 SDK R0 合成基线，正式语音另设 R1-V 技术先导；Cordis Bridge 的功能/最小权限/恢复仍**待实施与验收**，不代表已通过 DSH-02 的真取消。
+
+终端选择 XVF3800 + ESP32-S3、小智固件和自建 `xiaozhi-esp32-server`；设备侧负责音频，小智负责 ASR/TTS/Stop，LumiThink Turn Orchestrator 负责 `turn_id/epoch`、TTS/音频/记忆栅栏，DSH 执行认知推理。详见 [ARCHITECTURE](../ARCHITECTURE.md) 和 [VOICE_RUNTIME](../VOICE_RUNTIME.md)。
+
 ## R0 必须完成的 DSH PoC
 
 | ID | 验收项 | 必须看到的结果 |
 | --- | --- | --- |
 | DSH-01 | 启动独立 `lumithink-child` Profile | 运行服务树及工具列表与明确白名单完全一致 |
-| DSH-02 | SDK 文本对话、取消、Session 恢复 | 双专业场景成功、多轮可重入且可中断 |
+| DSH-02 | SDK 文本多轮/事件/关闭；后续 Bridge 中途取消和 Session 恢复 | R0 已验 SDK Mock 多轮/close；**SDK 不支持轮次内取消**，真取消/恢复由 R1-V 单独验收 |
 | DSH-03 | 权限测试 | Shell、文件系统、任意外网、安装插件、越权记忆操作均无法从模型调用 |
 | DSH-04 | 隐私数据流 | 非必要 Session 上传/反馈遥测关闭，网络抓包与配置证明外发边界 |
 | DSH-05 | 会话删除与备份 | 被删除的测试对象不再能通过常规会话、缓存或业务存储被检索 |
