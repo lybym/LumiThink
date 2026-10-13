@@ -1,0 +1,85 @@
+# LumiThink 2.0 技术栈与工程基线（TECH_STACK）
+
+> 版本：v0.1 ｜ 日期：2026-10-13 ｜ 状态：**基线已建立（R1-00）**；标注“待定”的项仍未决策  
+> 对应：[Issue #12 · R1-00 工程基线与旧原型审计](https://github.com/lybym/LumiThink/issues/12) ｜ [PRD](./PRD.md) ｜ [Roadmap](./ROADMAP.md) ｜ [ADR-001](./adr/0001-deepseek-harness.md) ｜ [架构](./ARCHITECTURE.md) ｜ [旧资产审计](./LEGACY_AUDIT.md)
+
+本文书面确认 R1-00 建立的工程基线。**“已确认”表示基线代码可安装、可编译、可构建、可启动并通过健康检查（Linux CI 演练）；不表示 2.0 产品能力已实现。**
+
+## 1. 已确认的技术栈（本次基线冻结）
+
+| 层 | 选型 | 版本 | 确认证据 |
+| --- | --- | --- | --- |
+| Web 框架 | Next.js（App Router） | `15.5.27` | 根工程 `next build` + `next start` + `/api/health` 通过（本地 Windows + Linux CI） |
+| UI 运行时 | React / React DOM | `19.3.0` | 旧原型页面（儿童/监护人）可编译、可渲染 |
+| 语言 | TypeScript（strict） | `5.9.3` | `pnpm run typecheck`（`tsc --noEmit`）通过 |
+| 运行时 | Node.js | `24.21.0`（24.x 线） | 与 R0 门禁一致（`engines.node = 24.x`，CI 精确断言） |
+| 包管理 | pnpm | `10.34.7`（10.x 线） | 与 R0 门禁一致（`packageManager` 字段 + CI 精确断言；pnpm 11 锁文件语义不同，明确不使用） |
+| 样式 | Tailwind CSS v3 + PostCSS + Autoprefixer | `3.4.19` | 旧 `app/globals.css` 使用 v3 指令；v3 行与现有原型兼容，v4 迁移留给 R1-05 UI 重做时评估 |
+| 交互动画 | framer-motion | `12.43.0` | `components/kid/visual-math-tool.tsx` 可编译 |
+| 图标 | lucide-react | `1.56.0` | `components/navigation/mode-header.tsx` 可编译 |
+| 持久化 | SQLite（经 Prisma，**仅冻结的旧 schema**） | `prisma` / `@prisma/client` `6.19.3` | 见 §3；新领域持久化待定，基线启动**不需要**数据库 |
+| Agent Runtime | DeepSeek Harness（DSH）SDK | `0.2.0-rc.2`（锁定） | R0 POC（`poc/dsh-child`，35/35 PASS、0 SKIP），保持完全隔离，根工程不依赖 |
+
+## 2. API / DSH SDK 拓扑（书面确认）
+
+**已确认的基线方向：DSH TypeScript SDK 由独立的、长生命周期的 Node 进程持有；Next.js Web 与该进程通过受限 API 交互。**
+
+- 依据：[R0 DSH PoC](./R0_DSH_POC.md) §5 的结论——DSH SDK 会启动子进程，独立长驻进程可避免重复启动、Serverless 短生命周期 API Handler 误起多份 Agent 等问题；R0 的 `poc/dsh-child` 已在独立进程中验证 SDK 行为。
+- **同进程方案（Next.js API 内直接管理 SDK 生命周期）记录为备选**，只有当 R1 集成 PoC 证明独立进程带来不必要的运维复杂度时才复议；切换前必须有新的 PoC 证据与本文档修订。
+- 实时语音的 Cordis Runtime Bridge 拓扑由 [ADR-002](./adr/0002-voice-runtime-bridge.md) 约束，与上述文字端 API 进程**不共享** Agent 生命周期所有权；两者最终进程部署图在 R1-V/R5 落地时补充。
+- 本基线尚未实现任何 API→DSH 集成代码；拓扑确认仅指方向与约束，不表示已验证生产部署形态。
+
+## 3. 数据持久化现状与边界
+
+- `prisma/schema.prisma`（SQLite）是**冻结的旧原型 schema**：`RawEvent` / `CognitiveProfile` 语义不得作为 2.0 业务事实，详见 [LEGACY_AUDIT](./LEGACY_AUDIT.md) 与 `lib/domain/legacy-guard.ts` 的强制守卫。
+- 新领域模型（R1 受控记忆、Evidence、Skill 等）的持久化选型（SQLite 直用 / Prisma 新 schema / 其他）**待定**，由 R1/R2 的数据建模任务决策；决策前不得复用旧 schema 表达新语义。
+- 本次基线**未修改**任何持久化 schema，因此无 DATA_MODEL 变更、无迁移、无迁移测试要求（守卫测试即为“旧数据不得进入新领域”的迁移门禁证据）。
+- 首次启动不需要 `DATABASE_URL`、真实模型密钥或儿童数据：`lib/env.ts` 校验启动环境，`/api/health` 在空环境下返回 `ok`（CI 以“未设置任何密钥/数据库 URL”的干净环境证明）。
+
+## 4. 目录边界（基线约定）
+
+| 目录 | 归属 | 边界规则 |
+| --- | --- | --- |
+| `app/` | Next.js 路由与 UI（旧原型外壳 + 新增 `app/api/health`） | 不直接依赖 DSH 内部类型；不得新增对冻结旧 server actions 的调用 |
+| `components/` | 旧原型 UI 组件（可复用，待 2.0 重验收） | 不承载业务事实；R4 Scene Engine 时再评估 |
+| `lib/domain/` | **2.0 新领域模型唯一入口** | 依赖冻结（测试强制）：禁 import `@prisma/client`、`react`、`next`、`lib/db`；一切进入领域的事实必须经 `ingestDomainFact` / 显式迁移 |
+| `lib/`（其余） | 冻结的旧支撑代码（`lib/db.ts`）+ 新增基础设施（`lib/env.ts`） | 旧 `lib/db.ts` 不被基线运行时引用；不得在新代码中扩散 |
+| `prisma/` | 冻结旧 schema（历史审计参照） | 修改 schema 必须同步 DATA_MODEL + migration + migration test（本次未触碰） |
+| `tests/` | 根工程测试（node:test + TS strip types） | 与 `poc/dsh-child` 的测试体系互不依赖 |
+| `poc/dsh-child/` | **完全隔离的 R0 DSH PoC** | 独立 package.json/pnpm-lock/tsconfig/CI 门禁；根工程与其无依赖关系；根 tsconfig 显式排除 |
+| `docs/` | 2.0 方案、审计、合同 | 与代码状态分离：未实现的能力不得写为已完成 |
+
+## 5. 根工程命令（本地与 CI 一致）
+
+```bash
+# 依赖恢复（postinstall 自动执行 prisma generate；无需 DATABASE_URL）
+pnpm install --frozen-lockfile
+
+# 类型检查 / 测试 / 构建
+pnpm run typecheck
+pnpm test          # 领域守卫 + 环境校验 + 旧工具函数测试（node:test）
+pnpm run build
+
+# 最小启动与健康检查（首次启动无需密钥/儿童数据/数据库）
+pnpm run start --port 3123
+# → GET http://127.0.0.1:3123/api/health 返回 {"status":"ok",...}
+
+# R0 回归（完全独立，保持 35/35 PASS、0 SKIP）
+pnpm run test:r0   # 等价于在 poc/dsh-child 内运行原有 test:r0
+```
+
+CI 门禁：`.github/workflows/r1-baseline-gate.yml`（Ubuntu：干净环境断言 → frozen install → typecheck → test → build → 启动 + 健康检查）；R0 门禁 `.github/workflows/r0-zero-skip-gate.yml` 保持原样。
+
+## 6. R0 / R1 未完成风险（本次书面标注）
+
+| 风险 | 状态 | 归属 |
+| --- | --- | --- |
+| R0 容器/部署层最小权限边界（进程外文件系统、网络出口、数据库密钥隔离）未做 | 未完成，DSH 进程内守卫已验证 | R0 收尾 / R1-08 |
+| R0-C（双 Skill 纵向闭环）、R0-D（Session/Memory 治理）未开始 | 未完成 | R0 → R1 |
+| HARNESS.md 仅为 v0 草案，无实现 | 未完成 | R1-03/R1-07 |
+| 新领域持久化选型未定；旧 schema 与新领域之间的数据迁移策略只有“拒绝 + 显式归档”守卫，尚无批量迁移工具 | 未完成 | R1/R2 |
+| 真实模型接入、流式、取消、成本控制均未实现（基线无模型出网） | 未完成 | R1-02/Iteration B |
+| 监护人端、鉴权、隐私治理未实现；旧 parent 页面文案仍是旧产品语义 | 未完成 | R1-06 |
+| 旧页面在 R1-05 之前仅保证“可编译可启动”，不承诺 2.0 体验 | 进行中约束 | R1-05 |
+
+> 变更本表前先更新对应 Roadmap/Issue；未完成项不得标记为完成。

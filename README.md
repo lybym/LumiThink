@@ -61,21 +61,39 @@ Next.js Web / 触屏 → 同一 LumiThink API / Domain Services
 | [ADR-002](docs/adr/0002-voice-runtime-bridge.md) | 采用自定义 Cordis Runtime Bridge |
 | [R0 DSH PoC](docs/R0_DSH_POC.md) | 合成 POC 合同与安全门禁 |
 | [DSH 上游版本治理](docs/DSH_UPSTREAM.md) | SDK/Cordis/插件版本锁定、升级审查 |
+| [技术栈与工程基线](docs/TECH_STACK.md) | 已确认的 Next.js/Node 24/pnpm 10/SQLite 栈、目录边界与 API/DSH 拓扑 |
+| [旧原型资产审计](docs/LEGACY_AUDIT.md) | app/components/lib/prisma 逐文件处置（可复用/需重写/废弃·冻结） |
+| [Harness 合同 v0](docs/HARNESS.md) | 执行图、State/Context、模型/工具接口、安全断点与评测契约（草案） |
 
 ## 现有代码（尚有历史原型）
 
 ```text
 LumiThink/
-├── app/                      # 旧版 Next.js 数学/儿童/家长页面原型
-├── components/               # 旧版可视化组件
-├── lib/                      # 历史数据库模块
-├── prisma/                   # 历史数据 Schema（不得直接认定为 2.0 正式模型）
-├── poc/dsh-child/            # 已有 R0 SDK + 合成测试 + CI
-├── docs/                     # 2.0 方案、设计和 ADR
-└── .github/workflows/        # R0 Windows/Linux CI 门禁
+├── app/                      # 旧版 Next.js 数学/儿童/家长页面原型（可编译）+ 新增 /api/health
+├── components/               # 旧版可视化组件（可复用占位）
+├── lib/                      # lib/db.ts 为冻结旧模块；lib/domain/ 为 2.0 领域边界；lib/env.ts 为启动校验
+├── prisma/                   # 历史数据 Schema（废弃·冻结，不得直接认定为 2.0 正式模型）
+├── tests/                    # 根工程测试（领域守卫 / 环境校验）
+├── poc/dsh-child/            # 已有 R0 SDK + 合成测试 + CI（完全隔离，根工程不依赖）
+├── docs/                     # 2.0 方案、设计、审计与 ADR
+└── .github/workflows/        # R0 零 SKIP 门禁 + R1 根工程基线门禁
 ```
 
-原型以数学认知为起点，2.0 已扩展为循证儿童陪伴与学习支持平台；旧 README 的“数学能力分数”等说法**不代表新产品承诺**。本仓库主分支目前未提供可直接运行的根目录 `package.json`，请勿把旧原型视为即刻可执行的完整产品。
+原型以数学认知为起点，2.0 已扩展为循证儿童陪伴与学习支持平台；旧 README 的“数学能力分数”等说法**不代表新产品承诺**。旧原型的逐文件处置见 [docs/LEGACY_AUDIT.md](docs/LEGACY_AUDIT.md)：其中含能力分数的旧 server actions（`app/actions/db-init.ts`、`app/actions/userActions.ts`）已标记为**废弃·冻结**，未被任何页面引用，且 `lib/domain/legacy-guard.ts` 会在测试与运行时语义上拒绝旧 `CognitiveProfile` 分数 / `RawEvent` 未迁移进入新领域模型。
+
+### 根工程基线（R1-00 已建立）
+
+根目录现在提供 `package.json`、`pnpm-lock.yaml`、TypeScript 严格配置与测试命令；旧页面可编译、可构建、可启动，并通过 `/api/health` 健康检查。需要 Node **v24.21.0**、pnpm **10.34.7**（与 CI/R0 相同的精确工具链）；**首次启动不需要任何真实模型密钥、儿童数据或数据库**：
+
+```bash
+pnpm install --frozen-lockfile   # postinstall 自动 prisma generate
+pnpm run typecheck
+pnpm test                        # 领域守卫 + 环境校验 + 旧工具函数测试
+pnpm run build
+pnpm run start --port 3123       # GET http://127.0.0.1:3123/api/health → {"status":"ok",...}
+```
+
+该基线仅证明“工程可启动”，不改变旧原型并非 2.0 产品的事实；技术选型与目录边界见 [docs/TECH_STACK.md](docs/TECH_STACK.md)。
 
 ### 可复现的 R0 DSH 测试
 
