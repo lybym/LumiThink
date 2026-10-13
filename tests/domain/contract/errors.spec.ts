@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CONTRACT_ERROR_CODES, ContractValidationError } from "../../../lib/domain/contract/core.ts";
+import {
+  CONTRACT_ERROR_CODES,
+  ContractValidationError,
+  isValidContractTimestamp,
+} from "../../../lib/domain/contract/core.ts";
 
 import {
   CONTRACT_ERROR_REGISTRY,
@@ -179,4 +183,20 @@ test("error envelopes never contain a stack field in the fixture either", () => 
   const serialized = serializeErrorEnvelope(parsed);
   assert.equal(serialized.includes("stack"), false);
   assert.equal(/at\s+\S+\s+\(/.test(serialized), false);
+});
+
+test("toSafeErrorEnvelope fails CLOSED on a degenerate ContractValidationError with zero problems (R1-02 P2 fix)", () => {
+  // R1-01 review P2-b: an empty problems list used to crash the sanctioned
+  // error exit (problems[0] undefined). It must produce CONTRACT_INTERNAL.
+  const envelope = toSafeErrorEnvelope(new ContractValidationError([]));
+  assert.equal(envelope.error.code, "CONTRACT_INTERNAL");
+  assert.equal(envelope.error.retriable, true);
+  assert.deepEqual(envelope.error.details, { problemCount: 0 });
+  assert.equal(isValidContractTimestamp(envelope.occurredAt), true);
+  // Correlation ids are still re-validated on this path.
+  const withIds = toSafeErrorEnvelope(new ContractValidationError([]), {
+    safeContext: { requestId: "req_test0001_echoOK01", traceId: "not-a-valid-trace" },
+  });
+  assert.equal(withIds.error.requestId, "req_test0001_echoOK01");
+  assert.equal(withIds.error.traceId, undefined);
 });
