@@ -1,6 +1,6 @@
 # R0 — LumiThink × DeepSeek Harness 最小可用 PoC
 
-> 状态：待实施，所有验收项均未标记为 PASS ｜ 创建：2026-10-12  
+> 状态：实施中（2026-10-13 更新）——R0-A 基本完成、R0-B 进程内边界完成（容器/部署层边界待做）、R0-E 部分完成；R0-C / R0-D 未开始。证据见 [PR #7](https://github.com/lybym/LumiThink/pull/7)、[PR #9](https://github.com/lybym/LumiThink/pull/9) 与 `poc/dsh-child/docs/R0-02_ACCEPTANCE.md`（35/35 PASS，零 SKIP） ｜ 创建：2026-10-12  
 > 上游：[PRD](./PRD.md) · [Roadmap](./ROADMAP.md) · [ADR-001](./adr/0001-deepseek-harness.md) · [DSH 版本策略](./DSH_UPSTREAM.md)  
 > 目的：**不是交付儿童生产助手，而是证明 DSH 能在可审计、最小权限、最少依赖的前提下承载 LumiThink R1。**
 
@@ -46,23 +46,23 @@ DSH 官方状态为 Developer Preview，未经安全审计；完成此 PoC 也�
 
 ### R0-A — 构建与版本可复现
 
-- [ ] 在隔离临时环境验证 DSH 指定版本的 TypeScript SDK、CLI 及原生依赖可安装；记录 OS、Node、依赖与锁文件。
-- [ ] 验证 `DeepSeekHarness` 与 `HarnessClient` 的模型请求、事件流、取消与进程退出行为。
-- [ ] 建立本项目独立 `DSH_HOME`，确保不读取开发者本机 `~/.dsh`、凭据或工作区。
+- [x] 在隔离临时环境验证 DSH 指定版本的 TypeScript SDK、CLI 及原生依赖可安装；记录 OS、Node、依赖与锁文件。（PR #7：`runtime-manifest.json`，Node v24.21.0 / pnpm 10.34.7，win32-x64 + CI ubuntu/windows）
+- [x] 验证 `DeepSeekHarness` 与 `HarnessClient` 的模型请求、事件流、取消与进程退出行为。（PR #7/#9：`tests/contracts/sdk.e2e.spec.ts`，多轮流式与 close() 阶梯）
+- [x] 建立本项目独立 `DSH_HOME`，确保不读取开发者本机 `~/.dsh`、凭据或工作区。（PR #7：`src/child-env.ts` + `tests/privacy/child-env.spec.ts`）
 - [ ] 检查上游 License、依赖及本次将用到的插件目录，并保存扫描结果。
-- [ ] 写出版本和运行时探测命令，CI 能复现。
+- [x] 写出版本和运行时探测命令，CI 能复现。（PR #9：`tests/manifest.spec.ts` + `.github/workflows/r0-zero-skip-gate.yml`，双平台断言精确版本）
 
 **DoD：** 干净环境重复执行成功；有单一 `runtime-manifest.json` 明确精确版本，所有测试数据隔离于真实用户环境。
 
 ### R0-B — 最小权限 Profile（首要阻断项）
 
-- [ ] 创建可执行的 `lumithink-child` Profile 和 Cordis Bundle；只列举 SDK JSON-RPC、Agent Loop、模型适配、提示拼装、必要 Session、受限工具注册服务。
-- [ ] 禁用/不挂载 Shell、PTY、通用 FS、终端、任意 HTTP Fetch、自动插件安装、浏览器自动化与通用子 Agent。
-- [ ] 禁止模型动态安装插件或修改 Profile；业务能力通过审核过的受限 Cordis 工具提供。
-- [ ] 排除/禁用 `session-log-deepseek` 上传与非必要 OTel 反馈/上下文上报；保留正常模型调用所必需的外发。
-- [ ] `dsh --profile lumithink-child --dump-config` 审核生效后的**最终**服务树，不只检查源码配置。
-- [ ] 对运行时实际公开的模型工具 schema 断言白名单；执行恶意工具名、非法参数、越权子调用测试。
-- [ ] 在 DSH 之外另行限定容器/进程文件系统、网络出口、数据库密钥和 API 访问；不以 DSH Prompt/工具限制为唯一防护。
+- [x] 创建可执行的 `lumithink-child` Profile 和 Cordis Bundle；只列举 SDK JSON-RPC、Agent Loop、模型适配、提示拼装、必要 Session、受限工具注册服务。（PR #7：零 bundle 显式 Profile，`profiles/lumithink-child/cordis.patch.yml`）
+- [x] 禁用/不挂载 Shell、PTY、通用 FS、终端、任意 HTTP Fetch、自动插件安装、浏览器自动化与通用子 Agent。（PR #7/#9：组合树断言 `sandbox*`/`terminal*`/`tool-*`/`mcp-*`/`plugin-manager` 均缺失，`agent-loop.agents: []`）
+- [x] 禁止模型动态安装插件或修改 Profile；业务能力通过审核过的受限 Cordis 工具提供。（PR #7：`plugin-package-inventory-deepseek`、`plugin-manager` 不挂载）
+- [x] 排除/禁用 `session-log-deepseek` 上传与非必要 OTel 反馈/上下文上报；保留正常模型调用所必需的外发。（PR #7：`session-log-deepseek` 与全部 feedback/OTel 插件缺失，`DSH_TELEMETRY_DISABLED=1`）
+- [x] `dsh --profile lumithink-child --dump-config` 审核生效后的**最终**服务树，不只检查源码配置。（PR #7/#9：`src/dump-config.ts` 组合树取证断言）
+- [x] 对运行时实际公开的模型工具 schema 断言白名单；执行恶意工具名、非法参数、越权子调用测试。（PR #7/#9：`advertisedTools === []`；bash/pwsh 未挂载调用 fail-closed，含副作用金丝雀证据）
+- [ ] 在 DSH 之外另行限定容器/进程文件系统、网络出口、数据库密钥和 API 访问；不以 DSH Prompt/工具限制为唯一防护。（进程内出网守卫已就位——PR #9 `egress-guard`；容器/部署层强制待做，见 PoC README「已知边界」）
 
 **DoD：** Profile 未注册任何危险工具，且权限绕过测试全部失败关闭；模拟恶意 Skill / 提示注入不能获得 Shell、文件访问或对外传输权限。若需要侵入上游 Agent Loop 才能实现，立即 **BLOCK**。
 
@@ -93,7 +93,7 @@ DSH 官方状态为 Developer Preview，未经安全审计；完成此 PoC 也�
 - [ ] 用确定性断言验证工具白名单、数据隔离、记忆修订、身份权限、超时/取消；语言质量用人工评估为主，LLM Judge 仅辅助。
 - [ ] 插件重载、模型不可用、Session 文件损坏、网络断开、未通过审批调用均有安全降级。
 - [ ] 每份报告保存 DSH commit、插件版本、模型提供商、Persona/Evidence/Skill 版本以及脱敏后的测试结果。
-- [ ] 建立 `npm run test:r0` 或等效统一脚本，生成 `r0-acceptance.json` 与简短 Markdown 复盘。
+- [x] 建立 `npm run test:r0` 或等效统一脚本，生成 `r0-acceptance.json` 与简短 Markdown 复盘。（PR #9：`pnpm run test:r0` 五步串行——测试 → fail-closed 门禁 → 门禁自证 → 外发守卫 → 脱敏；验收摘要见 `poc/dsh-child/docs/R0-02_ACCEPTANCE.md`）
 
 **DoD：** 严重儿童安全和隐私/越权测试零未解决失败；对非阻断问题附风险台账和下一步 Issue。
 
@@ -126,7 +126,7 @@ LumiThink/
 
 **执行顺序：** A（运行时可复现）→ B（权限/数据外发）→ C（专业 Skill）→ D（会话记忆治理）→ E（统一验收）；评测用例编写应从 A 就开始。
 
-**立即启动的第一张开发 Issue：** `R0-01：锁定 DSH 版本并验证 TypeScript SDK + 自定义无 Shell Profile`。
+**第一张开发 Issue 已完成：** `R0-01：锁定 DSH 版本并验证 TypeScript SDK + 自定义无 Shell Profile`（[Issue #6](https://github.com/lybym/LumiThink/issues/6) / [PR #7](https://github.com/lybym/LumiThink/pull/7)）。后续 `R0-02：DSH SDK E2E 零 SKIP 验收与 Windows/Linux CI 门禁`（[Issue #8](https://github.com/lybym/LumiThink/issues/8) / [PR #9](https://github.com/lybym/LumiThink/pull/9)）已完成。剩余工作包：R0-C（双 Skill 闭环）、R0-D（Session/Memory 治理）与容器/部署层权限边界。
 
 该 Issue 最小完成条件：
 1. 使用固定发布资产构建并能通过 SDK 发送合成消息；

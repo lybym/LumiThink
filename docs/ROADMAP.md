@@ -32,7 +32,7 @@
 
 ## 2. R0 · Product Reset（文档与存量审查）
 
-> **执行入口：** [R0 DSH PoC 实施与验收合同](./R0_DSH_POC.md)。第一张开发任务：[Issue #6 · DSH SDK + 儿童最小权限 Profile](https://github.com/lybym/LumiThink/issues/6)。
+> **执行入口：** [R0 DSH PoC 实施与验收合同](./R0_DSH_POC.md)。第一张开发任务已完成：[Issue #6 · DSH SDK + 儿童最小权限 Profile](https://github.com/lybym/LumiThink/issues/6)（[PR #7](https://github.com/lybym/LumiThink/pull/7)）；零 SKIP CI 门禁见 [Issue #8](https://github.com/lybym/LumiThink/issues/8)（[PR #9](https://github.com/lybym/LumiThink/pull/9)）。
 
 
 ### 目标
@@ -49,11 +49,11 @@
 - [ ] 更新 README 以正确指向 2.0（现有 README 描述旧版产品，尚未更新）。
 - [ ] 发布 `ADR`：设备无关、模型无关、循证优先、模块化单体、隐私规则。
 - [x] 确定主 Harness：DSH / Cordis（架构决策见 [ADR-001](./adr/0001-deepseek-harness.md)）；下一步验收其儿童环境可用性。
-- [ ] 审核 DSH `web` / `sdk` / `sdk-minimal` 默认功能及 Session/遥测数据流；生成最小权限 `lumithink-child` Profile，并证明不暴露 Shell、文件系统和未经批准的外部网络访问。
-- [ ] 验证 TypeScript SDK 与 Next.js/Fastify/Node API 之间的流式请求、取消、会话恢复、工具权限和隔离策略。
-- [ ] 锁定 DSH 精确版本及 Cordis 插件兼容矩阵；实现不修改上游核心的覆写和注入。
-- [ ] 建立 [DSH_UPSTREAM.md](./DSH_UPSTREAM.md) 的版本监控、评估、发布与回退制度。
-- [ ] 确立私有开发数据边界：真实儿童信息不得进入公开示例、Issue、日志和 CI 工件。
+- [x] 审核 DSH `web` / `sdk` / `sdk-minimal` 默认功能及 Session/遥测数据流；生成最小权限 `lumithink-child` Profile，并证明不暴露 Shell、文件系统和未经批准的外部网络访问。（PR #7/#9：`poc/dsh-child`，35/35 PASS、零 SKIP）
+- [ ] 验证 TypeScript SDK 与 Next.js/Fastify/Node API 之间的流式请求、取消、会话恢复、工具权限和隔离策略。（SDK 契约与隔离已验（PR #7/#9，Mock 模型）；与 Web 服务进程集成待做）
+- [x] 锁定 DSH 精确版本及 Cordis 插件兼容矩阵；实现不修改上游核心的覆写和注入。（PR #7：`runtime-manifest.json` 固定 `dsh-v0.2.0-rc.2`，覆写经 `cordis.patch.yml`）
+- [x] 建立 [DSH_UPSTREAM.md](./DSH_UPSTREAM.md) 的版本监控、评估、发布与回退制度。（本 PR 建立；RC/Stable 提醒由监控任务执行，不自动升级）
+- [x] 确立私有开发数据边界：真实儿童信息不得进入公开示例、Issue、日志和 CI 工件。（本 PR 立规；PR #7/#9 PoC 与 CI 以合成数据 `child_demo_001` 和脱敏工件执行）
 
 ### 退出门槛
 

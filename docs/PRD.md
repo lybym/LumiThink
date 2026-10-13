@@ -121,7 +121,7 @@
 - **数据保护**：DSH 当前是 Developer Preview 且未经安全审计，官方默认 `session-log-deepseek` 可能上传会话日志，默认反馈遥测也可能包含会话前缀。儿童专用 Profile 必须禁用非必要日志/遥测上传，并对任何实际模型 API 外发独立审查；Session JSONL、Checkpoint/持久化及备份纳入删除策略。
 - **版本治理**：监控 [GitHub Releases](https://github.com/deepseek-ai/deepseek-harness/releases) 中 RC 和正式版，生产固定经验收的精确版本及插件版本；升级采用隔离测试 → 兼容性审查 → 安全/隐私回归 → 人工审批 → 灰度/回退。详见 [ADR-001](./adr/0001-deepseek-harness.md) 与 [DSH_UPSTREAM.md](./DSH_UPSTREAM.md)。
 
-
+### 5.1 请求流水线
 
 每轮请求采用可观测、可中断的流水线：
 

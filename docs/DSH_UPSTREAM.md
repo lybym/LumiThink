@@ -15,7 +15,9 @@
 | 最新 RC | [dsh-v0.2.0-rc.2](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.0-rc.2) | 2026-09-29 UTC | 版本监控初始基线 |
 | 正式 Stable | 截至此日尚无 | — | 官方发布列表中尚无标记为正式版的 Release |
 
-**这是上游观察基线，不是 LumiThink 已安装/已经通过测试的版本声明。** 项目生产固定版本需要 R0 PoC 结束后记录在部署配置和 lockfile。
+**这是上游观察基线，不是 LumiThink 生产版本声明。** 项目生产固定版本需要 R0 PoC 结束后记录在部署配置和 lockfile。
+
+2026-10-13 更新：`dsh-v0.2.0-rc.2` 已作为 R0 隔离 PoC 基线实机锁定（`poc/dsh-child/runtime-manifest.json`，PR #7/#9），仍未用于生产。
 
 ## 2. 版本监控规则
 
@@ -78,7 +80,7 @@
 
 | DSH Tag | 类型 | 发现日期 | Profile/插件评估 | 安全测试 | 迁移测试 | 决策 |
 | --- | --- | --- | --- | --- | --- | --- |
-| dsh-v0.2.0-rc.2 | RC，监控基线 | 2026-10-12 | 待 R0 | 待 R0 | 待 R0 | 尚未升级或投入生产 |
+| dsh-v0.2.0-rc.2 | RC，监控基线 → R0 PoC 基线 | 2026-10-12 | 已完成（PR #7/#9：零 bundle 显式 Profile，`--dump-config` 组合树白名单取证） | 已完成（35/35 PASS、零 SKIP：负向工具、外发守卫、遥测禁用；Windows/Linux CI） | 首轮通过（Mock 模型 SDK E2E 契约）；真实 provider 迁移未开始 | 锁定为 R0 隔离 PoC 基线（`runtime-manifest.json`）；未投入生产 |
 | dsh-v0.2.1-alpha.2 | Alpha，仅参考 | 2026-10-12 | 未验证 | 未验证 | 未验证 | 不作为首选生产基线 |
 
 后续每次升级评审在对应 PR/Issue 保留证据；本文件保留总体政策和经过确认的里程碑。若需要 CI 自动化检查，可后续增加 GitHub Actions 的版本检查，但**不与监控通知混同，也不设置自动生产升级**。
