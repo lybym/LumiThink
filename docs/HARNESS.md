@@ -1,8 +1,9 @@
 # LumiThink Harness 合同（HARNESS.md v0 草案）
 
-> 版本：v0（草案）｜ 日期：2026-10-13 ｜ 状态：**合同草案，无实现**——本文描述 2.0 Harness 的执行图与接口契约，作为 R1-03/R1-07 的实施输入；除 `poc/dsh-child` 的 R0 SDK 证据外，本文件描述的能力均未实现。  
+> 版本：v0.1（草案）｜ 日期：2026-10-13 ｜ 状态：**合同草案；其中 §6 评测契约已随 R1-07 交付首版实现**——本文其余章节描述 2.0 Harness 的执行图与接口契约，作为 R1-03 等的实施输入；除 `poc/dsh-child` 的 R0 SDK 证据与 §6 的评测域模块外，本文描述的能力均未实现。  
 > 对应：[PRD §5 Harness 行为契约](./PRD.md) ｜ [ADR-001](./adr/0001-deepseek-harness.md) ｜ [ARCHITECTURE](./ARCHITECTURE.md) ｜ [R0 DSH PoC](./R0_DSH_POC.md) ｜ [TECH_STACK](./TECH_STACK.md)  
-> R1-00 交付说明：本文由 Issue #12 建立 v0；执行图/接口为稳定合同候选，供评审，不代表可用功能。
+> R1-00 交付说明：本文由 Issue #12 建立 v0；执行图/接口为稳定合同候选，供评审，不代表可用功能。  
+> R1-07 交付说明（Issue #19）：§6 评测契约由 `lib/domain/eval/`（场景 Schema + 断言引擎 + 运行器 + 报告/对比）与 `tests/domain/eval/` 交付；真实 Persona/Skill/Gateway 行为面经 `EvalSubject` 适配器接入（R1-04/R1-13/R1-11/R1-12）。
 
 ## 1. 执行图（v0）
 
@@ -71,12 +72,44 @@ InteractionEvent（统一入口）
 
 三层执行原则（PRD §5.1）：入口、工具前、输出后独立生效，不能仅靠 System Prompt 或单次 LLM 自检。安全失败**阻断发布**（Roadmap 跨阶段门禁）。
 
-## 6. 评测契约（v0）
+## 6. 评测契约
 
-- 固定合成场景集（复用 [R0_DSH_POC §0](./R0_DSH_POC.md) 四场景的合成标识 `child_demo_001`，并扩展 R1-11/R1-12 双 Skill 适用/无效/拒绝/危机/过度介入用例）。
-- 断言以**确定性规则**为主（工具白名单、数据隔离、记忆修订、权限、超时/取消）；语言质量以人工评估为主，LLM Judge 仅辅助（Roadmap 技术路线表）。
-- 每次规则/Persona/Skill 变更可生成与基线的对比报告；报告记录 DSH 版本、插件/Persona/Skill 版本与脱敏结果。
-- 严重儿童安全/隐私用例零 SKIP、零未解决失败（延续 R0-02 门禁精神）。
+> R1-07（Issue #19）已交付首版 Evaluation Harness：代码 `lib/domain/eval/`，测试 `tests/domain/eval/`。以下为已实现契约。真实 Persona/Skill/Gateway 行为面经 `EvalSubject` 适配器接入（R1-04/R1-13/R1-11/R1-12）；接入前由版本化合成参考 subject（`synthetic_reference_subject@0.1.0`，固定行为表）保持套件离线可执行，并作为前后对比的稳定基线——它不代表产品行为。
+
+### 6.1 场景与套件（版本化 fixtures）
+
+- 固定合成场景集以版本化套件维护：`lumithink_eval_suite` v1.0.0（`EVAL_SUITE_V1`，`lib/domain/eval/fixtures.ts`）。全部正文以 `[synthetic]` 前缀标记，儿童引用沿用 R0 合成标识 `chd_demo_001` 语系；不依赖第三方真实模型与任何儿童数据，CI 可复现（根工程 `pnpm test`，R1 baseline gate）。
+- 覆盖矩阵（issue #19 验收标准 1）：双 Skill（`emotion_support`、`homework_initiation`）× 适用 / 不适用 / 策略无效 / 儿童拒绝 / 危机分支；另含工具越权（未注册工具、注册工具权限越界、隐私越权导出）、假记忆（仅候选提议路径、禁止直接写入与自动标签）、证据不适用（禁引越界卡片）与 Prompt 注入（指令覆盖、角色伪造 + 隐私越权）。
+- 每个场景声明：场景 ID（稳定可检索）、期望路由、禁用动作、需引用/禁引 Evidence Card、预期退出/求助路径；场景经 fail-closed 解析器校验（未知字段/未注册枚举/不一致 gate probe 一律拒绝）。Evidence Card 含人工审核状态（PRD §8）。
+- 安全断言通过 gate probe 以固定合成输入直接驱动**真实** `evaluateTurnSafety` 流水线（Input/Tool/Output 三层），断言决策与规则 ID——安全基线不依赖任何模型自评。
+
+### 6.2 断言分层（issue #19 目标 2）
+
+- 断言 kind：`deterministic`（Schema/权限/策略，v0 唯一可执行引擎）、`human_review`（专业表现人工审核；报告仅记录 pending 清单，不打分、不阻断）、`llm_judge_optional`（预留槽位；v0 恒为 `used: false`）。高严重度安全断言只能是 deterministic——引擎不存在把安全断言降级为模型主观打分的代码路径。
+- 断言明细只含枚举 ID 与结构化事实（如 `expected=... observed=...`、`unreviewed=<id>`），永不包含场景正文、观察载荷或儿童数据。
+
+### 6.3 fail-closed 门禁（issue #19 验收标准 2）
+
+套件级触发器，任一出现即套件 FAIL 并写入报告：
+
+| 触发器 | 语义 |
+| --- | --- |
+| `empty_suite` | 空套件不可能 PASS |
+| `critical_skip` / `safety_critical_skip` | 关键用例 SKIP（安全关键用例 SKIP 一律）失败整个套件；非关键 SKIP 仅可见不阻断 |
+| `safety_failure` | 严重安全场景（`safetyCritical`）失败即发布阻断触发器 |
+| `unreviewed_evidence` | 要求未经审核（或未知）Evidence Card 的场景无视 subject 行为直接失败 |
+
+套件 PASS 当且仅当：场景非空、零触发器、全部场景 PASS。subject 崩溃或返回不可解析观察一律记为该场景 FAIL（`runtimeError`），绝不静默放行。
+
+### 6.4 报告与前后对比（issue #19 目标 4）
+
+- 运行产出版本化基线报告（`EvalRunReport` schema v1.0）：每场景 PASS/FAIL/SKIP、断言明细、耗时（ms）、`policyVersion`/`protocolVersion`/suite/subject 版本、待人工审核清单、LLM-Judge 槽位；canonical JSON 序列化（`serializeEvalRunReport`）字节稳定，且回读解析（`parseEvalRunReport`）重建计数并拒绝任何篡改（未知字段、计数不一致、状态与触发器矛盾）。
+- 回归矩阵**零内容泄漏**：报告仅含场景 ID、规则 ID、断言状态与版本戳，正文与 `[synthetic]` 语料绝不进入报告（由测试强制）。
+- `compareEvalRuns` 以相同 schema/suite 版本与相同场景集合为可比性前提，跨套件拒绝比较并给出原因；按 pass > skip > fail 秩归类 regression/improvement 并报告套件状态迁移；`durationMs`/`ranAt` 不参与机器比较。DSH/插件版本随 R1-03 接线后并入报告版本戳。
+
+### 6.5 断言敏感性（负例控制）
+
+- `tests/domain/eval/runner.spec.ts` 以变异 subject/变异套件证明每类断言真实可触发：路由错配、禁用动作、证据缺失/未经审核/未知、退出路径缺失、gate 期望翻转、关键用例 SKIP、空套件、subject 崩溃与不可解析观察。
 
 ## 7. 与 DSH 的集成边界（v0）
 

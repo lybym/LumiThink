@@ -122,7 +122,7 @@ Issue #27 验收标准 3 要求 UI、API、DSH Tool 三条入口均强制有效�
 - 策略版本注册表 `SAFETY_POLICY_VERSIONS`（当前 `["1.0"]`）是接受新版本的唯一途径；未知版本 fail-closed。新增规则/版本只能修改注册表并通过全部 Gate 测试，不接受运行时注入。
 - 每条 Trace 携带 `policyVersion`，策略变更后历史决策仍可归因到当时的规则集。
 - **回滚说明**：策略变更走独立 PR；回滚即还原该 PR 的注册表/规则改动（Git revert），Gate 语义随注册表恢复，无需数据迁移。安全失败阻断发布（PRD FR-007、Roadmap R1 退出门槛）；R0 的 35/35 零 SKIP 门禁不受本策略影响。
-- v0 模式规则面向合成语料调校；召回率/误报的持续调优与基线对比由 R1-07 Evaluation Harness 承接，调参同样走"注册表 + 测试 + 回归"路径。
+- v0 模式规则面向合成语料调校；召回率/误报的持续调优与基线对比由 R1-07 Evaluation Harness 承接（已交付 `lib/domain/eval/`，gate probe 直接驱动真实三层流水线并输出可对比基线报告，见 [HARNESS §6](./HARNESS.md)），调参同样走"注册表 + 测试 + 回归"路径。
 
 ## 10. 非目标
 
