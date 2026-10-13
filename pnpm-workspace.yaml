@@ -1,0 +1,27 @@
+# Root project settings only — the root is NOT a package workspace that
+# includes poc/: `poc/dsh-child` keeps its own pnpm-workspace.yaml and
+# pnpm-lock.yaml and must stay fully isolated (R0 gate depends on it).
+#
+# confbox override: pkg-types@2.3.3 imports the "confbox/json" subpath which
+# only exists in confbox >= 0.3, while the hidden-store hoisted copy can be
+# confbox 0.2.4 (declared by c12, which never imports confbox itself).
+# Pinning one confbox version removes the resolution ambiguity everywhere.
+overrides:
+  confbox: "0.3.1"
+# Disable the default hidden-store hoisting (hoist-pattern: ['*']): with two
+# major lines of jiti/confbox in the tree, the shadow copies under
+# node_modules/.pnpm/node_modules made prisma's config loader resolve jiti 1.x
+# (no named `createJiti` export) instead of the nested jiti 2.x. Strict
+# isolation makes undeclared fallthroughs fail loudly instead of silently
+# resolving wrong versions.
+hoist: false
+# Use the npm-style flat layout. The isolated symlink layout degraded on some
+# setups (dep directories copied without their siblings, e.g. @prisma/engines
+# under the prisma virtual dir losing @prisma/debug), which broke prisma CLI
+# resolution. The hoisted layout has no virtual-store links at all and is
+# deterministic from the same lockfile on Windows and Linux CI.
+nodeLinker: hoisted
+onlyBuiltDependencies:
+  - "@prisma/client"
+  - "@prisma/engines"
+  - "prisma"
