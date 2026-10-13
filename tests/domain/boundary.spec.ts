@@ -14,6 +14,23 @@ import { join } from "node:path";
 
 const domainDir = fileURLToPath(new URL("../../lib/domain/", import.meta.url));
 
+/**
+ * Recursively collect .ts files under lib/domain (including subdirectories
+ * such as lib/domain/contract/) as paths relative to the domain root.
+ */
+function collectDomainFiles(dir: string, prefix = ""): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const relative = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) {
+      found.push(...collectDomainFiles(join(dir, entry.name), relative));
+    } else if (entry.isFile() && entry.name.endsWith(".ts")) {
+      found.push(relative);
+    }
+  }
+  return found;
+}
+
 const FORBIDDEN_IMPORTS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   {
     pattern: /@prisma\/client/,
@@ -28,8 +45,12 @@ const FORBIDDEN_IMPORTS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
     reason: "the domain boundary must not depend on Next.js",
   },
   {
-    pattern: /from\s+["'](?:\.\.\/)+(?:lib\/)?db["']/,
-    reason: "the domain boundary must not import the legacy Prisma singleton",
+    // Catches every form of reaching the legacy Prisma singleton: relative
+    // paths ("../../lib/db", "../db"), TypeScript-suffixed variants
+    // ("../../lib/db.ts") and the bare "db"/"db.ts" specifiers — but not
+    // unrelated modules that merely contain "db" in a longer name.
+    pattern: /from\s+["'](?:[^"']*\/)?db(?:\.ts)?["']/,
+    reason: "the domain boundary must not import the legacy Prisma singleton (lib/db)",
   },
   {
     pattern: /from\s+["']@\//,
@@ -37,8 +58,17 @@ const FORBIDDEN_IMPORTS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   },
 ];
 
+/**
+ * Reasons a source file violates the boundary, given its full source text.
+ * Shared by the lib/domain scan and the positive fixtures below so the
+ * fixtures exercise exactly the production check.
+ */
+function boundaryViolations(source: string): string[] {
+  return FORBIDDEN_IMPORTS.filter(({ pattern }) => pattern.test(source)).map(({ reason }) => reason);
+}
+
 test("lib/domain exists and exposes the legacy guard as the intake boundary", () => {
-  const files = readdirSync(domainDir).filter((name) => name.endsWith(".ts"));
+  const files = collectDomainFiles(domainDir);
   assert.ok(
     files.includes("legacy-guard.ts"),
     "lib/domain/legacy-guard.ts must exist",
@@ -46,19 +76,46 @@ test("lib/domain exists and exposes the legacy guard as the intake boundary", ()
 });
 
 test("lib/domain modules import no persistence, framework or legacy app layers", () => {
-  const files = readdirSync(domainDir).filter((name) => name.endsWith(".ts"));
+  const files = collectDomainFiles(domainDir);
   assert.ok(files.length > 0);
 
   for (const file of files) {
     const source = readFileSync(join(domainDir, file), "utf8");
-    for (const { pattern, reason } of FORBIDDEN_IMPORTS) {
-      assert.equal(
-        pattern.test(source),
-        false,
-        `lib/domain/${file} violates the directory boundary: ${reason}`,
-      );
-    }
+    const violations = boundaryViolations(source);
+    assert.deepEqual(
+      violations,
+      [],
+      `lib/domain/${file} violates the directory boundary: ${violations.join("; ")}`,
+    );
   }
+});
+
+test("the forbidden-import patterns actually catch violations (positive fixtures)", () => {
+  const imports = (specifier: string) => boundaryViolations(`import x from ${specifier};`);
+  // Persistence
+  assert.ok(imports(`"@prisma/client"`).length > 0, "@prisma/client must be caught");
+  assert.ok(imports(`"../../lib/db"`).length > 0, "lib/db deep import must be caught");
+  assert.ok(imports(`"../../lib/db.ts"`).length > 0, "lib/db.ts deep import must be caught");
+  assert.ok(imports(`"../db"`).length > 0, "../db import must be caught");
+  assert.ok(imports(`"db.ts"`).length > 0, "bare db.ts import must be caught");
+  assert.ok(imports(`"@/lib/db"`).length > 0, "@/lib/db import must be caught");
+  // Frameworks
+  assert.ok(imports(`"react"`).length > 0, "react import must be caught");
+  assert.ok(imports(`"react-dom"`).length > 0, "react-dom import must be caught");
+  assert.ok(imports(`"next/headers"`).length > 0, "next/* import must be caught");
+  // Alias imports
+  assert.ok(imports(`"@/lib/env"`).length > 0, "@/ alias import must be caught");
+  // Benign sources must stay clean.
+  assert.deepEqual(
+    boundaryViolations(`import { validateContractId } from "./core.ts";\nimport { ingestDomainFact } from "../legacy-guard.ts";`),
+    [],
+    "legitimate domain-relative imports must not be flagged",
+  );
+  assert.deepEqual(
+    boundaryViolations(`const label = "react beginner";\nconst path = "mylib/database/config";`),
+    [],
+    "non-import mentions must not be flagged",
+  );
 });
 
 test("domain guard rejects legacy shapes even when imported from outside", () => {

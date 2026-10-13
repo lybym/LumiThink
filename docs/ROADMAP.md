@@ -72,7 +72,7 @@
 
 | 编号 | 工作项 | 验收依据 |
 | --- | --- | --- |
-| R1-01 | 统一 `InteractionEvent` / `AgentResponse`、Session、request_id | JSON Schema/类型契约测试；错误输入被拒绝 |
+| R1-01 | 统一 `InteractionEvent` / `AgentResponse`、Session、request_id（合同见 [API_CONTRACT](./API_CONTRACT.md)） | JSON Schema/类型契约测试；错误输入被拒绝 |
 | R1-02 | Model Gateway（Provider、Mock、超时、取消、预算） | 可替换模型；故障时清晰降级 |
 | R1-03 | DSH/Cordis 插件组合：Input Gate / Context Builder / Skill Router / Tool Gate / Output Gate | Trace 可见规则、模型、工具和时间；未改上游 Agent Loop |
 | R1-03a | 专用 `lumithink-child` Profile 的最小权限与 SDK 接入 | 实测无 Shell/PTY/任意读写、无非必要会话/反馈上传；白名单工具越权被拒绝 |
