@@ -9,6 +9,7 @@ import {
 } from "../../../lib/domain/eval/index.ts";
 import {
   EVIDENCE_REGISTRY_V0,
+  MASKED_REJECTION_ID,
   SKILL_REGISTRY_V0,
   assertShippedRegistriesAlignedWithEvalSuite,
   loadSkillForChild,
@@ -512,5 +513,266 @@ test("loadSkillForChild results are fully frozen structural data", () => {
   if (result.status === "served") {
     assert.ok(Object.isFrozen(result.limitations));
     assert.ok(Object.isFrozen(result.evidence));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1 fix controls (P1-1 / P1-2 / P2-1 / P2-2 / P2-3)
+// ---------------------------------------------------------------------------
+
+test("publish refuses a manifest whose binding card does not list the skill (P1-1)", () => {
+  // evd_eef_sel_primary_001@1.0.0 lists only emotion_support in its
+  // appliesToSkills: a homework_initiation manifest binding it must fail
+  // closed at the binding boundary, not publish and load silently.
+  const outOfScope = publishSkillManifest(
+    SKILL_REGISTRY_V0,
+    EVIDENCE_REGISTRY_V0,
+    baseManifest({
+      skillId: "homework_initiation",
+      version: "2.0.0",
+      evaluationRefs: ["homework.applicable.difficulty-001"],
+    }),
+  );
+  assert.equal(outOfScope.ok, false);
+  if (!outOfScope.ok) {
+    assert.equal(outOfScope.reason, "binding_scope_mismatch");
+    assert.deepEqual([...outOfScope.detail], ["evd_eef_sel_primary_001@1.0.0"]);
+  }
+  // The in-scope publish path is unaffected (containment holds for the
+  // shipped SEL card + emotion_support manifest).
+  const inScope = publishSkillManifest(SKILL_REGISTRY_V0, EVIDENCE_REGISTRY_V0, baseManifest());
+  assert.ok(inScope.ok);
+});
+
+test("load refuses a skill whose bound card version excludes it (P1-1 load mirror)", () => {
+  const crossBound = {
+    ...SKILL_REGISTRY_V0.skills["homework_initiation"].versions["1.0.0"],
+    evidenceBindings: [{ cardId: "evd_eef_sel_primary_001", cardVersion: "1.0.0" }],
+  } as unknown as Readonly<SkillManifestV0>;
+  const skills: SkillRegistryV0 = {
+    ...SKILL_REGISTRY_V0,
+    skills: {
+      ...SKILL_REGISTRY_V0.skills,
+      homework_initiation: { activeVersion: "1.0.0", versions: { "1.0.0": crossBound } },
+    },
+  };
+  const result = loadSkillForChild("homework_initiation", 10, { skills, evidence: EVIDENCE_REGISTRY_V0 });
+  assert.equal(result.status, "rejected");
+  if (result.status === "rejected") {
+    assert.equal(result.reason, "evidence_scope_mismatch");
+    assert.deepEqual([...result.detail], ["evd_eef_sel_primary_001"]);
+  }
+});
+
+test("the eval suite carries the real governance card projections (P1-2: non-vacuous alignment)", () => {
+  // The shared-id set must be non-empty on SHIPPED data: the suite registers
+  // the projections of BOTH shipped cards under their real ids (previously
+  // the suite↔registry intersection was empty and the check never fired).
+  for (const cardId of ["evd_eef_sel_primary_001", "evd_eef_meta_srl_001"]) {
+    assert.ok(Object.hasOwn(EVAL_SUITE_V1.evidence, cardId), `suite must carry real id ${cardId}`);
+    assert.ok(Object.hasOwn(EVIDENCE_REGISTRY_V0.cards, cardId), `registry must carry ${cardId}`);
+  }
+  // Every shared id agrees field-by-field between the checked-in suite
+  // projection and the live projection of the registry's active version.
+  for (const cardId of Object.keys(EVAL_SUITE_V1.evidence)) {
+    if (!Object.hasOwn(EVIDENCE_REGISTRY_V0.cards, cardId)) {
+      continue; // eval-only synthetic control cards stay eval-only.
+    }
+    const entry = EVIDENCE_REGISTRY_V0.cards[cardId];
+    const projection = toEvalEvidenceCardView(entry.versions[entry.activeVersion]);
+    const suiteCard = EVAL_SUITE_V1.evidence[cardId];
+    assert.equal(suiteCard.summary, projection.summary, `summary projection diverges for ${cardId}`);
+    assert.equal(suiteCard.reviewed, projection.reviewed, `reviewed projection diverges for ${cardId}`);
+    assert.deepEqual(
+      [...(suiteCard.appliesToSkills ?? [])],
+      [...projection.appliesToSkills],
+      `appliesToSkills projection diverges for ${cardId}`,
+    );
+  }
+});
+
+test("a governance card revision that diverges from the suite projection fails alignment (P1-2)", () => {
+  // The exact P1-2 consequence, now on REAL data: a human revises the
+  // active card's summary without updating the eval projection — the
+  // alignment cross-check must fire for the real shared id.
+  const revised = publishEvidenceCardVersion(
+    EVIDENCE_REGISTRY_V0,
+    baseCard({ version: "2.0.0", summary: "Revised summary that no longer matches the suite projection." }),
+  );
+  assert.ok(revised.ok);
+  if (!revised.ok) return;
+  const problems = validateRegistriesAgainstEvalSuite(EVAL_SUITE_V1, {
+    skills: SKILL_REGISTRY_V0,
+    evidence: revised.registry,
+  });
+  const conflict = problems.find(
+    (entry) => entry.code === "suite_evidence_status_conflict" && entry.path === "evidence.evd_eef_sel_primary_001",
+  );
+  assert.ok(conflict, "the real shared-id revision conflict must fire");
+});
+
+test("rejection results never echo unresolved caller-submitted ids (P2-1 no-echo pin)", () => {
+  // Unbounded, attacker-shaped card id → masked, never echoed.
+  const malicious = `${"A".repeat(4096)}\ninjected-log-line`;
+  const cardRejection = resolveEvidenceCard(EVIDENCE_REGISTRY_V0, malicious);
+  assert.equal(cardRejection.status, "rejected");
+  if (cardRejection.status === "rejected") {
+    assert.equal(cardRejection.reason, "unknown_card");
+    assert.equal(cardRejection.cardId, MASKED_REJECTION_ID);
+    assert.ok(!cardRejection.cardId.includes("injected-log-line"));
+  }
+  // Non-string ids are masked too.
+  const nonString = resolveEvidenceCard(EVIDENCE_REGISTRY_V0, 42 as unknown as string);
+  assert.equal(nonString.status, "rejected");
+  if (nonString.status === "rejected") assert.equal(nonString.cardId, MASKED_REJECTION_ID);
+
+  // Unregistered skill id (arbitrary string) → masked.
+  const unknownSkill = loadSkillForChild(`${"b".repeat(2048)}\ninjected`, 8);
+  assert.equal(unknownSkill.status, "rejected");
+  if (unknownSkill.status === "rejected") {
+    assert.equal(unknownSkill.reason, "unknown_skill");
+    assert.equal(unknownSkill.skillId, MASKED_REJECTION_ID);
+  }
+  // Vocabulary id that fails registry resolution → masked as well.
+  const reducedSkills: SkillRegistryV0 = {
+    ...SKILL_REGISTRY_V0,
+    skills: { homework_initiation: SKILL_REGISTRY_V0.skills["homework_initiation"] },
+  };
+  const unregisteredSkill = loadSkillForChild("emotion_support", 8, {
+    skills: reducedSkills,
+    evidence: EVIDENCE_REGISTRY_V0,
+  });
+  assert.equal(unregisteredSkill.status, "rejected");
+  if (unregisteredSkill.status === "rejected") assert.equal(unregisteredSkill.skillId, MASKED_REJECTION_ID);
+
+  // Registry-resolved rejections still echo the developer-authored key.
+  const pendingCard = baseCard({
+    version: "1.0.0",
+    review: { status: "pending" },
+  }) as unknown as Readonly<EvidenceCardV0>;
+  const pendingEvidence: EvidenceRegistryV0 = {
+    ...EVIDENCE_REGISTRY_V0,
+    cards: {
+      ...EVIDENCE_REGISTRY_V0.cards,
+      evd_eef_sel_primary_001: { activeVersion: "1.0.0", versions: { "1.0.0": pendingCard } },
+    },
+  };
+  const notApproved = resolveEvidenceCard(pendingEvidence, "evd_eef_sel_primary_001");
+  assert.equal(notApproved.status, "rejected");
+  if (notApproved.status === "rejected") {
+    assert.equal(notApproved.reason, "not_approved");
+    assert.equal(notApproved.cardId, "evd_eef_sel_primary_001");
+  }
+});
+
+test("rollback refuses non-approved targets for cards and skills (test gap)", () => {
+  const pendingCard = baseCard({
+    version: "2.0.0",
+    review: { status: "pending" },
+  }) as unknown as Readonly<EvidenceCardV0>;
+  const evidence: EvidenceRegistryV0 = {
+    ...EVIDENCE_REGISTRY_V0,
+    cards: {
+      ...EVIDENCE_REGISTRY_V0.cards,
+      evd_eef_sel_primary_001: {
+        activeVersion: "1.0.0",
+        versions: {
+          "1.0.0": EVIDENCE_REGISTRY_V0.cards["evd_eef_sel_primary_001"].versions["1.0.0"],
+          "2.0.0": pendingCard,
+        },
+      },
+    },
+  };
+  const cardRollback = rollbackEvidenceCard(evidence, "evd_eef_sel_primary_001", "2.0.0");
+  assert.equal(cardRollback.ok, false);
+  if (!cardRollback.ok) assert.equal(cardRollback.reason, "target_not_approved");
+
+  const pendingManifest = {
+    ...SKILL_REGISTRY_V0.skills["emotion_support"].versions["1.0.0"],
+    version: "2.0.0",
+    review: { status: "pending" as const },
+  };
+  const skills: SkillRegistryV0 = {
+    ...SKILL_REGISTRY_V0,
+    skills: {
+      ...SKILL_REGISTRY_V0.skills,
+      emotion_support: {
+        activeVersion: "1.0.0",
+        versions: {
+          "1.0.0": SKILL_REGISTRY_V0.skills["emotion_support"].versions["1.0.0"],
+          "2.0.0": pendingManifest as unknown as Readonly<SkillManifestV0>,
+        },
+      },
+    },
+  };
+  const skillRollback = rollbackSkillManifest(skills, "emotion_support", "2.0.0");
+  assert.equal(skillRollback.ok, false);
+  if (!skillRollback.ok) assert.equal(skillRollback.reason, "target_not_approved");
+});
+
+test("a corrupted ACTIVE version fail-closes loads even when the pinned target is valid (P2-2)", () => {
+  const corruptActive = baseCard({
+    version: "2.0.0",
+    sourceStatus: "mysteriously_unknown",
+  }) as unknown as Readonly<EvidenceCardV0>;
+  const evidence: EvidenceRegistryV0 = {
+    ...EVIDENCE_REGISTRY_V0,
+    cards: {
+      ...EVIDENCE_REGISTRY_V0.cards,
+      evd_eef_sel_primary_001: {
+        activeVersion: "2.0.0",
+        versions: {
+          "1.0.0": EVIDENCE_REGISTRY_V0.cards["evd_eef_sel_primary_001"].versions["1.0.0"],
+          "2.0.0": corruptActive,
+        },
+      },
+    },
+  };
+  // The manifest pins 1.0.0 (valid), but the card-level retraction state is
+  // read from the ACTIVE version: that read must not happen unvalidated.
+  assert.throws(
+    () => loadSkillForChild("emotion_support", 8, { skills: SKILL_REGISTRY_V0, evidence }),
+    ContractValidationError,
+  );
+});
+
+test("shipped card prose carries no AI-efficacy assertion phrasing (P2-3 smoke)", () => {
+  // Deliberately SMALL denylist: this is a lexical smoke test over shipped
+  // registry content, not a general prose guard (the schema-level
+  // anti-inference boundary covers the enum fields; prose remains
+  // human-review-controlled — docs/EVIDENCE_POLICY.md §1 states the
+  // residual explicitly).
+  const forbidden = [
+    /proven\s+for\s+ai\b/i,
+    /\bai\s+agents?\s+are\s+proven\b/i,
+    /\bai[- ]agent\s+efficacy\s+(is\s+)?(proven|established|demonstrated)\b/i,
+  ];
+  // The scanner itself must fire on blatant assertion phrasing (control).
+  for (const sample of [
+    "This approach is proven for AI agent deployment.",
+    "AI agents are proven to help children regulate emotions.",
+    "AI-agent efficacy is proven in randomized trials.",
+  ]) {
+    assert.ok(forbidden.some((pattern) => pattern.test(sample)), `control sample must fire: ${sample}`);
+  }
+  // All registered versions of all shipped cards must be free of it.
+  for (const cardId of Object.keys(EVIDENCE_REGISTRY_V0.cards)) {
+    const entry = EVIDENCE_REGISTRY_V0.cards[cardId];
+    for (const version of Object.keys(entry.versions)) {
+      const card = entry.versions[version];
+      const prose = [
+        card.subjectsAndContext,
+        card.claimedEffects,
+        card.summary,
+        ...card.limitations,
+        ...card.applicableConditions,
+        ...card.exclusionConditions,
+      ];
+      for (const text of prose) {
+        for (const pattern of forbidden) {
+          assert.ok(!pattern.test(text), `${cardId}@${version} prose must not assert AI efficacy: ${text}`);
+        }
+      }
+    }
   }
 });

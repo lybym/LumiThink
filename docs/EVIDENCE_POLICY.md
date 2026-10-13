@@ -8,6 +8,7 @@
 
 - 专业策略必须可追踪**来源、版本、适用与禁忌**（PRD FR-010 / Roadmap R1-13）；没有已核验证据支撑的策略**不得调用**（fail-closed，无"暂时放行"）。
 - **"指南支持学校教师实践" ≠ "AI 智能体对个体儿童疗效已证明"。** 该禁令在 Schema 层强制：Evidence Card 的 `aiTransferBoundary` 只注册 `school_practice_only` 一个值，Skill Manifest 的 `efficacyStatement` 只注册 `no_ai_efficacy_claim` 一个值——不存在能把"AI 疗效已证明"登记进系统的枚举值；无证据/未批准的策略必须标记限制或整体拒绝调用。
+- **反推理边界的残余（诚实声明）**：Schema 强制覆盖的是**结构化枚举字段**；`claimedEffects` / `summary` / `subjectsAndContext` 等自由文本仅有长度上限，没有词法级强制——由人工 PR review 把关，并以 shipped 卡片正文的词法冒烟测试兜底（`tests/domain/evidence/registry.spec.ts`，拒绝明显的疗效断言措辞）。"Schema 层强制"这一表述始终只指枚举字段。
 - Registry 是**本地只读冻结常量**：无网络访问、无动态执行、无插件加载（issue #25：不引入任意动态执行插件）。内容变更 = 代码变更 = Feature PR + CI 全量回归。
 - **默认合成数据；卡片只存引用元数据**（URL/标题/出版方/年份 + 结构化范围字段），不存受版权保护的正文摘录，也不从公开互联网抓取整篇文本（issue #25 验收标准 3）。字段长度上限是 Schema 约束，不是自觉。
 - `ChildEvidence`（儿童个人学习证据，PRD §7）**不属于**本 Registry：其接入只能经导出/审查边界；本模块不含任何儿童数据。
@@ -23,7 +24,7 @@
 | `subjectsAndContext` / `claimedEffects` | 研究对象与场景、效应的结构化描述（≤500 字符） |
 | `limitations` / `applicableConditions` / `exclusionConditions` | 局限、适用条件、禁忌/排除条件（三者必填且非空） |
 | `aiTransferBoundary` | 外推边界；v0 仅 `school_practice_only` |
-| `appliesToSkills` | 可支撑的首发 Skill（与 Eval 词表一致，非空） |
+| `appliesToSkills` | 可支撑的首发 Skill（与 Eval 词表一致，非空）；Skill Manifest 只能绑定 `appliesToSkills` **包含该 Skill** 的卡片版本（发布与加载双重 fail-closed，见 §4/§5） |
 | `sourceStatus` | `live` / `retracted`（引用失效状态，加载 fail-closed） |
 | `updatedAt` / `review` | 更新时间（ISO 日期）；人工审核状态 `pending`/`approved`/`rejected` + `reviewedBy`/`reviewedAt`/`note` |
 | `summary` | 投影到 Eval 证据视图的结构化摘要（≤500 字符） |
@@ -37,7 +38,7 @@
 | `schemaVersion` / `skillId` / `version` | Schema 版本（v0 仅 `1.0`）；首发双 Skill `emotion_support`、`homework_initiation`（与 Eval `EVAL_SKILL_IDS` 同一词表）；内容版本（semver） |
 | `goal` / `entranceSignals` | 结构化目标与入口信号 |
 | `applicableConditions` / `disabledConditions` | 适用与禁用条件（禁用条件必填） |
-| `evidenceBindings` | 循证依据：绑定**精确** `cardId@cardVersion`（版本锚定，防漂移），至少一条 |
+| `evidenceBindings` | 循证依据：绑定**精确** `cardId@cardVersion`（版本锚定，防漂移），至少一条；且绑定卡版本的 `appliesToSkills` 必须包含该 Skill |
 | `strategySteps` / `toolCapabilities` | 分步策略；工具能力必须是 `SAFE_TOOL_REGISTRY` 白名单子集（v0 两个 Skill 均为空 = 最小权限） |
 | `exitPaths` | 儿童可选择退出路径（Eval `EVAL_EXIT_PATHS` 词表，非空） |
 | `efficacyStatement` | 仅 `no_ai_efficacy_claim` |
@@ -52,8 +53,8 @@
 
 1. `unknown_skill`（含非字符串与原型链 id）；
 2. Skill 人工审核门槛（`skill_not_approved`）；
-3. 证据绑定逐条解析（第一个问题即拒绝）：`evidence_unknown_card` / `evidence_version_drift`（绑定版本未注册）/ `evidence_not_approved`（审核 ≠ approved）/ `evidence_source_retracted`；
-4. **引用失效是 card 级状态**：当卡片 `activeVersion` 标记 `retracted`，该卡片无法支撑任何加载（含锚定旧版本的加载），直至人工发布新的 live 版本或回滚 active 指针；
+3. 证据绑定逐条解析（第一个问题即拒绝）：`evidence_unknown_card` / `evidence_version_drift`（绑定版本未注册）/ `evidence_not_approved`（审核 ≠ approved）/ `evidence_source_retracted` / `evidence_scope_mismatch`（绑定卡版本的 `appliesToSkills` 不含该 Skill）；
+4. **引用失效是 card 级状态**：当卡片 `activeVersion` 标记 `retracted`，该卡片无法支撑任何加载（含锚定旧版本的加载），直至人工恢复——**注意恢复路径的区分**：操作性/误标记的失效可回滚 active 指针至旧 live 版本；**真实来源撤稿**后回滚到旧 live 版本只会让服务重新引用同一失效来源 URL，因此真实撤稿的恢复必须**发布引用有效来源的新版本**，不得以回滚代替；
 5. 年龄适用性：任一绑定卡的来源人群区间不覆盖儿童年龄 → **受控降级**（`age_not_applicable`，会话继续但不带该策略，detail 含各卡区间）；全部覆盖 → `served`，并携带每张绑定卡的精确版本、引文元数据与合并去重后的 limitations——每条策略都可输出**来源版本、适用/限制**（验收标准 2）。
 
 | 输入状态 | 结果 | reason |
@@ -62,16 +63,19 @@
 | 未批准证据或 Skill | 拒绝 | `not_approved` / `skill_not_approved` |
 | 版本漂移（绑定版本未注册） | 拒绝 | `unknown_version`（→ `evidence_version_drift`） |
 | 引用失效（retracted） | 拒绝 | `source_retracted`（→ `evidence_source_retracted`） |
+| 绑定超出卡片声明范围 | 拒绝 | `binding_scope_mismatch`（发布期，→ 加载期 `evidence_scope_mismatch`） |
 | 年龄/场景不适用 | 受控降级 | `age_not_applicable`（结构化 detail，不中断会话） |
 
 Registry 查找**全部使用 `Object.hasOwn`**：`constructor`/`toString`/`hasOwnProperty` 等原型链 id 不可能伪装成已注册条目（R1-15 review 对 `SAFE_TOOL_REGISTRY` 同类问题的设计级预防）。场景/策略层面的不适用由 Eval 场景矩阵（`evidence_misfit` 等）与 Manifest 的适用/禁用条件覆盖；v0 加载器按年龄区间做机器可判定的一档。
 
+**拒绝结果的 no-echo 合同**：拒绝结果只回显已从 Registry 解析成功的开发者编写 id（`Object.hasOwn` 验证）或 Manifest 自带的绑定 id；未解析成功的调用方提交值（任意字符串、非字符串、未注册的词表 skill id）一律替换为固定占位 `[masked]`（`MASKED_REJECTION_ID`），原始值永不回显、不设长度上限——不可信输入在进入 R1-02 日志/界面之前就被掩蔽。
+
 ## 5. 人工审核发布门槛与可复现发布/回滚（issue #25 交付范围 5）
 
-- `publishEvidenceCardVersion` / `publishSkillManifest`：显式人工审核门槛——`review.status === "approved"` 且含 `reviewedBy` + `reviewedAt`；版本必须**严格递增**（防覆盖）；Skill 发布额外 fail-closed 校验工具白名单与证据绑定可解析（绑定缺失/漂移/未批准/retracted 的 Manifest 无法发布）。
-- `rollbackEvidenceCard` / `rollbackSkillManifest`：把 `activeVersion` 指回**已注册**版本；目标必须 approved 且 live（retracted 版本不能成为回滚目标）；版本永不删除，回滚本身可再次回滚。
+- `publishEvidenceCardVersion` / `publishSkillManifest`：显式人工审核门槛——`review.status === "approved"` 且含 `reviewedBy` + `reviewedAt`；版本必须**严格递增**（防覆盖）；Skill 发布额外 fail-closed 校验工具白名单、证据绑定可解析（绑定缺失/漂移/未批准/retracted 的 Manifest 无法发布），以及**范围相容**：每个绑定卡版本的 `appliesToSkills` 必须包含该 Skill（`binding_scope_mismatch`）——`appliesToSkills` 是治理不变量，在绑定创建（发布）与使用（加载）两端强制，而非仅靠约定。
+- `rollbackEvidenceCard` / `rollbackSkillManifest`：把 `activeVersion` 指回**已注册**版本；目标必须 approved 且 live（retracted 版本不能成为回滚目标）；版本永不删除，回滚本身可再次回滚。**回滚不适用于真实来源撤稿的恢复**：回滚到同卡旧 live 版本引用的是同一来源 URL；真实撤稿后恢复服务必须发布引用有效来源的新版本（见 §4 第 4 条）。
 - 发布/回滚是**纯函数**：返回新的冻结 registry，输入永不原地修改；同一操作序列跨运行产生等价状态（测试证明）。
-- **一处人工修订触发相关 Eval 回归**：registry 内容变更都是代码变更，PR 的 CI 同轮运行 `pnpm test`（含 Eval 套件）与 `assertShippedRegistriesAlignedWithEvalSuite` 对齐检查——套件/Registry 共享证据 ID 的一致性、`evaluationRefs` 必须指向真实场景、工具必须已注册、绑定必须可解析、Skill 集合必须等于首发双 Skill。修订破坏任一链接即 CI 失败。
+- **一处人工修订触发相关 Eval 回归**：registry 内容变更都是代码变更，PR 的 CI 同轮运行 `pnpm test`（含 Eval 套件）与 `assertShippedRegistriesAlignedWithEvalSuite` 对齐检查——(a) Eval 套件 fixture 以**真实 ID** 登记两张 shipped 治理卡的投影（`evd_eef_sel_primary_001` / `evd_eef_meta_srl_001`，独立手工副本），并与 Registry active 版本的投影（evidenceId / reviewed / appliesToSkills / summary）逐一比对，任何一侧修订导致不一致即 `suite_evidence_status_conflict`（合成 `evd_synth_*` 控制卡仍仅存在于套件侧，不参与比对）；(b) `evaluationRefs` 必须指向真实场景；(c) 工具必须已注册；(d) 绑定必须可解析；(e) Skill 集合必须等于首发双 Skill。修订破坏任一链接即 CI 失败。
 
 ### 发布/回滚示例（与 tests/domain/evidence/registry.spec.ts 一致）
 
@@ -79,7 +83,9 @@ Registry 查找**全部使用 `Object.hasOwn`**：`constructor`/`toString`/`hasO
 修订:  card@2.0.0（review: approved + reviewer/日期）→ publishEvidenceCardVersion → active=2.0.0
 回滚:  rollbackEvidenceCard(registry, cardId, "1.0.0") → active=1.0.0（版本 2.0.0 仍注册在案）
 再发布: card@3.0.0 → publish（2.0.0 不可重复发布：already_registered）
-失效:  card@N.sourceStatus=retracted → 该卡所有加载拒绝 → rollback 至 live 版本恢复
+失效:  card@N.sourceStatus=retracted → 该卡所有加载拒绝
+       ├─ 操作性/误标记失效 → rollback 至旧 live 版本恢复
+       └─ 真实来源撤稿 → 必须发布引用有效来源的新版本（回滚会重新引用同一失效 URL，不作恢复路径）
 ```
 
 ## 6. 首批证据卡（v0 内容）

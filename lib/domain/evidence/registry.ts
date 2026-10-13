@@ -12,11 +12,17 @@
  *   pointer, so publishing and rolling back are pure, reproducible data
  *   operations (new frozen registry object in, old one untouched);
  * - the loader fail-closes on unknown evidence ids, unapproved evidence,
- *   version drift, retracted (invalidated) citations and unapproved skills,
- *   and degrades in a controlled way when the child's age is outside the
- *   bound cards' source-population range (issue #25 acceptance criterion 1);
+ *   version drift, retracted (invalidated) citations, bindings whose card
+ *   version does not list the skill (appliesToSkills containment) and
+ *   unapproved skills, and degrades in a controlled way when the child's age
+ *   is outside the bound cards' source-population range (issue #25
+ *   acceptance criterion 1);
  * - publish REQUIRES the explicit human-review gate (approved status with
- *   reviewer handle and review date) and a strictly increasing semver;
+ *   reviewer handle and review date) and a strictly increasing semver; skill
+ *   publish additionally fail-closes when a bound card version does not list
+ *   the manifest's skill in its appliesToSkills — the containment invariant
+ *   is enforced where bindings are created (publish) AND used (load), never
+ *   by convention only (R1-13 review round 1, P1-1);
  * - `loadSkillForChild` returns structural facts only (resolved card
  *   versions, limitations, applicability) — every strategy invocation can
  *   output its source version and 适用/限制 (issue #25 acceptance
@@ -49,6 +55,20 @@ import {
   type EvidenceCardV0,
 } from "./card.ts";
 import { validateSkillManifestV0, type SkillManifestV0 } from "./skill-manifest.ts";
+
+// ---------------------------------------------------------------------------
+// No-echo contract for rejection metadata (docs/EVIDENCE_POLICY.md §4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixed placeholder that replaces ANY caller-submitted id which failed its
+ * lookup. A value is echoed in a structured rejection only after it has been
+ * verified against developer-authored data (`Object.hasOwn` on a registry,
+ * or a successful registry resolution); raw submitted values — unbounded,
+ * possibly attacker-shaped — are never echoed, so they cannot reach R1-02
+ * logs or surfaces (R1-13 review round 1, P2-1: mask before exposure).
+ */
+export const MASKED_REJECTION_ID = "[masked]" as const;
 
 // ---------------------------------------------------------------------------
 // Registry shapes (versioned; every entry keeps all published versions)
@@ -412,10 +432,11 @@ export type EvidenceResolution =
  * Rejection order is deterministic: unknown card → unknown version (version
  * drift) → card-level citation invalidation (the ACTIVE version marked
  * retracted blocks every load of this card, including older pinned
- * versions) → unapproved review → retracted pinned version. Registry ids
- * are developer-authored keys, so echoing them in the structured rejection
- * is safe; submitted card ids from untrusted callers are matched, never
- * echoed.
+ * versions) → unapproved review → retracted pinned version. No-echo
+ * contract: an id is echoed in the structured rejection only when
+ * `Object.hasOwn` verified it against the registry (developer-authored
+ * key); a submitted cardId that failed the lookup is replaced by the fixed
+ * MASKED_REJECTION_ID placeholder — never echoed raw.
  */
 export function resolveEvidenceCard(
   registry: Readonly<EvidenceRegistryV0>,
@@ -423,7 +444,8 @@ export function resolveEvidenceCard(
   version?: string,
 ): EvidenceResolution {
   if (typeof cardId !== "string" || !Object.hasOwn(registry.cards, cardId)) {
-    return Object.freeze({ status: "rejected", reason: "unknown_card", cardId: typeof cardId === "string" ? cardId : "" });
+    // Lookup failed: the submitted value is never echoed (no-echo contract).
+    return Object.freeze({ status: "rejected", reason: "unknown_card", cardId: MASKED_REJECTION_ID });
   }
   const entry = registry.cards[cardId];
   const targetVersion = version ?? entry.activeVersion;
@@ -442,9 +464,24 @@ export function resolveEvidenceCard(
   // Citation invalidation is a CARD-level fail-closed state: when the active
   // version marks the source retracted, the card can no longer back ANY
   // load — including loads pinned to older versions — until a human
-  // publishes a new live version or rolls the active pointer back
+  // publishes a new live version (the recovery path for a GENUINE source
+  // retraction) or rolls the active pointer back (operational/erroneous
+  // retraction markings only: a rollback to an older live version still
+  // cites the same source URL and must not be used to resume service after
+  // a genuine retraction — docs/EVIDENCE_POLICY.md §4/§5)
   // (issue #25 AC 1 引用失效).
   const activeCard = entry.versions[entry.activeVersion];
+  // The card-level retraction state below is read from the ACTIVE version,
+  // so the active version is re-validated too before its sourceStatus is
+  // trusted — otherwise a corrupted active version would be read
+  // unvalidated while the pinned target version validates cleanly
+  // (asymmetric fail-closed; a corrupted registry is a developer error and
+  // must throw loudly, never load).
+  const activeProblems: ContractProblem[] = [];
+  validateEvidenceCardV0(activeCard, activeProblems);
+  if (activeProblems.length > 0) {
+    throw new ContractValidationError(activeProblems);
+  }
   if (activeCard.sourceStatus === "retracted") {
     return Object.freeze({ status: "rejected", reason: "source_retracted", cardId });
   }
@@ -500,7 +537,8 @@ export type SkillLoadRejectionReason =
   | "evidence_unknown_card"
   | "evidence_version_drift"
   | "evidence_not_approved"
-  | "evidence_source_retracted";
+  | "evidence_source_retracted"
+  | "evidence_scope_mismatch";
 
 export type SkillLoadResult =
   | {
@@ -541,11 +579,14 @@ function ageCoveredByCard(childAgeYears: number, card: Readonly<EvidenceCardV0>)
  * Load a skill for one child turn against the registries (defaults to the
  * shipped v0 pair). Resolution order is deterministic: unknown skill →
  * skill review gate → evidence bindings (unknown card / version drift /
- * unapproved / retracted, fail-closed on the first problem) → age
- * applicability of EVERY bound card (controlled degradation when any card
- * does not cover the age). The served result carries each bound card's
- * exact version, citation metadata and limitations so the caller can state
- * the strategy's source version and 适用/限制.
+ * unapproved / retracted / appliesToSkills scope mismatch, fail-closed on
+ * the first problem) → age applicability of EVERY bound card (controlled
+ * degradation when any card does not cover the age). The served result
+ * carries each bound card's exact version, citation metadata and
+ * limitations so the caller can state the strategy's source version and
+ * 适用/限制. Rejection ids follow the no-echo contract: only values
+ * resolved from the registries are echoed; unresolved caller-submitted
+ * values are replaced by MASKED_REJECTION_ID.
  */
 export function loadSkillForChild(
   skillId: unknown,
@@ -566,16 +607,18 @@ export function loadSkillForChild(
     return Object.freeze({
       status: "rejected",
       reason: "unknown_skill",
-      skillId: typeof skillId === "string" ? skillId : "",
+      skillId: MASKED_REJECTION_ID,
       detail: Object.freeze([] as string[]),
     });
   }
   const skillResolution = resolveSkillManifest(registries.skills, skillId);
   if (skillResolution.status !== "loaded") {
+    // Not resolvable from the registry: masked under the no-echo contract,
+    // even though the allowlist gate bounds the value (uniform rule).
     return Object.freeze({
       status: "rejected",
       reason: "unknown_skill",
-      skillId,
+      skillId: MASKED_REJECTION_ID,
       detail: Object.freeze([] as string[]),
     });
   }
@@ -602,6 +645,20 @@ export function loadSkillForChild(
       return Object.freeze({
         status: "rejected",
         reason: reasonByResolution[resolution.reason],
+        skillId,
+        detail: Object.freeze([binding.cardId]),
+      });
+    }
+    // Containment invariant, load-side mirror (defense in depth): a card
+    // version may back this skill only if it lists the skill in its
+    // appliesToSkills. publishSkillManifest enforces the same rule where
+    // bindings are created; the load mirror also covers registries
+    // assembled without publish and later rollback repoints (R1-13 review
+    // round 1, P1-1). detail echoes the manifest-authored binding id only.
+    if (!(resolution.card.appliesToSkills as readonly string[]).includes(skillId)) {
+      return Object.freeze({
+        status: "rejected",
+        reason: "evidence_scope_mismatch",
         skillId,
         detail: Object.freeze([binding.cardId]),
       });
@@ -757,7 +814,8 @@ export type SkillPublishResult =
         | "already_registered"
         | "version_not_increasing"
         | "tool_not_registered"
-        | "binding_unresolved";
+        | "binding_unresolved"
+        | "binding_scope_mismatch";
       readonly detail: readonly string[];
     };
 
@@ -765,10 +823,13 @@ export type SkillPublishResult =
  * Publish one Skill Manifest version. Beyond the human-review gate and the
  * monotonic version rule, publish verifies the manifest's least-privilege
  * claims fail-closed: every advertised tool id must exist in the
- * SAFE_TOOL_REGISTRY whitelist and every pinned Evidence Card binding must
- * resolve (approved + live) in the CURRENT evidence registry — a manifest
- * that binds missing, unapproved, drifted or retracted evidence cannot be
- * published.
+ * SAFE_TOOL_REGISTRY whitelist, every pinned Evidence Card binding must
+ * resolve (approved + live) in the CURRENT evidence registry, and every
+ * resolved binding card version must list the manifest's skill in its
+ * appliesToSkills (containment invariant enforced where bindings are
+ * created; mirrored at load, R1-13 review round 1 P1-1) — a manifest that
+ * binds missing, unapproved, drifted, retracted or out-of-scope evidence
+ * cannot be published.
  */
 export function publishSkillManifest(
   registry: Readonly<SkillRegistryV0>,
@@ -804,14 +865,26 @@ export function publishSkillManifest(
     }
   }
   const unresolved: string[] = [];
+  const outOfScope: string[] = [];
   for (const binding of manifest.evidenceBindings) {
     const resolution = resolveEvidenceCard(evidenceRegistry, binding.cardId, binding.cardVersion);
     if (resolution.status === "rejected") {
       unresolved.push(`${binding.cardId}@${binding.cardVersion}:${resolution.reason}`);
+      continue;
+    }
+    // Containment invariant, publish-side enforcement (P1-1): a manifest may
+    // bind a card version only when that version lists the manifest's skill
+    // in its appliesToSkills. detail echoes manifest-authored binding ids
+    // only (developer-authored content, safe under the no-echo contract).
+    if (!(resolution.card.appliesToSkills as readonly string[]).includes(manifest.skillId)) {
+      outOfScope.push(`${binding.cardId}@${binding.cardVersion}`);
     }
   }
   if (unresolved.length > 0) {
     return Object.freeze({ ok: false, reason: "binding_unresolved", detail: Object.freeze(unresolved) });
+  }
+  if (outOfScope.length > 0) {
+    return Object.freeze({ ok: false, reason: "binding_scope_mismatch", detail: Object.freeze(outOfScope) });
   }
   const versions = Object.freeze({ ...(existing?.versions ?? {}), [manifest.version]: Object.freeze(manifest) });
   const entry = Object.freeze({ activeVersion: manifest.version, versions });
