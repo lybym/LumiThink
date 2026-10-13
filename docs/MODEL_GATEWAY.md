@@ -1,6 +1,7 @@
 # LumiThink Model Gateway 合同（MODEL_GATEWAY.md v1.0）
 
 > 版本：`1.0` ｜ 日期：2026-10-14 ｜ 状态：**R1-02 域层已交付**——Provider 契约、Mock/真实 Provider 适配器、预算/熔断/超时/取消与审计由 `lib/domain/gateway/` + `tests/domain/gateway/` 实现；HTTP 端点接线（R1-05）与真实供应商的独立数据外发评审**尚未发生**（见 §7）。
+> R1-03 接线说明（Issue #15）：`requestTimeoutMs` 与 `models[].maxOutputTokens` 成为被实际消费的配置（默认值 + 上限）；`GATEWAY_NO_PROVIDER` 与尝试前取消补齐审计事件；重试退避 abort-aware；baseURL 语义修正为 origin-only（适配器自行拼接 `/v1/messages`）。见 §3/§5。
 > 对应：[Issue #14](https://github.com/lybym/LumiThink/issues/14) ｜ [PRD FR-004/FR-006](./PRD.md) ｜ [Roadmap R1-02](./ROADMAP.md) ｜ [HARNESS §3](./HARNESS.md) ｜ [架构](./ARCHITECTURE.md) ｜ [TECH_STACK](./TECH_STACK.md)
 > 合并要求遵循 Issue #14：一 Issue 一 PR；合成数据；R0 DSH 最小权限与零 SKIP CI 不变；新安全/隐私失败阻断合并。
 
@@ -34,11 +35,11 @@ provider.stream(request: ModelRequest, { signal }): AsyncIterable<ProviderStream
 
 | 字段 | 语义 |
 | --- | --- |
-| `models[]` | `modelId ↔ providerId` 一对一绑定 + `maxOutputTokens` + 可选 `pricing`（每百万 token 的微美元整数价） |
+| `models[]` | `modelId ↔ providerId` 一对一绑定 + `maxOutputTokens` + 可选 `pricing`（每百万 token 的微美元整数价）。**R1-03 接线（issue #15）**：`maxOutputTokens` 现在被 Gateway 实际消费——它是该模型的输出上限**默认值与天花板**（请求未携带时取注册值；显式值被钳制到注册值），供应商可见请求永远不超过注册上限 |
 | `budget` | `maxRequestsPerDay / maxCostMicroUsdPerDay / maxTotalTokensPerDay`——**必填**，没有隐式无限额 |
 | `retry` | `maxAttempts`（1–5）+ `backoffBaseMs`（指数退避 `base·2^k`） |
 | `breaker` | `failureThreshold` + `cooldownMs`（半开探测见 §5） |
-| `requestTimeoutMs` | 默认单次尝试超时（请求可携带更小的 `timeoutMs`，上限 120s） |
+| `requestTimeoutMs` | **R1-03 接线（issue #15）**：默认单次尝试超时——请求未携带 `timeoutMs` 时生效；请求可携带**更小**的超时，显式更大的值被钳制到该默认（解析上限 120s 不变） |
 
 `describeGatewayConfig()` 产出**可审查视图**：baseURL 仅保留 origin、密钥回调仅保留存在布尔位、数据外发评审仅保留 reviewer/reason——密钥材料结构性排除（测试强制）。
 
@@ -58,10 +59,11 @@ provider.stream(request: ModelRequest, { signal }): AsyncIterable<ProviderStream
 
 ## 5. 重试、预算与熔断
 
-- **重试**：仅 `rate_limited / server_error / unavailable` 且尚未向消费者产出任何 delta 时重试（**可见输出后绝不重试**——流已部分消费，重试会拼出重复/混乱文本）；`auth/protocol/bad_request/invalid` 永不重试；**超时永不自动重试**。重试次数严格 = `maxAttempts`（重试风暴注入测试证明精确停止）。
-- **预算**：UTC 日键（`YYYY-MM-DD`，`dayKeyOf`）。预检：请求数、累计费用、累计 token 超限 → 联系前拒绝（审计 `budget.rejected` + 快照）。**事后窗口**（已记录在案）：单次响应把累计值推过上限时照常记账并审计 `budget.overshoot`，下一次请求被拒——进程内账本以 `UsageLedger` 接口注入，R1-08/R1-09 持久化时替换实现即可，语义不变。
+- **重试**：仅 `rate_limited / server_error / unavailable` 且尚未向消费者产出任何 delta 时重试（**可见输出后绝不重试**——流已部分消费，重试会拼出重复/混乱文本）；`auth/protocol/bad_request/invalid` 永不重试；**超时永不自动重试**。重试次数严格 = `maxAttempts`（重试风暴注入测试证明精确停止）。**R1-03（issue #15）**：重试退避是 abort-aware 的——调用方在退避期间中止会立即以 `GATEWAY_CANCELLED` 结束，不再睡完整个退避窗口。
+- **预算**：UTC 日键（`YYYY-MM-DD`，`dayKeyOf`）。预检：请求数、累计费用、累计 token 超限 → 联系前拒绝（审计 `budget.rejected` + 快照）。**预算门禁按请求评估一次**：Gateway 内部的有界重试不重复预检（同一请求的重试共享一次准入；事后超限由 `budget.overshoot` 记录，下一次请求被拒）。进程内账本以 `UsageLedger` 接口注入，R1-08/R1-09 持久化时替换实现即可，语义不变。
 - **熔断**：每 Provider 独立的 `closed → open → half_open` 状态机；只有**可用性失败**（timeout/unavailable/rate_limited/server_error）计数，auth/protocol/budget/cancel 一律不参与（它们不代表 Provider 健康，测试强制）。冷却期满允许**恰好一个**半开探测：成功 → closed，失败 → 重新 open 并重置冷却。
 - **费用**：整数微美元数学（`ceil(tokens × price / 1e6)`，双侧分别取顶），无浮点记账。
+- **审计完整性（R1-03，carried #37 note）**：`GATEWAY_NO_PROVIDER` 与"尝试开始前"的调用方取消现在都会留下结构化审计事件（`request.rejected` / `attempt.cancelled`）——每次传输前拒绝与取消均可复查。
 
 ## 6. 与统一契约（R1-01）的映射
 

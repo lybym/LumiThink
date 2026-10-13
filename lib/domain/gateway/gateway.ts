@@ -306,6 +306,18 @@ export function createModelGateway(
     const providerEntry =
       registration === null ? null : lookupGatewayRegistry(providersById, registration.providerId);
     if (registration === null || providerEntry === null) {
+      // Carried #37 review note: this rejection path previously left NO audit
+      // event. It now emits the same request.rejected shape as the
+      // validation failure so every pre-transport rejection is observable.
+      pushAudit({
+        type: "request.rejected",
+        atMs: clock(),
+        requestId: request.requestId,
+        traceId: request.traceId,
+        turnId: request.turnId,
+        code: "GATEWAY_NO_PROVIDER",
+        detailKeys: ["registeredModels"],
+      });
       throw new GatewayError("GATEWAY_NO_PROVIDER", {
         registeredModels: Object.keys(modelsById).length,
       });
@@ -314,10 +326,50 @@ export function createModelGateway(
     if (provider.dataEgressAuthorized !== true) {
       // Defense in depth: a provider that cannot prove explicit authorization
       // is treated exactly like a missing provider (fail closed, no egress).
+      pushAudit({
+        type: "request.rejected",
+        atMs: clock(),
+        requestId: request.requestId,
+        traceId: request.traceId,
+        turnId: request.turnId,
+        code: "GATEWAY_NO_PROVIDER",
+        detailKeys: ["registeredModels", "egressUnauthorized"],
+      });
       throw new GatewayError("GATEWAY_NO_PROVIDER", {
         registeredModels: Object.keys(modelsById).length,
       });
     }
+
+    // ---- 2b. R1-03 wiring (carried #37 review notes) -----------------------
+    // config.requestTimeoutMs is now a real consumer: it is the DEFAULT
+    // per-attempt timeout when the request does not carry one, and the
+    // CEILING for an explicit request timeout (docs/MODEL_GATEWAY.md §3:
+    // "请求可携带更小的 timeoutMs"). A request may tighten the timeout,
+    // never exceed the configured default.
+    const rawRequestRecord =
+      rawRequest !== null && typeof rawRequest === "object" ? (rawRequest as Record<string, unknown>) : {};
+    const carriedExplicitTimeout = rawRequestRecord.timeoutMs !== undefined;
+    const effectiveTimeoutMs = carriedExplicitTimeout
+      ? Math.min(request.timeoutMs, config.requestTimeoutMs)
+      : config.requestTimeoutMs;
+    // ModelRegistration.maxOutputTokens is now consumed: it is the per-model
+    // CEILING and the DEFAULT when the request does not carry one; an
+    // explicit request value is clamped to the registration ceiling so no
+    // path can ask a provider for more output than the registered model
+    // allows. The provider-visible request is the only surface that changes.
+    const providerRequest = ingestDomainFact({
+      requestId: request.requestId,
+      traceId: request.traceId,
+      turnId: request.turnId,
+      modelId: request.modelId,
+      messages: request.messages,
+      tools: request.tools,
+      timeoutMs: request.timeoutMs,
+      maxOutputTokens: Math.min(
+        request.maxOutputTokens ?? registration.maxOutputTokens,
+        registration.maxOutputTokens,
+      ),
+    }) as Readonly<ModelRequest>;
 
     // ---- 3. Daily budget gate (before ANY provider contact) ----------------
     const dayKey = dayKeyOf(clock());
@@ -364,10 +416,20 @@ export function createModelGateway(
 
     while (attempts < maxAttempts) {
       if (callerSignal?.aborted === true) {
+        // Carried #37 review note: a pre-attempt caller stop previously left
+        // no audit event. Record the cancellation of the would-be attempt.
+        pushAudit({
+          type: "attempt.cancelled",
+          atMs: clock(),
+          requestId: request.requestId,
+          providerId: registration.providerId,
+          attempt: attempts + 1,
+          by: "caller",
+        });
         throw new GatewayError("GATEWAY_CANCELLED", { attempt: attempts });
       }
       attempts += 1;
-      const timeoutMs = request.timeoutMs;
+      const timeoutMs = effectiveTimeoutMs;
       const attemptController = new AbortController();
       // Holder object: property state is never flow-narrowed across the
       // callbacks below (a bare `let` would risk unsound narrowing).
@@ -418,7 +480,7 @@ export function createModelGateway(
       });
 
       const iterator = provider
-        .stream(request, { signal: attemptController.signal })
+        .stream(providerRequest, { signal: attemptController.signal })
         [Symbol.asyncIterator]();
       let usage: ModelUsage | null = null;
       let fullText = "";
@@ -496,7 +558,33 @@ export function createModelGateway(
         ) {
           throw gatewayError;
         }
-        await sleep(config.retry.backoffBaseMs * 2 ** (attempts - 1));
+        // Carried #37 review note: the retry backoff is abort-aware — a
+        // caller stop during the backoff is honored promptly as
+        // GATEWAY_CANCELLED instead of sleeping to completion.
+        const backoffMs = config.retry.backoffBaseMs * 2 ** (attempts - 1);
+        if (callerSignal === null) {
+          await sleep(backoffMs);
+        } else {
+          const abortCtl: { reject: ((marker: { readonly aborted: true }) => void) | null } = {
+            reject: null,
+          };
+          const abortPromise = new Promise<never>((_resolve, reject) => {
+            abortCtl.reject = reject;
+          });
+          // Never let a late abort become an unhandled rejection.
+          abortPromise.catch(() => undefined);
+          const onBackoffAbort = (): void => {
+            abortCtl.reject?.({ aborted: true });
+          };
+          callerSignal.addEventListener("abort", onBackoffAbort, { once: true });
+          try {
+            await Promise.race([sleep(backoffMs), abortPromise]);
+          } catch {
+            throw new GatewayError("GATEWAY_CANCELLED", { during: "backoff" });
+          } finally {
+            callerSignal.removeEventListener("abort", onBackoffAbort);
+          }
+        }
         continue;
       } finally {
         clearTimeout(timeoutHandle);

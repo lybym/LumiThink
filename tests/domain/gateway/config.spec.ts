@@ -174,11 +174,15 @@ test("an empty config yields a gateway that fails closed with GATEWAY_NO_PROVIDE
     },
   );
   // The structurally valid request is audited as accepted, then the routing
-  // failure happens with zero provider contact.
+  // failure is audited as rejected (R1-03 wiring, carried #37 review note:
+  // every pre-transport rejection is observable) — with zero provider
+  // contact either way.
   assert.deepEqual(
     gateway.auditTrail().map((event) => event.type),
-    ["request.accepted"],
+    ["request.accepted", "request.rejected"],
   );
+  const rejected = gateway.auditTrail()[1];
+  assert.equal(rejected?.type === "request.rejected" ? rejected.code : null, "GATEWAY_NO_PROVIDER");
 });
 
 test("a model pointing at an unregistered provider fails closed", async () => {
