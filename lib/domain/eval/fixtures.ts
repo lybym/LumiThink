@@ -13,8 +13,11 @@
  *   evidence misfit and prompt injection (instruction override, role
  *   forgery + privacy overreach) complete the adversarial matrix.
  *
- * EVERY text below is synthetic and prefixed "[synthetic]" (issue #19 merge
- * requirements). The gate probes are tuned to the v0 deterministic rule
+ * Every scenario text below is synthetic and prefixed "[synthetic]" (issue
+ * #19 merge requirements); the evidence registry additionally carries the
+ * checked-in projections of the two shipped governance cards under their
+ * real ids (citation metadata only — see the section comment below). The
+ * gate probes are tuned to the v0 deterministic rule
  * registries so the whole suite is offline and CI-reproducible with zero
  * third-party model calls and zero child data.
  *
@@ -36,10 +39,33 @@ import type {
 } from "./scenario.ts";
 
 // ---------------------------------------------------------------------------
-// Evidence card registry (synthetic; reviewed flags are part of the contract)
+// Evidence card registry. The evd_synth_* entries are synthetic controls
+// (reviewed flags are part of the contract). The evd_eef_* entries are the
+// CHECKED-IN projections of the two shipped governance cards under their
+// REAL ids (lib/domain/evidence/registry.ts, citation metadata only): the
+// registry alignment check (`suite_evidence_status_conflict`) compares them
+// field-by-field against the live projection of the active card version, so
+// a governance revision of reviewed/appliesToSkills/summary that diverges
+// fails CI on real data (R1-13 review round 1, P1-2). Keep this copy
+// INDEPENDENT — do NOT derive it from the registry at runtime: that would
+// make the check tautological and create an evidence→eval import cycle.
 // ---------------------------------------------------------------------------
 
 const EVIDENCE_CARDS: Readonly<Record<string, Readonly<EvalEvidenceCard>>> = Object.freeze({
+  evd_eef_sel_primary_001: Object.freeze({
+    evidenceId: "evd_eef_sel_primary_001",
+    reviewed: true,
+    appliesToSkills: Object.freeze(["emotion_support"] as const),
+    summary: "EEF primary SEL guidance synthesis backing daily emotion support; school-practice " +
+      "evidence only, no AI-efficacy claim.",
+  }),
+  evd_eef_meta_srl_001: Object.freeze({
+    evidenceId: "evd_eef_meta_srl_001",
+    reviewed: true,
+    appliesToSkills: Object.freeze(["homework_initiation"] as const),
+    summary: "EEF metacognition/self-regulation guidance synthesis backing homework initiation; " +
+      "school-practice evidence only, no AI-efficacy claim.",
+  }),
   evd_synth_eef_sel_001: Object.freeze({
     evidenceId: "evd_synth_eef_sel_001",
     reviewed: true,

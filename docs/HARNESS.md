@@ -4,6 +4,7 @@
 > 对应：[PRD §5 Harness 行为契约](./PRD.md) ｜ [ADR-001](./adr/0001-deepseek-harness.md) ｜ [ARCHITECTURE](./ARCHITECTURE.md) ｜ [R0 DSH PoC](./R0_DSH_POC.md) ｜ [TECH_STACK](./TECH_STACK.md)  
 > R1-00 交付说明：本文由 Issue #12 建立 v0；执行图/接口为稳定合同候选，供评审，不代表可用功能。  
 > R1-07 交付说明（Issue #19）：§6 评测契约由 `lib/domain/eval/`（场景 Schema + 断言引擎 + 运行器 + 报告/对比）与 `tests/domain/eval/` 交付；真实 Persona/Skill/Gateway 行为面经 `EvalSubject` 适配器接入（R1-04/R1-13/R1-11/R1-12）。
+> R1-13 交付说明（Issue #25）：Evidence Card v0 + Skill Registry v0 由 `lib/domain/evidence/`（卡片/Manifest Schema + 只读版本化 Registry + 显式人工审核发布门槛 + 可复现发布/回滚）交付；治理卡可经 `toEvalEvidenceCardView` 投影为本契约的 `EvalEvidenceCard` 视图，真实 subject 的证据引用必须来自 Registry 已核验卡片。证据治理合同见 [EVIDENCE_POLICY](./EVIDENCE_POLICY.md)。
 
 ## 1. 执行图（v0）
 
