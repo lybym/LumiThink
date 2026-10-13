@@ -50,7 +50,12 @@ export type HttpTransport = (
 
 export interface HttpMessagesProviderConfig {
   readonly providerId: string;
-  /** Absolute endpoint, e.g. https://api.example.test/v1. REQUIRED. */
+  /**
+   * Absolute endpoint ORIGIN only (protocol + host, no path or /v1 suffix) —
+   * the adapter itself appends the versioned messages path (issue #15
+   * review reconciliation: the old trailing-"v1" example contradicted that
+   * join and would have doubled the version segment). REQUIRED.
+   */
   readonly baseURL: string;
   /** Resolves the credential at request time; null = no key configured. */
   readonly keySource: () => string | null;

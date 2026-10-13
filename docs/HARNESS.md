@@ -7,6 +7,7 @@
 > R1-13 交付说明（Issue #25）：Evidence Card v0 + Skill Registry v0 由 `lib/domain/evidence/`（卡片/Manifest Schema + 只读版本化 Registry + 显式人工审核发布门槛 + 可复现发布/回滚）交付；治理卡可经 `toEvalEvidenceCardView` 投影为本契约的 `EvalEvidenceCard` 视图，真实 subject 的证据引用必须来自 Registry 已核验卡片。证据治理合同见 [EVIDENCE_POLICY](./EVIDENCE_POLICY.md)。
 > R1-04 交付说明（Issue #16）：Persona v0 已成为第一个接入本契约的真实行为面——`lib/domain/persona/` 提供 `persona_policy_subject`（观察由真实 `resolvePersonaTurns` 输出派生，不自报）与独立 persona 套件 `lumithink_persona_eval_suite` v1.0.0（6 场景，经同一 `runEvaluation` 执行）；词表增量：`EVAL_FORBIDDEN_ACTIONS` 增 `ai_identity_concealment`，`EVAL_SCENARIO_CATEGORIES` 增 `persona_boundary`。合同见 [PERSONA](./PERSONA.md)。
 > R1-02 交付说明（Issue #14）：§3 模型接口由 `lib/domain/gateway/` 交付实现——Provider 契约（`ModelProvider.stream` 流式 delta + usage）、Mock Provider（CI 默认，零出网）、真实 Provider 适配器（构造门槛：显式 baseURL + 请求时 keySource + 数据外发评审确认，评审尚未发生故不启用）、每日预算/熔断/超时/取消与结构化脱敏审计；本合同 §3 的语义以 [MODEL_GATEWAY](./MODEL_GATEWAY.md) 为准（含"不越权回退"与"取消 ≠ DSH Agent Loop 取消"边界）。
+> R1-03 交付说明（Issue #15）：§1 执行图与 §2 State/Context 由 `lib/domain/runtime/` 交付首个领域编排实现——`createCordisPipeline`（Input Gate → Context Builder → Skill Router → Persona → Model Gateway → Output Gate → Recorder，全部复用真实 R1-01/R1-15/R1-02/R1-13/R1-04 模块）、`buildHarnessContext`/`composeModelMessages`（上下文预算 + `context_refs` 只含来源 ID/版本）、`routeSkillForText`（确定性路由 + 双 Skill 冲突仲裁 = 情绪优先）、`createDshSessionMapper`（DSH↔Lumi Session 映射与缺陷追踪）与 `DshRuntimePort`（SDK 适配器端口；真实 DSH SDK 仍按 TECH_STACK §1/§2 完全隔离，根工程不依赖 SDK 包，真实适配器绑定属 R1-05 进程拓扑）。Cordis 受限服务面（`lib/domain/runtime/cordis.ts`）以 R1-15 `SAFE_TOOL_REGISTRY` 为唯一白名单来源，模型可见 Tool Schema 经确定性改名（点→下划线）声明，组合树/白名单断言与负向越权测试见 `tests/domain/runtime/`。
 
 ## 1. 执行图（v0）
 
@@ -34,7 +35,9 @@ InteractionEvent（统一入口）
 
 每一轮可中断；栅栏与轮次所有权规则在语音侧由 [VOICE_RUNTIME](./VOICE_RUNTIME.md) 扩展（`turn_id`/`epoch`），文字端 v0 先以 request/session 标识保证可追溯。
 
-## 2. State / Context（v0 草案字段）
+## 2. State / Context（v0 草案字段；R1-03 起由 `buildHarnessContext` 实现并测试强制）
+
+> **R1-03（Issue #15）**：下表字段由 `lib/domain/runtime/context-builder.ts` 的 `HarnessContext` 落地——`request_id/session_id/actor/persona_version/skill_versions/context_refs/budget/epoch` 全部实现并 fail-closed 校验；`context_refs` 只含来源 ID + 版本（evidence/memory），正文结构性排除；预算 = 有界 history（条数 + 总字符，超限丢最旧）+ 单条超限 fail-closed；未知字段以 `unknownFields` 标签保留、绝不猜测填充。
 
 | 字段 | 必填 | 说明 | 约束 |
 | --- | --- | --- | --- |
@@ -110,17 +113,18 @@ InteractionEvent（统一入口）
 
 - 运行产出版本化基线报告（`EvalRunReport` schema v1.0）：每场景 PASS/FAIL/SKIP、断言明细、耗时（ms）、`policyVersion`/`protocolVersion`/suite/subject 版本、待人工审核清单、LLM-Judge 槽位；canonical JSON 序列化（`serializeEvalRunReport`）字节稳定，且回读解析（`parseEvalRunReport`）重建计数并拒绝任何篡改（未知字段、计数不一致、状态与触发器矛盾）。
 - 回归矩阵**零内容泄漏**：报告仅含场景 ID、规则 ID、断言状态与版本戳，正文与 `[synthetic]` 语料绝不进入报告（由测试强制）。
-- `compareEvalRuns` 以相同 schema/suite 版本与相同场景集合为可比性前提，跨套件拒绝比较并给出原因；按 pass > skip > fail 秩归类 regression/improvement 并报告套件状态迁移；`durationMs`/`ranAt` 不参与机器比较。DSH/插件版本随 R1-03 接线后并入报告版本戳。
+- `compareEvalRuns` 以相同 schema/suite 版本与相同场景集合为可比性前提，跨套件拒绝比较并给出原因；按 pass > skip > fail 秩归类 regression/improvement 并报告套件状态迁移；`durationMs`/`ranAt` 不参与机器比较。DSH/插件版本随 R1-03 接线后并入报告版本戳（R1-03 调整：版本戳先行由 runtime trace 记录——组件/模型/规则/Skill/Evidence 版本、耗时与结果码；EvalRunReport schema 的字段合并在相应 subject 接入 Issue 中完成，避免本 Issue 单独扩展已冻结的报告 schema）。
 
 ### 6.5 断言敏感性（负例控制）
 
 - `tests/domain/eval/runner.spec.ts` 以变异 subject/变异套件证明每类断言真实可触发：路由错配、禁用动作、证据缺失/未经审核/未知、退出路径缺失、gate 期望翻转、关键用例 SKIP、空套件、subject 崩溃与不可解析观察。
 
-## 7. 与 DSH 的集成边界（v0）
+## 7. 与 DSH 的集成边界（v0；R1-03 起含端口定义）
 
 - LumiThink 领域能力（Persona/Evidence/Memory/Safety/协议）通过 SDK + 自定义 Cordis 插件接入，**不修改 DSH 上游核心**；版本锁定与升级审查按 [DSH_UPSTREAM](./DSH_UPSTREAM.md)。
 - 业务持久化不依赖 DSH 私有事件格式；DSH Session 与 Lumi 长期记忆、审计 Trace 分离存储。
 - 进程拓扑：独立长驻 Node 进程持有 SDK（见 [TECH_STACK §2](./TECH_STACK.md)）；Serverless/短生命周期 Handler 不得托管 DSH 生命周期。
+- **R1-03（Issue #15）**：领域层以 `DshRuntimePort`（`lib/domain/runtime/session-map.ts`）定义真实 SDK 适配器必须实现的端口——`openSession/resumeSession/closeSession/advertisedTools`，生命周期含超时、缺陷追踪与关闭；端口上**没有**中途取消/实时 Delta 面（官方 SDK 无此能力，属 R1-V2 Bridge）。根工程保持不依赖 `@deepseek-ai/dsh-*` 包（TECH_STACK §1），端口默认未绑定（fail-closed `no_port_bound`）；真实适配器在 R1-05 按进程拓扑绑定并独立验收。
 
 ## 8. 未决问题（进入实现前必须回答）
 
