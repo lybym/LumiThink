@@ -84,7 +84,7 @@ ID 由服务端生成；错误回显只允许通过同一语法**再验证**的 
 
 任何错误对外**不得**输出堆栈、凭据或原始私人上下文（Issue #13 验收标准 3）：
 
-- `toSafeErrorEnvelope()` 是唯一合法的错误出口：`ContractValidationError` → 首个 problem 的 code + 结构化 details（字段路径、上限、计数）；其他任何抛出 → `CONTRACT_INTERNAL`，原 message/stack/derived 字符串一律不序列化。
+- `toSafeErrorEnvelope()` 是唯一合法的错误出口：`ContractValidationError` → 首个 problem 的 code + 结构化 details（字段路径、上限、计数）；**degenerate 情形（problems 为空）fail-closed 归入 `CONTRACT_INTERNAL`（R1-02 修复 R1-01 评审 P2-b：错误出口自身不得 fail-open）**；其他任何抛出 → `CONTRACT_INTERNAL`，原 message/stack/derived 字符串一律不序列化。
 - 关联 ID 仅在通过 ID 语法再验证后回显；未验证值被丢弃。
 - 结构：`{ protocolVersion, error: { code, message, retriable, details?, requestId?, traceId?, conversationId?, turnId? }, occurredAt }`。
 

@@ -6,6 +6,7 @@
 > R1-07 交付说明（Issue #19）：§6 评测契约由 `lib/domain/eval/`（场景 Schema + 断言引擎 + 运行器 + 报告/对比）与 `tests/domain/eval/` 交付；真实 Persona/Skill/Gateway 行为面经 `EvalSubject` 适配器接入（R1-04/R1-13/R1-11/R1-12）。
 > R1-13 交付说明（Issue #25）：Evidence Card v0 + Skill Registry v0 由 `lib/domain/evidence/`（卡片/Manifest Schema + 只读版本化 Registry + 显式人工审核发布门槛 + 可复现发布/回滚）交付；治理卡可经 `toEvalEvidenceCardView` 投影为本契约的 `EvalEvidenceCard` 视图，真实 subject 的证据引用必须来自 Registry 已核验卡片。证据治理合同见 [EVIDENCE_POLICY](./EVIDENCE_POLICY.md)。
 > R1-04 交付说明（Issue #16）：Persona v0 已成为第一个接入本契约的真实行为面——`lib/domain/persona/` 提供 `persona_policy_subject`（观察由真实 `resolvePersonaTurns` 输出派生，不自报）与独立 persona 套件 `lumithink_persona_eval_suite` v1.0.0（6 场景，经同一 `runEvaluation` 执行）；词表增量：`EVAL_FORBIDDEN_ACTIONS` 增 `ai_identity_concealment`，`EVAL_SCENARIO_CATEGORIES` 增 `persona_boundary`。合同见 [PERSONA](./PERSONA.md)。
+> R1-02 交付说明（Issue #14）：§3 模型接口由 `lib/domain/gateway/` 交付实现——Provider 契约（`ModelProvider.stream` 流式 delta + usage）、Mock Provider（CI 默认，零出网）、真实 Provider 适配器（构造门槛：显式 baseURL + 请求时 keySource + 数据外发评审确认，评审尚未发生故不启用）、每日预算/熔断/超时/取消与结构化脱敏审计；本合同 §3 的语义以 [MODEL_GATEWAY](./MODEL_GATEWAY.md) 为准（含"不越权回退"与"取消 ≠ DSH Agent Loop 取消"边界）。
 
 ## 1. 执行图（v0）
 
@@ -51,10 +52,12 @@ InteractionEvent（统一入口）
 
 ## 3. 模型接口（Model Gateway，v0 契约）
 
+> **R1-02 已交付（Issue #14）**：本节契约由 `lib/domain/gateway/` 实现为 [MODEL_GATEWAY](./MODEL_GATEWAY.md) v1.0——`ModelProvider.stream(request, {signal})` 流式 delta + 终止 usage；Mock Provider（零出网）与 Messages-协议真实适配器实现同一契约；超时 → 取消在途调用并返回结构化错误；供应商不可用 → 结构化降级（不虚构回答）；预算超限 → 联系前拒绝并审计；每模型单 Provider 绑定，无自动回退。真实供应商激活仍以独立数据外发评审为前置（未发生）。
+
 - 契约：`complete(request: ModelRequest): AsyncIterable<ModelDelta> | ModelResult`；`ModelRequest` 含 `model_id`、`messages`、`tool_schema`、`timeout_ms`、`budget`、`trace_id`。
 - 可替换性（PRD FR-004）：Mock Provider（R0 已验证的合成路线）与真实 Provider 实现同一契约；`model_id` 与供应商版本写入审计。
 - 失败模式：超时 → 取消并返回结构化错误；供应商不可用 → 明确降级文案（不虚构回答）；预算超限 → 拒绝并审计。
-- v0 现状：**未实现**；R0 的 `poc/dsh-child` 仅验证了 SDK/Mock 路由与最小权限 Profile，根工程基线无任何模型出网。
+- v0 现状（历史记录）：R1-00 时未实现；R1-02 起 `lib/domain/gateway/` 交付域层实现，HTTP 端点接线随 R1-05。
 
 ## 4. 工具接口（v0 契约）
 

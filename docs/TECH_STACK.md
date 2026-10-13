@@ -78,7 +78,7 @@ CI 门禁：`.github/workflows/r1-baseline-gate.yml`（Ubuntu：干净环境断�
 | R0-C（双 Skill 纵向闭环）、R0-D（Session/Memory 治理）未开始 | 未完成 | R0 → R1 |
 | HARNESS.md 仅为 v0 草案，无实现 | 未完成 | R1-03/R1-07 |
 | 新领域持久化选型未定；旧 schema 与新领域之间的数据迁移策略只有“拒绝 + 显式归档”守卫，尚无批量迁移工具 | 未完成 | R1/R2 |
-| 真实模型接入、流式、取消、成本控制均未实现（基线无模型出网） | 未完成 | R1-02/Iteration B |
+| 真实模型接入、流式、取消、成本控制：R1-02 已交付域层 Model Gateway（`lib/domain/gateway/`：Provider 契约 + Mock + 预算/熔断/超时/取消 + 审计，见 [MODEL_GATEWAY](./MODEL_GATEWAY.md)）；HTTP 端点接线与真实供应商激活（独立数据外发评审前置）仍未完成，基线启动依旧零模型出网 | 部分完成 | R1-02（域层已交付）/ R1-05（接线）/ Iteration B（真实供应商） |
 | 监护人端、鉴权、隐私治理未实现；旧 parent 页面文案仍是旧产品语义 | 未完成 | R1-06 |
 | 旧页面在 R1-05 之前仅保证“可编译可启动”，不承诺 2.0 体验 | 进行中约束 | R1-05 |
 

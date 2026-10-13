@@ -130,7 +130,28 @@ function envelopeFromProblems(
   context: SafeErrorContext,
   now: string,
 ): ErrorEnvelope {
+  // Fail-closed hardening (R1-02, issue #14 review of the R1-01 P2 note b):
+  // a ContractValidationError with an EMPTY problems list used to crash the
+  // sanctioned error exit (problems[0] → undefined → TypeError) instead of
+  // producing an envelope. An error path must never fail open, so a
+  // degenerate validation error collapses to CONTRACT_INTERNAL like any
+  // other unknown failure.
   const first = cause.problems[0];
+  if (first === undefined) {
+    const error: ErrorEnvelope["error"] = {
+      code: "CONTRACT_INTERNAL",
+      message: CONTRACT_ERROR_REGISTRY.CONTRACT_INTERNAL.safeMessage,
+      retriable: CONTRACT_ERROR_REGISTRY.CONTRACT_INTERNAL.retriable,
+      details: { problemCount: 0 },
+    };
+    for (const { key, kind } of SAFE_ID_FIELDS) {
+      const value = context[key as keyof SafeErrorContext];
+      if (isValidContractId(kind, value)) {
+        (error as Record<string, unknown>)[key] = value;
+      }
+    }
+    return { protocolVersion: LATEST_PROTOCOL_VERSION, error, occurredAt: now };
+  }
   const metadata = CONTRACT_ERROR_REGISTRY[first.code];
   const details: Record<string, string | number> = { problemCount: cause.problems.length };
   if (first.path) {
