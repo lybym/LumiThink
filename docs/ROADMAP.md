@@ -46,7 +46,7 @@
 - [ ] 明确首个用户旅程及 MVP 范围（文字探索、阅读支持或困难任务启动，三者不能无差别同时做）。
 - [ ] 建立 `docs/ARCHITECTURE.md`：云端运行边界、数据流、身份与授权、故障回退、客户端 Adapter。
 - [ ] 建立 `docs/HARNESS.md`、`docs/PERSONA.md`、`docs/MEMORY_POLICY.md` 的 v0 草案。
-- [ ] 审查现有 Next.js 页面、Prisma `RawEvent` 与 `CognitiveProfile`；标记为“可迁移 / 重写 / 废弃”。
+- [x] 审查现有 Next.js 页面、Prisma `RawEvent` 与 `CognitiveProfile`；标记为“可迁移 / 重写 / 废弃”。（R1-00：[LEGACY_AUDIT](./LEGACY_AUDIT.md) 逐文件处置 + `lib/domain/legacy-guard.ts` 强制守卫，Issue [#12](https://github.com/lybym/LumiThink/issues/12)）
 - [ ] 更新 README 以正确指向 2.0（现有 README 描述旧版产品，尚未更新）。
 - [ ] 发布 `ADR`：设备无关、模型无关、循证优先、模块化单体、隐私规则。
 - [x] 确定主 Harness：DSH / Cordis（架构决策见 [ADR-001](./adr/0001-deepseek-harness.md)）；下一步验收其儿童环境可用性。

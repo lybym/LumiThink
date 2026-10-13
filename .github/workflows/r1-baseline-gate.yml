@@ -1,0 +1,147 @@
+name: R1 root baseline gate
+
+# R1-00 (Issue #12): the root engineering baseline must frozen-install,
+# typecheck, build, boot and answer its minimal health check on a clean Linux
+# runner WITHOUT any real model provider key, real child data or database
+# connection. No DATABASE_URL and no provider credentials are configured on
+# purpose: a green run is the clean-environment evidence the issue asks for.
+on:
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'tsconfig.json'
+      - 'next-env.d.ts'
+      - 'postcss.config.mjs'
+      - 'tailwind.config.ts'
+      - '.env.example'
+      - 'app/**'
+      - 'components/**'
+      - 'lib/**'
+      - 'prisma/**'
+      - 'tests/**'
+      - '.github/workflows/r1-baseline-gate.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'tsconfig.json'
+      - 'next-env.d.ts'
+      - 'postcss.config.mjs'
+      - 'tailwind.config.ts'
+      - '.env.example'
+      - 'app/**'
+      - 'components/**'
+      - 'lib/**'
+      - 'prisma/**'
+      - 'tests/**'
+      - '.github/workflows/r1-baseline-gate.yml'
+  workflow_dispatch:
+
+# Minimal token: the gate only needs to read the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: r1-baseline-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Same pinned toolchain as the R0 zero-skip gate (Issue #8).
+  NODE_VERSION: '24.21.0'
+  PNPM_VERSION: '10.34.7'
+  NEXT_TELEMETRY_DISABLED: '1'
+  CI: 'true'
+
+jobs:
+  baseline:
+    name: Root baseline (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install exact pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Install exact Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Assert the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_node="$(node --version)"
+          actual_pnpm="$(pnpm --version)"
+          echo "node=${actual_node} pnpm=${actual_pnpm}"
+          if [ "${actual_node}" != "v${NODE_VERSION}" ]; then
+            echo "::error::Node ${actual_node} is not the pinned v${NODE_VERSION}"
+            exit 1
+          fi
+          if [ "${actual_pnpm}" != "${PNPM_VERSION}" ]; then
+            echo "::error::pnpm ${actual_pnpm} is not the pinned ${PNPM_VERSION}"
+            exit 1
+          fi
+
+      - name: Prove the clean-environment contract before installing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL must stay unset in the baseline gate"
+            exit 1
+          fi
+          for key in DEEPSEEK_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY; do
+            if [ -n "${!key:-}" ]; then
+              echo "::error::${key} must stay unset in the baseline gate"
+              exit 1
+            fi
+          done
+          echo "clean environment confirmed: no DATABASE_URL, no provider keys"
+
+      # postinstall runs `prisma generate`; the frozen legacy schema needs no
+      # DATABASE_URL and no live database for client generation.
+      - name: Frozen-lockfile install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Domain guard and env validation tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Boot and probe the minimal health check
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm run start --port 3123 &
+          server_pid=$!
+          trap 'kill "${server_pid}" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            if body="$(curl -fsS http://127.0.0.1:3123/api/health 2>/dev/null)"; then
+              echo "${body}"
+              echo "${body}" | grep -q '"status":"ok"' || {
+                echo "::error::health endpoint answered, but not ok"
+                exit 1
+              }
+              echo "${body}" | grep -q '"legacyDomainGuard":"armed"' || {
+                echo "::error::health endpoint did not report the armed legacy domain guard"
+                exit 1
+              }
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::health endpoint did not become ready within 60s"
+          exit 1

@@ -1,0 +1,39 @@
+{
+  "name": "lumithink",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LumiThink 2.0 root engineering baseline (R1-00): compilable Next.js prototype pages, pinned toolchain, legacy domain guard. The legacy math-diagnosis prototype is frozen and must not be treated as 2.0 product behavior.",
+  "type": "module",
+  "packageManager": "pnpm@10.34.7",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "prisma generate",
+    "prisma:generate": "prisma generate",
+    "test": "node --experimental-strip-types --test-isolation=none --test tests/domain/legacy-guard.spec.ts tests/domain/boundary.spec.ts tests/env/startup-env.spec.ts app/actions/userActions.utils.test.mjs",
+    "test:r0": "pnpm --dir poc/dsh-child run test:r0"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.3",
+    "framer-motion": "12.43.0",
+    "lucide-react": "1.56.0",
+    "next": "15.5.27",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "autoprefixer": "10.6.1",
+    "postcss": "8.5.30",
+    "prisma": "6.19.3",
+    "tailwindcss": "3.4.19",
+    "typescript": "5.9.3"
+  }
+}
