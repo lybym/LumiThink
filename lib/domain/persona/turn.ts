@@ -52,7 +52,6 @@ import {
   type PersonaStyleState,
   type PersonaUntrustedProvenance,
 } from "./policy.ts";
-import { PERSONA_MASKED_REJECTION_ID } from "./registry.ts";
 
 // ---------------------------------------------------------------------------
 // Override-attempt detection (observability only — never a gate decision)
