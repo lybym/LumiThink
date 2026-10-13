@@ -3,10 +3,12 @@ import test from "node:test";
 
 import { ContractValidationError } from "../../../lib/domain/contract/core.ts";
 import { buildCrisisSafeResponse } from "../../../lib/domain/safety/crisis.ts";
+import { buildSafetyTrace } from "../../../lib/domain/safety/trace.ts";
 import {
   evaluateOutputGate,
   OUTPUT_CONTENT_MAX_CODE_POINTS,
   runOutputGateSafely,
+  type OutputGateInput,
   type OutputGateResult,
 } from "../../../lib/domain/safety/output-gate.ts";
 
@@ -189,4 +191,135 @@ test("output gate results never echo the flagged content", () => {
   const result = evaluateOutputGate({ content: `密钥在这里 ${canary}` });
   assert.equal(result.decision, "block");
   assert.ok(!JSON.stringify(result).includes("CANARY"), "flagged content must not be echoed");
+});
+
+test("AC 2: a shape-legal but semantically tampered gate result fails closed (review P1-2)", () => {
+  const base = { content: "[synthetic] 一条普通的回复", refs: { traceId: "trc_abcd1234efgh" } };
+
+  // A tampered gate returning a legal allow decision with a garbage trace
+  // object: the wrapper must neither release it nor let the trace object
+  // ride into the audit pipeline.
+  const smuggled = runOutputGateSafely(
+    base,
+    () => ({ decision: "allow", hits: [], trace: { smuggled: "raw sensitive content" } }) as unknown as OutputGateResult,
+  );
+  assert.equal(smuggled.decision, "block");
+  assertBlockedWith(smuggled, "output.gate_unavailable");
+  assert.ok(!JSON.stringify(smuggled).includes("smuggled"), "tampered trace must not survive");
+
+  // A well-formed trace whose decision disagrees with the returned decision.
+  const disagreeing = runOutputGateSafely(base, () => ({
+    decision: "allow",
+    hits: [],
+    trace: buildSafetyTrace({
+      layer: "output",
+      decision: "block",
+      ruleIds: ["output.data_leak"],
+      reason: "rule_hit",
+      refs: { traceId: "trc_abcd1234efgh" },
+      decidedAt: "2026-10-13T12:00:00.000Z",
+    }),
+  }) as unknown as OutputGateResult);
+  assert.equal(disagreeing.decision, "block");
+  assertBlockedWith(disagreeing, "output.gate_unavailable");
+
+  // An allow decision carrying hits (inconsistent decision state).
+  const allowWithHits = runOutputGateSafely(base, () => ({
+    decision: "allow",
+    hits: [{ ruleId: "output.data_leak", layer: "output", severity: "high" }],
+    trace: buildSafetyTrace({
+      layer: "output",
+      decision: "allow",
+      ruleIds: [],
+      reason: "rule_hit",
+      decidedAt: "2026-10-13T12:00:00.000Z",
+    }),
+  }) as unknown as OutputGateResult);
+  assert.equal(allowWithHits.decision, "block");
+  assertBlockedWith(allowWithHits, "output.gate_unavailable");
+
+  // Hits and trace reference different rule sets.
+  const mismatchedSets = runOutputGateSafely(base, () => ({
+    decision: "block",
+    hits: [{ ruleId: "output.data_leak", layer: "output", severity: "high" }],
+    trace: buildSafetyTrace({
+      layer: "output",
+      decision: "block",
+      ruleIds: ["output.secrecy_pressure"],
+      reason: "rule_hit",
+      decidedAt: "2026-10-13T12:00:00.000Z",
+    }),
+  }) as unknown as OutputGateResult);
+  assert.equal(mismatchedSets.decision, "block");
+  assertBlockedWith(mismatchedSets, "output.gate_unavailable");
+
+  // A hit entry that is not a structured hit.
+  const unstructuredHit = runOutputGateSafely(base, () => ({
+    decision: "block",
+    hits: ["output.data_leak"],
+    trace: buildSafetyTrace({
+      layer: "output",
+      decision: "block",
+      ruleIds: ["output.data_leak"],
+      reason: "rule_hit",
+      decidedAt: "2026-10-13T12:00:00.000Z",
+    }),
+  }) as unknown as OutputGateResult);
+  assert.equal(unstructuredHit.decision, "block");
+  assertBlockedWith(unstructuredHit, "output.gate_unavailable");
+
+  // Control: a legitimate gate result is preserved (decision + validated trace).
+  const legit = runOutputGateSafely(base, (gateInput) => evaluateOutputGate(gateInput));
+  assert.equal(legit.decision, "allow");
+  assert.deepEqual([...legit.trace.ruleIds], []);
+  assert.equal(legit.trace.policyVersion, "1.0");
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(legit)));
+});
+
+test("AC 2: the wrapper fallback never throws on invalid refs/entrance (review P2-1)", () => {
+  const invalidRefs = {
+    content: "[synthetic] ok",
+    refs: { requestId: "not-a-valid-id" },
+  } as OutputGateInput;
+  let degraded: OutputGateResult | undefined;
+  try {
+    degraded = runOutputGateSafely(invalidRefs, () => {
+      throw new Error("simulated gate outage");
+    });
+  } catch (error) {
+    assert.fail(`the wrapper must never rethrow, got: ${String(error)}`);
+  }
+  assert.equal(degraded.decision, "block");
+  assertBlockedWith(degraded, "output.gate_unavailable");
+  assert.equal(degraded.trace.reason, "gate_unavailable");
+  assert.deepEqual({ ...degraded.trace.refs }, {}, "degraded trace carries no invalid refs");
+  assert.equal(degraded.trace.entrance, undefined);
+
+  // A gate that fails on the invalid input lands on the same degrade path.
+  const gateThrowsOnBadInput = runOutputGateSafely(invalidRefs);
+  assert.equal(gateThrowsOnBadInput.decision, "block");
+  assertBlockedWith(gateThrowsOnBadInput, "output.gate_unavailable");
+
+  // An invalid entrance degrades the same way instead of throwing.
+  const invalidEntrance = runOutputGateSafely(
+    { content: "[synthetic] ok", entrance: "not_an_entrance" } as unknown as OutputGateInput,
+    () => {
+      throw new Error("simulated gate outage");
+    },
+  );
+  assert.equal(invalidEntrance.decision, "block");
+  assertBlockedWith(invalidEntrance, "output.gate_unavailable");
+});
+
+test("ownChildRef invalid values fail closed (review test gap 4)", () => {
+  assert.throws(
+    () => evaluateOutputGate({ content: "[synthetic] ok", ownChildRef: "" }),
+    ContractValidationError,
+    "empty ownChildRef must throw",
+  );
+  assert.throws(
+    () => evaluateOutputGate({ content: "[synthetic] ok", ownChildRef: 42 as unknown as string }),
+    ContractValidationError,
+    "non-string ownChildRef must throw",
+  );
 });

@@ -17,7 +17,13 @@
 import { ContractValidationError, problem } from "../contract/core.ts";
 
 import type { SafetyEntrance, SafetyRuleHit, SafetyRuleId } from "./policy.ts";
-import { buildSafetyTrace, type SafetyTraceRecord, type SafetyTraceRefs } from "./trace.ts";
+import { SAFETY_RULES } from "./policy.ts";
+import {
+  buildSafetyTrace,
+  parseSafetyTraceRecord,
+  type SafetyTraceRecord,
+  type SafetyTraceRefs,
+} from "./trace.ts";
 
 /** Max code points of gated output; aligned with the contract (response.ts). */
 export const OUTPUT_CONTENT_MAX_CODE_POINTS = 4000;
@@ -224,6 +230,15 @@ export function evaluateOutputGate(input: OutputGateInput): OutputGateResult {
  * decision, the result is a deterministic BLOCK with
  * `output.gate_unavailable` — there is no code path that releases output
  * on gate failure.
+ *
+ * "Unusable result" covers more than the object shape: a shape-legal result
+ * whose trace does not parse as a validated safety trace record, whose
+ * trace decision disagrees with the returned decision, or whose hits and
+ * trace rule sets disagree is treated as tampered/corrupted and fails
+ * closed exactly like an outage (review round 1 P1-2). Without this, a
+ * corrupted gate could smuggle an unvalidated trace object into the audit
+ * pipeline. A fully self-consistent malicious allow from inside the trust
+ * boundary remains a documented residual risk, not a wrapper bypass.
  */
 export function runOutputGateSafely(
   input: OutputGateInput,
@@ -244,18 +259,48 @@ export function runOutputGateSafely(
         problem("CONTRACT_FIELD_INVALID", "gate", "output gate returned an unusable result."),
       ]);
     }
-    result = candidate;
+    // Semantic validation: the released trace must be a validated record
+    // (field allow-list, registered rule ids, computed risk level, decision
+    // consistency) and must agree with the returned decision and hits.
+    const trace = parseSafetyTraceRecord(candidate.trace);
+    if (
+      trace.decision !== candidate.decision ||
+      !hitsConsistentWithTrace(candidate.hits, trace)
+    ) {
+      throw new ContractValidationError([
+        problem(
+          "CONTRACT_FIELD_INVALID",
+          "gate",
+          "output gate result is internally inconsistent; treated as unusable.",
+        ),
+      ]);
+    }
+    result = { decision: candidate.decision, hits: candidate.hits, trace };
   } catch {
     // Never rethrow: fail closed with a structured, content-free trace.
-    const trace = buildSafetyTrace({
-      layer: "output",
-      decision: "block",
-      ruleIds: ["output.gate_unavailable"],
-      reason: "gate_unavailable",
-      entrance: input?.entrance,
-      refs: input?.refs,
-      decidedAt: input?.decidedAt,
-    });
+    let trace: Readonly<SafetyTraceRecord>;
+    try {
+      trace = buildSafetyTrace({
+        layer: "output",
+        decision: "block",
+        ruleIds: ["output.gate_unavailable"],
+        reason: "gate_unavailable",
+        entrance: input?.entrance,
+        refs: input?.refs,
+        decidedAt: input?.decidedAt,
+      });
+    } catch {
+      // Caller-supplied refs/entrance/decidedAt failed validation; the
+      // wrapper still owes the caller a deterministic block, so degrade to
+      // a refs-free minimal trace built from registry constants only
+      // (cannot throw; review round 1 P2-1).
+      trace = buildSafetyTrace({
+        layer: "output",
+        decision: "block",
+        ruleIds: ["output.gate_unavailable"],
+        reason: "gate_unavailable",
+      });
+    }
     return Object.freeze({
       decision: "block" as const,
       hits: Object.freeze([hit("output.gate_unavailable")]),
@@ -263,4 +308,47 @@ export function runOutputGateSafely(
     });
   }
   return result;
+}
+
+/**
+ * True when the gate's hits and its parsed trace tell the same story:
+ * every hit is a structured hit of the trace's layer, every rule id is
+ * registered, both sides reference the same rule-id set, and the decision
+ * boundary (allow ⇔ no hits) holds.
+ */
+function hitsConsistentWithTrace(
+  hits: readonly unknown[],
+  trace: Readonly<SafetyTraceRecord>,
+): boolean {
+  for (const entry of hits) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      return false;
+    }
+    const candidateHit = entry as Partial<SafetyRuleHit>;
+    if (
+      typeof candidateHit.ruleId !== "string" ||
+      (SAFETY_RULES as Readonly<Record<string, unknown>>)[candidateHit.ruleId] === undefined ||
+      candidateHit.layer !== trace.layer
+    ) {
+      return false;
+    }
+  }
+  const hitRuleIds = new Set(
+    (hits as readonly SafetyRuleHit[]).map((entry) => entry.ruleId),
+  );
+  if (hitRuleIds.size !== new Set(trace.ruleIds).size) {
+    return false;
+  }
+  for (const ruleId of hitRuleIds) {
+    if (!trace.ruleIds.includes(ruleId as SafetyRuleId)) {
+      return false;
+    }
+  }
+  if (trace.decision === "allow" && hits.length !== 0) {
+    return false;
+  }
+  if (trace.decision !== "allow" && hits.length === 0) {
+    return false;
+  }
+  return true;
 }

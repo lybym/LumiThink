@@ -114,6 +114,7 @@ export const SAFETY_RULE_IDS = [
   "tool.dangerous_category",
   "tool.unregistered",
   "tool.schema_forgery",
+  "tool.permission_overreach",
   "tool.memory_write_unauthorized",
   "tool.privacy_overreach",
   // Output layer
@@ -200,6 +201,15 @@ export const SAFETY_RULES: Readonly<Record<SafetyRuleId, SafetyRuleSpec>> =
       summary:
         "Tool descriptor (category/version/permissions) does not match the " +
         "registered descriptor of that tool id.",
+    },
+    "tool.permission_overreach": {
+      id: "tool.permission_overreach",
+      layer: "tool",
+      severity: "high",
+      summary:
+        "Registered tool requests a permission that is not part of its " +
+        "registered permission set (privilege escalation beyond the " +
+        "positive whitelist).",
     },
     "tool.memory_write_unauthorized": {
       id: "tool.memory_write_unauthorized",

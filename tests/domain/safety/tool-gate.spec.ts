@@ -154,3 +154,55 @@ test("invalid candidates fail closed", () => {
     evaluateToolGate(candidate({ requestedPermissions: "shell.exec" as unknown as string[] })),
   );
 });
+
+test("registered tool requesting an unregistered permission is blocked (positive whitelist, review P1-1)", () => {
+  // evidence.search is registered, but evidence.write is not part of its
+  // registered permission set — requesting it is a privilege-escalation
+  // attempt and must never be silently ignored.
+  const overreach = evaluateToolGate(
+    candidate({ requestedPermissions: ["evidence.write"] }),
+    { decidedAt: FIXED_AT },
+  );
+  assert.equal(overreach.decision, "block");
+  assert.ok(overreach.hits.some((hit) => hit.ruleId === "tool.permission_overreach"));
+  assert.ok(overreach.trace.ruleIds.includes("tool.permission_overreach"));
+
+  // A valid permission does not launder an unregistered sibling entry.
+  const mixed = evaluateToolGate(
+    candidate({ requestedPermissions: ["evidence.read", "evidence.write"] }),
+  );
+  assert.equal(mixed.decision, "block");
+  assert.ok(mixed.hits.some((hit) => hit.ruleId === "tool.permission_overreach"));
+
+  // No registered tool may acquire foreign permissions.
+  for (const [toolId, spec] of Object.entries(SAFE_TOOL_REGISTRY)) {
+    const foreign = evaluateToolGate(
+      candidate({
+        toolId,
+        declaredCategory: spec.category,
+        declaredVersion: spec.version,
+        requestedPermissions: ["evidence.write"],
+        actorRole: spec.allowedRoles[0],
+      }),
+    );
+    assert.equal(foreign.decision, "block", `${toolId} must not get unregistered permissions`);
+    assert.ok(foreign.hits.some((hit) => hit.ruleId === "tool.permission_overreach"), toolId);
+  }
+});
+
+test("non-string permission entries fail closed instead of being dropped (review P1-1)", () => {
+  const malformed = evaluateToolGate(
+    candidate({ requestedPermissions: [42, { evil: true }] as unknown as string[] }),
+    { decidedAt: FIXED_AT },
+  );
+  assert.equal(malformed.decision, "block");
+  assert.ok(malformed.hits.some((hit) => hit.ruleId === "tool.schema_forgery"));
+  assert.ok(
+    malformed.trace.ruleIds.includes("tool.schema_forgery"),
+    "the malformed descriptor is recorded structurally",
+  );
+  // Nothing about the malformed entries is echoed.
+  const serialized = JSON.stringify(malformed);
+  assert.ok(!serialized.includes("evil"));
+  assert.ok(!serialized.includes("42"));
+});

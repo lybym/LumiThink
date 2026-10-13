@@ -44,6 +44,14 @@ export interface TurnSafetyInput {
    * escalated to crisis.
    */
   readonly draftOutput?: string | null;
+  /**
+   * The session's own (server-resolved) child reference, forwarded to the
+   * Output Gate so foreign child references in the draft are detected as
+   * data leaks against the caller's real session (review round 1 P2-3).
+   * When omitted, the gate falls back to the synthetic demo child
+   * reference used by the contract fixtures.
+   */
+  readonly ownChildRef?: string;
   readonly refs?: { readonly requestId?: string; readonly traceId?: string; readonly turnId?: string };
   readonly decidedAt?: string;
 }
@@ -97,6 +105,18 @@ export function evaluateTurnSafety(input: TurnSafetyInput): TurnSafetyResult {
       problem("CONTRACT_FIELD_INVALID", "draftOutput", "draftOutput must be a string or null."),
     ]);
   }
+  if (
+    input.ownChildRef !== undefined &&
+    (typeof input.ownChildRef !== "string" || input.ownChildRef.length === 0)
+  ) {
+    throw new ContractValidationError([
+      problem(
+        "CONTRACT_FIELD_INVALID",
+        "ownChildRef",
+        "ownChildRef must be a non-empty string when present.",
+      ),
+    ]);
+  }
   const toolCalls = input.toolCalls ?? [];
   if (!Array.isArray(toolCalls)) {
     throw new ContractValidationError([
@@ -140,6 +160,7 @@ export function evaluateTurnSafety(input: TurnSafetyInput): TurnSafetyResult {
         content: safeResponse,
         crisisEscalation: true,
         requiredCrisisResponse: safeResponse,
+        ownChildRef: input.ownChildRef,
         entrance: input.entrance,
         refs: input.refs,
         decidedAt: input.decidedAt,
@@ -196,7 +217,7 @@ export function evaluateTurnSafety(input: TurnSafetyInput): TurnSafetyResult {
   const output = runOutputGateSafely({
     content: input.draftOutput,
     crisisEscalation: false,
-    ownChildRef: undefined,
+    ownChildRef: input.ownChildRef,
     entrance: input.entrance,
     refs: input.refs,
     decidedAt: input.decidedAt,

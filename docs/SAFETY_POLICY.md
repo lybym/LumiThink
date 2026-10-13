@@ -36,6 +36,7 @@ Safety Gate 是儿童交互的强制安全边界：每一条进入编排的文�
 | `tool.dangerous_category` | tool | high | 请求禁止类目或权限（shell/PTY、任意 FS/网络、插件安装、子 Agent、裸数据库） |
 | `tool.unregistered` | tool | high | 调用未在白名单注册的工具 |
 | `tool.schema_forgery` | tool | high | 声明的类目/版本与注册描述符不符 |
+| `tool.permission_overreach` | tool | high | 已注册工具请求了不在其注册权限集内的权限（正向白名单之外的权限提升） |
 | `tool.memory_write_unauthorized` | tool | high | 请求直接记忆写入而非仅候选提议路径 |
 | `tool.privacy_overreach` | tool | high | 验证角色无权调用该工具，或请求儿童数据导出/原始音频 |
 | `output.exclusive_dependency` | output | high | 宣称排他关系或鼓励情感依赖 |
@@ -61,6 +62,7 @@ Safety Gate 是儿童交互的强制安全边界：每一条进入编排的文�
 
 - 正向白名单：v0 仅注册 `evidence.search`（只读）、`memory.lookup`（受控读）、`memory.propose`（仅候选）；新工具只能在此注册并通过 Gate 测试。
 - 调用方声明的类目/版本必须与注册描述符一致（防 schema 伪造）；未注册工具拒绝且不回显提交 ID。
+- **权限维度同为正向白名单**：已注册工具请求的 `requestedPermissions` 必须是其注册权限集的子集，越权请求按 `tool.permission_overreach` 阻断；非字符串权限项属于畸形描述符，按 `tool.schema_forgery` fail-closed，绝不静默忽略（review round 1 P1-1）。
 - 危险类目/权限（shell、任意 FS/网络、插件安装、子 Agent、裸 SQL、`memory.direct_write`、`child_data.export`、`raw_audio.read`）无条件拒绝；记忆只存在候选提议路径。
 - 调用角色必须在该工具的允许角色列表内（`voice_device` 在 v0 无文本轮工具权限）。所有拒绝结构化并可审计，不以提示词约束代替权限约束（HARNESS §4）。
 
@@ -69,7 +71,7 @@ Safety Gate 是儿童交互的强制安全边界：每一条进入编排的文�
 - **每轮文本输出必须通过 Output Gate**（issue #27 交付范围 5）；检查排他依恋、保密施压、诊断伪装、代写、不适龄内容、凭据/密钥与外部儿童引用泄漏。
 - 输出上限 4000 code points，与合同响应上限对齐（API_CONTRACT §4/§5）；非字符串或超限属于结构化失败。
 - 危机升级轮次只允许输出确定性危机安全回应：内容与必需回应不一致、或调用方无法给出必需回应时，按危机漏转介阻断。
-- **fail-closed 包装（验收标准 2）**：`runOutputGateSafely` 保证 Gate 抛错、不可用或返回不可用结果时，返回确定性的 `block` + `output.gate_unavailable`，不存在放行路径。
+- **fail-closed 包装（验收标准 2）**：`runOutputGateSafely` 保证 Gate 抛错、不可用或返回不可用结果时，返回确定性的 `block` + `output.gate_unavailable`，不存在放行路径。不可用结果**同时包含形状与语义两个维度**：形状合法（decision/hits/trace 结构正确）但语义被篡改的结果——trace 无法通过 `parseSafetyTraceRecord` 解析、trace 的 decision 与返回的 decision 不一致、hits 与 trace 的规则集不一致——一律按 `gate_unavailable` 阻断，被篡改的 trace 对象不会进入审计流水线（review round 1 P1-2）。兜底路径自身绝不抛出：调用方提供的 refs/entrance 无法通过校验时，降级为不含 refs/entrance 的最小确定性 block trace（review round 1 P2-1）。
 - R1-V 的增量短句播报复用本策略（同一规则、同一决策语义），语音流接线在 R1-V2 另行交付。
 
 ## 5. 危机转介分支
@@ -87,7 +89,7 @@ Safety Gate 是儿童交互的强制安全边界：每一条进入编排的文�
 
 - `riskLevel` 由命中规则计算，不允许调用方指定；`allow` ⇔ 规则列表为空 ⇔ `low`；`escalate_crisis` 仅在 input 层合法。
 - `reason` 只能取 `rule_hit | crisis_escalation | gate_unavailable`。
-- `refs` 仅允许 `requestId/traceId/turnId` 三种关联 ID，且必须通过合同 ID 词汇再验证（未验证值丢弃）；未知字段（顶层与 `refs` 内）一律拒绝，原始敏感内容无法借道写入。
+- `refs` 仅允许 `requestId/traceId/turnId` 三种关联 ID，且必须通过合同 ID 词汇再验证（未验证值丢弃）；未知字段（顶层与 `refs` 内）一律拒绝，原始敏感内容无法借道写入。未知字段的**字段名同样不回显**：问题结构中只出现 `len=<长度>#fnv1a=<摘要>` 形式的掩码指纹，攻击者可控的 key 文本不进入错误信息（review round 1 P2-4）。
 - `decidedAt` 为 ISO-8601 UTC 时间戳；解析器对未知策略版本、未注册规则、不一致的决策/规则关系 fail-closed。
 
 ## 7. 三条强制入口
@@ -112,6 +114,8 @@ Issue #27 验收标准 3 要求 UI、API、DSH Tool 三条入口均强制有效�
 3. **Output Gate** 通过 fail-closed 包装评估草稿输出：被阻断的草稿不产生最终输出。
 
 只要发生阻断，`finalOutput` 为 `null`；Trace 按决策顺序排列（input → tool → output）。`lib/domain/` 边界约束（无 prisma/react/next/db 导入）由既有边界测试继续强制。
+
+接线层应向 `evaluateTurnSafety` 传入会话自己的（服务端解析的）`ownChildRef`；缺省时 Output Gate 以合同示例的演示儿童引用为"自己"，非演示儿童 ID 仍按数据泄漏阻断（review round 1 P2-3）。
 
 ## 9. 版本化、变更与回滚
 

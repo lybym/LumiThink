@@ -45,6 +45,7 @@ test("each layer carries its expected v1.0 rules", () => {
   assert.deepEqual([...safetyRuleIdsForLayer("tool")].sort(), [
     "tool.dangerous_category",
     "tool.memory_write_unauthorized",
+    "tool.permission_overreach",
     "tool.privacy_overreach",
     "tool.schema_forgery",
     "tool.unregistered",

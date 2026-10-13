@@ -10,6 +10,7 @@ import {
   type SafetyTraceRecord,
   type SafetyTraceReason,
 } from "../../../lib/domain/safety/trace.ts";
+import { SAFETY_POLICY_VERSION } from "../../../lib/domain/safety/policy.ts";
 import type { SafetyRuleId } from "../../../lib/domain/safety/policy.ts";
 
 const FIXED_AT = "2026-10-13T12:00:00.000Z";
@@ -256,4 +257,87 @@ test("records expose a fixed field set (audit contract, issue #27 AC 3)", () => 
     ["decidedAt", "decision", "entrance", "layer", "policyVersion", "reason", "refs", "riskLevel", "ruleIds"].sort(),
   );
   assert.equal(built.entrance, "dsh_tool");
+});
+
+test("buildSafetyTrace stamps the latest supported policy version (review P2-2)", () => {
+  // The stamp must track SAFETY_POLICY_VERSION (the latest registry
+  // entry), never a fixed index — appending "1.1" must move the stamp of
+  // every newly built trace.
+  const trace = buildSafetyTrace({
+    layer: "tool",
+    decision: "block",
+    ruleIds: ["tool.unregistered"],
+    reason: "rule_hit",
+    decidedAt: FIXED_AT,
+  });
+  assert.equal(trace.policyVersion, SAFETY_POLICY_VERSION);
+});
+
+test("unknown field names are masked and never echoed (review P2-4)", () => {
+  // The attacker controls the KEY, not just the value: a sensitive word as
+  // a refs key must not surface in the structured problem path either.
+  const sensitiveKey = "敏感孩子姓名-canary123";
+  let paths = "";
+  let message = "";
+  try {
+    buildSafetyTrace({
+      layer: "input",
+      decision: "allow",
+      ruleIds: [],
+      reason: "rule_hit",
+      refs: { [sensitiveKey]: "x" } as unknown as { requestId?: string },
+    });
+    assert.fail("unknown refs keys must be rejected");
+  } catch (error) {
+    assert.ok(error instanceof ContractValidationError);
+    paths = (error as ContractValidationError).problems.map((p) => p.path).join(" ");
+    message = (error as ContractValidationError).problems.map((p) => p.message).join(" ");
+  }
+  assert.ok(/unknown field/.test(message), "the rejection stays structural");
+  assert.ok(!paths.includes(sensitiveKey), "the key must not be echoed");
+  assert.ok(!message.includes("canary"), "the key must not be echoed via the message");
+  assert.ok(/refs\.<unknown:len=\d+#fnv1a-[0-9a-f]{8}>/.test(paths), "the path carries only a masked fingerprint");
+
+  // Same masking on the parse path for unknown top-level trace fields.
+  const smuggledKey = "原始原话KEY-canary456";
+  let parsePaths = "";
+  try {
+    parseSafetyTraceRecord({
+      policyVersion: "1.0",
+      layer: "input",
+      decision: "block",
+      ruleIds: ["input.prompt_injection"],
+      riskLevel: "high",
+      reason: "rule_hit",
+      refs: {},
+      decidedAt: FIXED_AT,
+      [smuggledKey]: "raw sensitive content",
+    });
+    assert.fail("unknown trace fields must be rejected");
+  } catch (error) {
+    assert.ok(error instanceof ContractValidationError);
+    parsePaths = (error as ContractValidationError).problems.map((p) => p.path).join(" ");
+  }
+  assert.ok(!parsePaths.includes(smuggledKey), "the unknown trace field name must not be echoed");
+  assert.ok(!parsePaths.includes("canary"), "no key text may leak through the path");
+  assert.ok(/trace\.<unknown:len=\d+#fnv1a-[0-9a-f]{8}>/.test(parsePaths), "parse-side paths are masked too");
+
+  // Known ref fields keep their readable structural paths (the key echo is
+  // only masked for unknown, attacker-controlled keys).
+  let knownPaths = "";
+  try {
+    buildSafetyTrace({
+      layer: "input",
+      decision: "allow",
+      ruleIds: [],
+      reason: "rule_hit",
+      refs: { requestId: "not-a-contract-id" },
+    });
+    assert.fail("an invalid known ref value must still be rejected");
+  } catch (error) {
+    assert.ok(error instanceof ContractValidationError);
+    knownPaths = (error as ContractValidationError).problems.map((p) => p.path).join(" ");
+  }
+  assert.ok(knownPaths.includes("refs.requestId"), "known ref kinds keep readable paths");
+  assert.ok(!knownPaths.includes("not-a-contract-id"), "invalid ref values are never echoed");
 });

@@ -275,3 +275,66 @@ test("turns without text or output are evaluated as tool-only no-ops", () => {
   assert.equal(result.traces.length, 0);
   assert.equal(result.output, null);
 });
+
+test("ownChildRef is forwarded to the output gate (review P2-3)", () => {
+  const ownRef = "chd_mychild01";
+  const own = evaluateTurnSafety({
+    entrance: "api_text",
+    actorRole: "child",
+    interactionText: BENIGN_TEXT,
+    draftOutput: "[synthetic] 参考 chd_mychild01 的记录",
+    ownChildRef: ownRef,
+    refs: REFS,
+    decidedAt: FIXED_AT,
+  });
+  assert.equal(own.blocked, false, "the session's own child reference is not a leak");
+  assert.equal(own.finalOutput, "[synthetic] 参考 chd_mychild01 的记录");
+
+  // Without ownChildRef the pipeline falls back to the demo child ref, so
+  // a non-demo child id stays a leak.
+  const fallback = evaluateTurnSafety({
+    entrance: "api_text",
+    actorRole: "child",
+    interactionText: BENIGN_TEXT,
+    draftOutput: "[synthetic] 参考 chd_mychild01 的记录",
+    refs: REFS,
+    decidedAt: FIXED_AT,
+  });
+  assert.equal(fallback.blocked, true);
+  assert.ok(fallback.output?.hits.some((hit) => hit.ruleId === "output.data_leak"));
+
+  // A foreign reference is still a leak even with ownChildRef set.
+  const foreign = evaluateTurnSafety({
+    entrance: "api_text",
+    actorRole: "child",
+    interactionText: BENIGN_TEXT,
+    draftOutput: "[synthetic] 参考 chd_otherchild1 的记录",
+    ownChildRef: ownRef,
+    refs: REFS,
+    decidedAt: FIXED_AT,
+  });
+  assert.equal(foreign.blocked, true);
+  assert.ok(foreign.output?.hits.some((hit) => hit.ruleId === "output.data_leak"));
+  assert.equal(foreign.finalOutput, null);
+});
+
+test("pipeline rejects an invalid ownChildRef fail-closed (review test gap 4)", () => {
+  assert.throws(() =>
+    evaluateTurnSafety({
+      entrance: "api_text",
+      actorRole: "child",
+      interactionText: BENIGN_TEXT,
+      draftOutput: BENIGN_DRAFT,
+      ownChildRef: "",
+    }),
+  );
+  assert.throws(() =>
+    evaluateTurnSafety({
+      entrance: "api_text",
+      actorRole: "child",
+      interactionText: BENIGN_TEXT,
+      draftOutput: BENIGN_DRAFT,
+      ownChildRef: 42 as unknown as string,
+    }),
+  );
+});

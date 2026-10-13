@@ -4,8 +4,10 @@
  * Positive whitelist enforcement before any tool executes: dangerous
  * categories/permissions are forbidden outright, tools must be registered,
  * a submitted descriptor must match the registered one (schema forgery),
- * memory writes only exist as candidate-only proposals, and the verified
- * actor role must be allowed. Everything fails closed; a refusal never
+ * requested permissions must be a subset of the registered tool's own
+ * permission set (permission overreach), memory writes only exist as
+ * candidate-only proposals, and the verified actor role must be allowed.
+ * Everything fails closed; a refusal never
  * relies on prompt-level constraints instead of permissions.
  *
  * Continues the R0 conclusion (poc/dsh-child): the child profile has no
@@ -201,7 +203,18 @@ export function evaluateToolGate(
     push("tool.dangerous_category");
   }
 
-  const requested = candidate.requestedPermissions.filter((p): p is string => typeof p === "string");
+  // Permission handling is fail-closed: non-string entries are a malformed
+  // descriptor (schema forgery), never silently dropped — a dropped entry
+  // would let an attacker smuggle semantics past the gate (issue #27 AC 1,
+  // review round 1 P1-1).
+  const requested: string[] = [];
+  for (const permission of candidate.requestedPermissions) {
+    if (typeof permission === "string") {
+      requested.push(permission);
+    } else {
+      push("tool.schema_forgery");
+    }
+  }
   const dangerous = requestedDangerousPermissions(requested);
   if (dangerous.memoryWrite) {
     push("tool.memory_write_unauthorized");
@@ -220,6 +233,15 @@ export function evaluateToolGate(
     }
     if (!registered.allowedRoles.includes(candidate.actorRole)) {
       push("tool.privacy_overreach");
+    }
+    // Positive permission whitelist (SAFETY_POLICY.md §4.2): a registered
+    // tool may only request permissions from its own registered permission
+    // set. Anything else is a privilege-escalation attempt and blocks.
+    for (const permission of requested) {
+      if (!registered.permissions.includes(permission)) {
+        push("tool.permission_overreach");
+        break;
+      }
     }
   }
 

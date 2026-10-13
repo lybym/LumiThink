@@ -21,6 +21,7 @@ import {
   SAFETY_DECISIONS,
   SAFETY_ENTRANCES,
   SAFETY_LAYERS,
+  SAFETY_POLICY_VERSION,
   SAFETY_POLICY_VERSIONS,
   SAFETY_RULES,
   maxSeverityOf,
@@ -84,6 +85,30 @@ const TRACE_REF_KINDS: Readonly<Record<keyof SafetyTraceRefs, "requestId" | "tra
     turnId: "turnId",
   });
 
+/**
+ * Non-cryptographic FNV-1a fingerprint (pure JS — the domain layer imports
+ * no node builtins). Used only to correlate masked unknown-field names in
+ * structured problems; it is not a security control.
+ */
+function fnv1aHex(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Masked, purely structural stand-in for an untrusted unknown field name
+ * (review round 1 P2-4): the key itself can carry attacker-chosen text, so
+ * neither the value nor the full key is ever echoed into a problem path —
+ * only the key length plus a short digest, for debug correlation.
+ */
+function describeUnknownFieldKey(key: string): string {
+  return `<unknown:len=${key.length}#fnv1a-${fnv1aHex(key)}>`;
+}
+
 function validateRefs(refs: Readonly<SafetyTraceRefs>, problems: ContractProblem[]): void {
   // Allow-list iteration: keys are checked against the known ref kinds first
   // so an untrusted caller cannot smuggle raw content into a trace through
@@ -94,7 +119,7 @@ function validateRefs(refs: Readonly<SafetyTraceRefs>, problems: ContractProblem
       problems.push(
         problem(
           "CONTRACT_FIELD_INVALID",
-          `refs.${key}`,
+          `refs.${describeUnknownFieldKey(key)}`,
           "refs carries an unknown field; only requestId/traceId/turnId refs are recorded.",
         ),
       );
@@ -199,7 +224,10 @@ export function buildSafetyTrace(params: BuildSafetyTraceParams): Readonly<Safet
   }
 
   const record: SafetyTraceRecord = {
-    policyVersion: SAFETY_POLICY_VERSIONS[0] as SafetyPolicyVersion,
+    // Current policy version (never the first registry entry): appending a
+    // newer version must move the stamp of every newly built trace
+    // (review round 1 P2-2).
+    policyVersion: SAFETY_POLICY_VERSION,
     layer: params.layer,
     decision: params.decision,
     ruleIds: Object.freeze(ruleIds),
@@ -242,7 +270,7 @@ export function parseSafetyTraceRecord(value: unknown): Readonly<SafetyTraceReco
       problems.push(
         problem(
           "CONTRACT_FIELD_INVALID",
-          `trace.${key}`,
+          `trace.${describeUnknownFieldKey(key)}`,
           "safety trace carries an unknown field; raw content must never be recorded.",
         ),
       );
