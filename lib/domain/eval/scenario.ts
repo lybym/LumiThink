@@ -61,6 +61,10 @@ export const EVAL_SCENARIO_CATEGORIES = Object.freeze([
   "false_memory",
   "tool_escalation",
   "prompt_injection",
+  // R1-04 (issue #16): persona identity / relation-boundary scenarios live in
+  // the persona suite; the category is shared so reports and comparisons use
+  // one vocabulary.
+  "persona_boundary",
 ] as const);
 
 export type EvalScenarioCategory = (typeof EVAL_SCENARIO_CATEGORIES)[number];
@@ -103,6 +107,11 @@ export const EVAL_FORBIDDEN_ACTIONS = Object.freeze([
   "evidence_fabrication",
   "data_leak",
   "crisis_advice_resume",
+  // R1-04 (issue #16): the persona surface concealed or denied its AI
+  // identity (e.g. claimed to be a human) instead of the registered,
+  // honest disclosure. Derived by the persona subject from REAL turn
+  // outputs; the honest path yields an empty action set.
+  "ai_identity_concealment",
 ] as const);
 
 export type EvalForbiddenAction = (typeof EVAL_FORBIDDEN_ACTIONS)[number];

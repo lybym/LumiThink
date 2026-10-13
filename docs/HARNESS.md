@@ -5,6 +5,7 @@
 > R1-00 交付说明：本文由 Issue #12 建立 v0；执行图/接口为稳定合同候选，供评审，不代表可用功能。  
 > R1-07 交付说明（Issue #19）：§6 评测契约由 `lib/domain/eval/`（场景 Schema + 断言引擎 + 运行器 + 报告/对比）与 `tests/domain/eval/` 交付；真实 Persona/Skill/Gateway 行为面经 `EvalSubject` 适配器接入（R1-04/R1-13/R1-11/R1-12）。
 > R1-13 交付说明（Issue #25）：Evidence Card v0 + Skill Registry v0 由 `lib/domain/evidence/`（卡片/Manifest Schema + 只读版本化 Registry + 显式人工审核发布门槛 + 可复现发布/回滚）交付；治理卡可经 `toEvalEvidenceCardView` 投影为本契约的 `EvalEvidenceCard` 视图，真实 subject 的证据引用必须来自 Registry 已核验卡片。证据治理合同见 [EVIDENCE_POLICY](./EVIDENCE_POLICY.md)。
+> R1-04 交付说明（Issue #16）：Persona v0 已成为第一个接入本契约的真实行为面——`lib/domain/persona/` 提供 `persona_policy_subject`（观察由真实 `resolvePersonaTurns` 输出派生，不自报）与独立 persona 套件 `lumithink_persona_eval_suite` v1.0.0（6 场景，经同一 `runEvaluation` 执行）；词表增量：`EVAL_FORBIDDEN_ACTIONS` 增 `ai_identity_concealment`，`EVAL_SCENARIO_CATEGORIES` 增 `persona_boundary`。合同见 [PERSONA](./PERSONA.md)。
 
 ## 1. 执行图（v0）
 
@@ -75,11 +76,11 @@ InteractionEvent（统一入口）
 
 ## 6. 评测契约
 
-> R1-07（Issue #19）已交付首版 Evaluation Harness：代码 `lib/domain/eval/`，测试 `tests/domain/eval/`。以下为已实现契约。真实 Persona/Skill/Gateway 行为面经 `EvalSubject` 适配器接入（R1-04/R1-13/R1-11/R1-12）；接入前由版本化合成参考 subject（`synthetic_reference_subject@0.1.0`，固定行为表）保持套件离线可执行，并作为前后对比的稳定基线——它不代表产品行为。
+> R1-07（Issue #19）已交付首版 Evaluation Harness：代码 `lib/domain/eval/`，测试 `tests/domain/eval/`。以下为已实现契约。真实 Persona/Skill/Gateway 行为面经 `EvalSubject` 适配器接入（R1-04 已接入 persona 套件与 `persona_policy_subject`；R1-13/R1-11/R1-12 的 Skill/Gateway 面接入仍待后续 Issue）；接入前由版本化合成参考 subject（`synthetic_reference_subject@0.1.0`，固定行为表）保持既有 17 场景基线套件离线可执行，并作为前后对比的稳定基线——它不代表产品行为。
 
 ### 6.1 场景与套件（版本化 fixtures）
 
-- 固定合成场景集以版本化套件维护：`lumithink_eval_suite` v1.0.0（`EVAL_SUITE_V1`，`lib/domain/eval/fixtures.ts`）。全部正文以 `[synthetic]` 前缀标记，儿童引用沿用 R0 合成标识 `chd_demo_001` 语系；不依赖第三方真实模型与任何儿童数据，CI 可复现（根工程 `pnpm test`，R1 baseline gate）。
+- 固定合成场景集以版本化套件维护：`lumithink_eval_suite` v1.0.0（`EVAL_SUITE_V1`，`lib/domain/eval/fixtures.ts`）。全部正文以 `[synthetic]` 前缀标记，儿童引用沿用 R0 合成标识 `chd_demo_001` 语系；不依赖第三方真实模型与任何儿童数据，CI 可复现（根工程 `pnpm test`，R1 baseline gate）。R1-04 起，persona 边界回归以独立版本化套件 `lumithink_persona_eval_suite` v1.0.0（`PERSONA_EVAL_SUITE_V1`，`lib/domain/persona/eval-suite.ts`，6 个 `persona_boundary` 场景，全部 `critical`）经同一 runner 执行，基线 17 场景套件保持不变。
 - 覆盖矩阵（issue #19 验收标准 1）：双 Skill（`emotion_support`、`homework_initiation`）× 适用 / 不适用 / 策略无效 / 儿童拒绝 / 危机分支；另含工具越权（未注册工具、注册工具权限越界、隐私越权导出）、假记忆（仅候选提议路径、禁止直接写入与自动标签）、证据不适用（禁引越界卡片）与 Prompt 注入（指令覆盖、角色伪造 + 隐私越权）。
 - 每个场景声明：场景 ID（稳定可检索）、期望路由、禁用动作、需引用/禁引 Evidence Card、预期退出/求助路径；场景经 fail-closed 解析器校验（未知字段/未注册枚举/不一致 gate probe 一律拒绝）。Evidence Card 含人工审核状态（PRD §8）。
 - 安全断言通过 gate probe 以固定合成输入直接驱动**真实** `evaluateTurnSafety` 流水线（Input/Tool/Output 三层），断言决策与规则 ID——安全基线不依赖任何模型自评。
