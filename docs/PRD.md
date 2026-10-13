@@ -1,6 +1,6 @@
 # LumiThink 2.0 产品需求文档（PRD）
 
-> 版本：2.0.0-draft ｜ 日期：2026-10-12 ｜ 状态：讨论稿（非已交付功能清单）  
+> 版本：2.0.1-draft ｜ 日期：2026-10-13 ｜ 状态：讨论稿（非已交付功能清单；已确认目标语音硬件/Bridge 架构）  
 > 对应计划：[ROADMAP.md](./ROADMAP.md)  
 > 优先级：P0 = 首个可用闭环必需；P1 = 后续重要；P2 = 远期探索。
 
@@ -72,11 +72,11 @@
 
 **验收：** 拖动/动画在客户端即时完成，Agent 仅处理有语义的事件；所有场景均有版本化 schema、输入校验和允许的动作集合；不得执行模型生成的任意 JS/HTML。
 
-### UC-05 语音交互（P1，硬件依赖外置）
+### UC-05 语音交互（P1，硬件和语音协议与 Core 解耦）
 
-经协议适配器连接任意合规客户端，如已有小智设备；语音消息与文本进入相同 Agent Session，回应可由设备播放。后续可以与浏览器画布协同。
+目标硬件选择 **XVF3800 + ESP32-S3**，使用经板级适配的小智固件连接自建 `xiaozhi-esp32-server`；经 Voice Adapter 进入与文字一致的 LumiThink Identity/Session/Persona/Policy。正式语音由 **Turn Orchestrator + 自定义 Cordis Runtime Bridge** 独占 Agent 生命周期；小智负责 VAD/ASR/TTS、设备连接和停止播放，DSH 负责受控推理，Lumi Domain 拥有儿童记忆与教育规则。硬件和平台选型不构成对核心领域层的供应商绑定。
 
-**验收：** 更换设备固件无须修改 Core；能处理开始、取消、打断、断线重连；不在日志中默认保存儿童原始语音；未支持的设备能力明确降级。
+**验收：** 固件/平台可替换而不修改 Core；能处理开始、真取消、端侧停播、旧轮次 `turn_id`/`epoch` 栅栏、连续打断、断线重连、旧记忆写入拒绝；实时流先过儿童输出安全 Gate 再进入 TTS。默认不长期保留儿童原始音频，第三方 ASR/TTS/LLM 外发须独立授权与审查。**当前为设计，不是已完成能力**。
 
 ### UC-06 家长支持界面（P0 基础能力，P1 扩展）
 
@@ -105,10 +105,19 @@
 | FR-009 | Memory Curator 提议、去重、冲突检查与审批 | P1 | 原始对话不能自动升级为心理标签；高影响记忆需审阅 |
 | FR-010 | R1 建立最小 Evidence Card 与情绪支持/困难任务启动双 Skill，R3 扩充专业体系 | P0（双 Skill）/P1（扩充） | 专业策略可追踪来源、版本、适用/禁忌条件；合成对话评测通过 |
 | FR-011 | Scene Schema + Web Renderer + Semantic Actions | P1 | 可无硬件运行并完成至少一个真实操作场景 |
-| FR-012 | 独立语音协议适配层 | P1 | 小智协议接入不改变 FR-002/008/010 的实现 |
+| FR-012 | 独立语音协议适配层（目标：XVF3800 + ESP32-S3、小智自托管） | P1 | 设备与自建平台联调不改变 FR-002/008/010 的实现 |
 | FR-013 | 经验评估与人格/策略版本发布流程 | P1 | 候选变更经离线回归 + 人工审批，支持回退 |
 | FR-014 | 多客户端同会话、视觉与语音协同 | P2 | 明确屏幕所有权、音频播放权及冲突处理 |
 | FR-015 | 游戏化复杂场景与自定义内容创作 | P2 | 具有明确教育目标和退出/停用机制 |
+| FR-016 | Voice Turn Lifecycle：Cordis Bridge 实时 Delta + 真取消 + 业务栅栏 | P1（R1-V 先导，R5 实机） | 旧文本/音频/记忆跨轮 0；安全增量播报，受控 IPC/Worker 回收和实机打断/重连验收 |
+
+### 4.1 语音技术边界与先导工作包
+
+- **选型已确定**：XVF3800 + ESP32-S3（硬件）；`xiaozhi-esp32-server` 私有化（语音平台）；DeepSeek Harness（认知引擎）；LumiThink Turn Orchestrator + 自定义 Cordis Runtime Bridge（实时语音控制）。均不能据此宣称已通过实机验收。
+- **R1-V（技术先导）**：合成数据下先证实 DSH 进程内 `cancel()/whenIdle()`、`agent/assistant-stream`、Unix Domain Socket 和轮次栅栏；避免 SDK 缺少中途取消及持久消息非实时造成儿童语音故障。
+- **R5（实机交付）**：结合 XVF3800 的 I2S/AEC 小智板级固件与私有化设备 OTA/ASR/TTS 流式闭环，验收连续打断、故障回收、隐私和模型外发。
+- **强制三重门禁**：即时阻断旧输出、取消旧计算、阻止旧业务副作用；仅调用 `client_abort` 或 `client.close()` 都不足以证明正式打断成功。
+- 架构合同详见 [ARCHITECTURE](./ARCHITECTURE.md)、[VOICE_HARDWARE](./VOICE_HARDWARE.md)、[VOICE_RUNTIME](./VOICE_RUNTIME.md) 和 [ADR-002](./adr/0002-voice-runtime-bridge.md)。
 
 ## 5. Harness 行为契约
 

@@ -47,7 +47,7 @@ DSH 官方状态为 Developer Preview，未经安全审计；完成此 PoC 也�
 ### R0-A — 构建与版本可复现
 
 - [x] 在隔离临时环境验证 DSH 指定版本的 TypeScript SDK、CLI 及原生依赖可安装；记录 OS、Node、依赖与锁文件。（PR #7：`runtime-manifest.json`，Node v24.21.0 / pnpm 10.34.7，win32-x64 + CI ubuntu/windows）
-- [x] 验证 `DeepSeekHarness` 与 `HarnessClient` 的模型请求、事件流、取消与进程退出行为。（PR #7/#9：`tests/contracts/sdk.e2e.spec.ts`，多轮流式与 close() 阶梯）
+- [x] 验证 `DeepSeekHarness` 与 `HarnessClient` 的模型请求、已提交事件流、SDK 缺失中途取消接口的限制与进程退出行为。（PR #7/#9：`tests/contracts/sdk.e2e.spec.ts`，合成多轮/事件/`close()` 阶梯；**真取消与实时 Delta 不在 R0 SDK 的已验能力内**，详见 [R1-V](./VOICE_RUNTIME.md)）
 - [x] 建立本项目独立 `DSH_HOME`，确保不读取开发者本机 `~/.dsh`、凭据或工作区。（PR #7：`src/child-env.ts` + `tests/privacy/child-env.spec.ts`）
 - [ ] 检查上游 License、依赖及本次将用到的插件目录，并保存扫描结果。
 - [x] 写出版本和运行时探测命令，CI 能复现。（PR #9：`tests/manifest.spec.ts` + `.github/workflows/r0-zero-skip-gate.yml`，双平台断言精确版本）
@@ -135,6 +135,8 @@ LumiThink/
 4. 禁止非必要 Session/反馈上传并提供实际流量/配置证据；
 5. 没有儿童真实数据，也没有改动现有 LumiThink 业务功能；
 6. README 给出运行/清理命令，失败时明确阻断后续真实数据接入。
+
+> **语音工作流隔离说明（2026-10-13）**：本 R0 `lumithink-child` SDK Profile 保持**合成模型和无工具白名单**；新增实时语音自定义 Cordis Bridge 的选型记于 [ADR-002](./adr/0002-voice-runtime-bridge.md)。不得把 R0 零 SKIP 解释成 Bridge 取消、实时 Token、XVF3800 或小智平台已验。两条 Runtime 入口使用不同的受审查 Profile，正式语音由 Bridge 单独拥有 Session。
 
 ## 5. R0 技术选型的待决问题
 

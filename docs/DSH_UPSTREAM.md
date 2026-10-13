@@ -47,9 +47,9 @@
 
 | 检查域 | 重点 |
 | --- | --- |
-| Cordis/Core | 插件注入、生命周期、配置层叠、注册与卸载语义 |
-| Agent Loop / Model | Context 组装、系统提示更新、取消语义、重试、工具调用 |
-| Profile / SDK | `sdk` 与自定义 Profile 兼容性、初始化/JSON-RPC/流式返回 |
+| Cordis/Core | 插件注入、生命周期、配置层叠、注册与卸载语义；R1-V 自定义 Bridge 的 `ctx.agents`/`AgentHandle`/`agent/assistant-stream` 合同 |
+| Agent Loop / Model | Context 组装、系统提示更新、`cancel({kind:'user'})` 默认清空 Inbox、`whenIdle()` 停稳、实时 Delta 尝试、重试及工具调用 |
+| Profile / SDK | `sdk` 与 R0 自定义 Profile 兼容性、初始化/JSON-RPC/已提交事件；**官方 SDK 无中途取消**；R1-V Bridge 的唯一所有权与 IPC 安全 |
 | Session | JSONL 版本/迁移/压缩/Checkpoint/恢复与删除语义 |
 | 安全权限 | Tool allowlist、sandbox、HTTP 请求、Shell/FS、子 Agent、自动插件安装 |
 | 隐私外发 | `session-log-deepseek`、OTel 反馈、网络端点及模型 API 行为 |
@@ -84,3 +84,10 @@
 | dsh-v0.2.1-alpha.2 | Alpha，仅参考 | 2026-10-12 | 未验证 | 未验证 | 未验证 | 不作为首选生产基线 |
 
 后续每次升级评审在对应 PR/Issue 保留证据；本文件保留总体政策和经过确认的里程碑。若需要 CI 自动化检查，可后续增加 GitHub Actions 的版本检查，但**不与监控通知混同，也不设置自动生产升级**。
+
+
+## 7. 语音 Bridge 的上游版本门禁（2026-10-13）
+
+[ADR-002](./adr/0002-voice-runtime-bridge.md) 选择不修改 DSH Agent Loop 的自定义 Cordis Bridge。**锁定 `dsh-v0.2.0-rc.2`** 后必须在升级评审中另验以下契约：`ctx.agents.create()/resume()`/AgentHandle 唯一所有权、`agent.cancel()`/`whenIdle()`（默认清除 Inbox）、`agent/assistant-stream` 增量与结算关联、`AgentHandle.dispose()` 回收、工具外发与意外副作用竞态。官方 SDK 当前不提供 `session/cancel`；版本变化不等同于已发布该功能。
+
+该门禁与 R0 的原有 35 项零 SKIP 独立；任何升级必须同时通过两个回归矩阵（如 Bridge 尚未实现则记录未执行，**不得宣称已通过**）。若官方发布等价取消/实时流功能，应评估是否替换 Bridge，**不自动切换**。
