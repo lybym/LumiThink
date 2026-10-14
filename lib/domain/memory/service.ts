@@ -549,8 +549,11 @@ export function createMemoryService(options: MemoryServiceOptions = {}): MemoryS
         return fail("memory.duplicate", ["memory.duplicate"]);
       }
 
+      // ATOMICITY (carried #26 review P2-1, fixed in R1-09): BOTH entries are
+      // admitted through the guarded intake BEFORE either store mutation, so
+      // a throw in the intake can never leave a superseded fact orphaned
+      // without its correction — the two Map writes that follow cannot fail.
       const superseded = admitMemoryEntry({ ...target, status: "superseded", supersededAt: now });
-      store.set(memoryId, superseded);
       const correction = admitMemoryEntry({
         schemaVersion: MEMORY_SCHEMA_VERSION,
         subjectRef: target.subjectRef,
@@ -572,6 +575,7 @@ export function createMemoryService(options: MemoryServiceOptions = {}): MemoryS
         supersededAt: null,
         revision: 1,
       });
+      store.set(memoryId, superseded);
       store.set(correction.memoryId, correction);
       pushAudit({
         action: "memory.correct",
@@ -707,6 +711,18 @@ export function createMemoryService(options: MemoryServiceOptions = {}): MemoryS
       const now = nowFactory();
       const actor = resolveActor(rawActor);
       if (actor === null || (actor.role !== "guardian" && actor.role !== "system")) {
+        // Observable rejection (carried #26 review P2-4, fixed in R1-09):
+        // an unauthorized cleanup attempt lands as a rejected audit fact —
+        // cleanup denial is part of the data-lifecycle audit surface, and
+        // the attempt is no longer silently unobservable.
+        pushAudit({
+          action: "memory.expire_cleanup",
+          actorRole: actor?.role ?? null,
+          subjectRef: null,
+          memoryId: null,
+          outcome: "rejected",
+          ruleIds: ["memory.unauthorized"],
+        });
         return 0;
       }
       let count = 0;

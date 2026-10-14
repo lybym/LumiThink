@@ -243,14 +243,16 @@ test("an 8h-old session is rejected as untrusted and its server entry is cleaned
 test("a fresh service discloses its seeded state as `seed` audit entries", () => {
   const rig = createRig();
   const seeds = rig.guardian.auditEntries().filter((entry) => entry.kind === "seed");
-  // The three seeded elements: acked disclosure 1.0.0, the active base
-  // consent, and the disabled egress switch (initialGuardianAuthorizationState).
+  // The four seeded elements (R1-09 update): acked disclosure 1.1.0, the
+  // active base consent, and BOTH feature switches disabled — the recording
+  // switch seeds disabled (默认最小化采集, issue #21).
   assert.deepEqual(
     seeds.map((entry) => [entry.target, entry.detail]),
     [
-      ["1.0.0", "acknowledged"],
+      ["1.1.0", "acknowledged"],
       ["child_model_interaction", "active"],
       ["third_party_data_egress", "disabled"],
+      ["conversation_recording", "disabled"],
     ],
   );
   for (const entry of seeds) {
@@ -358,7 +360,9 @@ test("idempotent mutations report unchanged and do not duplicate audit entries",
     body: {
       protocolVersion: "1.0",
       action: "acknowledge_disclosure",
-      disclosureVersion: "1.0.0",
+      // Re-acknowledging the CURRENT (seeded) version is the idempotent case
+      // (R1-09 bumped the current disclosure to 1.1.0).
+      disclosureVersion: "1.1.0",
     },
   });
   assert.equal((ack.kind === "ok" ? (ack.body as { outcome: string }).outcome : ""), "unchanged");

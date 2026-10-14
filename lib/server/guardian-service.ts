@@ -94,6 +94,12 @@ import {
   type PersonaStyleState,
 } from "../domain/persona/policy.ts";
 import { resolveActivePersona } from "../domain/persona/registry.ts";
+import {
+  parseChildDataActionRequest,
+  type ChildDataEraseResult,
+  type ChildDataExport,
+  type ChildDataInventory,
+} from "../domain/lifecycle/index.ts";
 
 import { safeErrorResult } from "./interaction-service.ts";
 
@@ -162,6 +168,26 @@ export interface GuardianService {
   /** GET /api/v1/guardian/audit (security-change audit). */
   getAudit(params: { readonly authorization: string | null }): GuardianCallResult;
 
+  // -- R1-09 data lifecycle surfaces (issue #21) ----------------------------
+  /**
+   * GET /api/v1/guardian/data — structural inventory (counts + ids, NO
+   * content). Guardian + admin (data_read surface).
+   */
+  getChildDataInventory(params: { readonly authorization: string | null }): GuardianCallResult;
+  /**
+   * GET /api/v1/guardian/data/export — authorized export of SAVED content.
+   * Guardian only (data_export surface: the payload carries child text).
+   */
+  exportChildData(params: { readonly authorization: string | null }): GuardianCallResult;
+  /**
+   * POST /api/v1/guardian/data/erase — subject-wide hard delete (and the
+   * post-restore deletion replay). Guardian only (data_erase surface).
+   */
+  eraseChildData(params: {
+    readonly authorization: string | null;
+    readonly body: unknown;
+  }): Promise<GuardianCallResult>;
+
   // -- Interaction-service wiring (R1-06 enforcement points) ---------------
   /** Fail-closed consent gate for family model turns (submit-time). */
   assertModelInteractionAuthorized(actor: Readonly<ActorContext>): void;
@@ -174,10 +200,21 @@ export interface GuardianService {
   currentFamilyStyle(): Readonly<PersonaStyleWithProvenance>;
   /** Live egress switch state for the provider gate. */
   isThirdPartyEgressEnabled(): boolean;
+  /** R1-09: live recording-switch state for the serving surface. */
+  isConversationRecordingEnabled(): boolean;
 
   // -- Runtime wiring + test surfaces --------------------------------------
   configureEgressStatus(provider: () => GuardianEgressStatus): void;
   configureUsageSummary(provider: () => GuardianUsageSummary): void;
+  /** R1-09: the composed data-lifecycle operations (server-side provider). */
+  configureDataLifecycle(
+    provider: () => {
+      readonly inventory: () => Readonly<ChildDataInventory>;
+      readonly exportData: () => Readonly<ChildDataExport>;
+      readonly erase: (operatorRole: string) => Promise<Readonly<ChildDataEraseResult>>;
+      readonly replayDeletions: (operatorRole: string) => Promise<Readonly<ChildDataEraseResult>>;
+    },
+  ): void;
   auditEntries(): readonly Readonly<GuardianAuditEntry>[];
 }
 
@@ -241,6 +278,12 @@ export function createGuardianService(options: GuardianServiceOptions = {}): Gua
   let auditSeq = 0;
   let egressStatusProvider: (() => GuardianEgressStatus) | null = null;
   let usageSummaryProvider: (() => GuardianUsageSummary) | null = null;
+  let dataLifecycleProvider: (() => {
+    readonly inventory: () => Readonly<ChildDataInventory>;
+    readonly exportData: () => Readonly<ChildDataExport>;
+    readonly erase: (operatorRole: string) => Promise<Readonly<ChildDataEraseResult>>;
+    readonly replayDeletions: (operatorRole: string) => Promise<Readonly<ChildDataEraseResult>>;
+  }) | null = null;
 
   function pushAudit(
     kind: GuardianAuditEntry["kind"],
@@ -664,6 +707,95 @@ export function createGuardianService(options: GuardianServiceOptions = {}): Gua
       }
     },
 
+    // -- R1-09 data lifecycle surfaces (issue #21) --------------------------
+
+    getChildDataInventory(params: { readonly authorization: string | null }): GuardianCallResult {
+      try {
+        const session = requireSession(params.authorization, "data_read");
+        if (isCallResult(session)) {
+          return session;
+        }
+        const provider = dataLifecycleProvider;
+        if (provider === null) {
+          return errorResult(
+            new ContractValidationError([
+              problem("CONTRACT_INTERNAL", "lifecycle", "the data lifecycle provider is not wired."),
+            ]),
+          );
+        }
+        pushAudit("data_view", {
+          actorRole: session.actor.role,
+          actorId: session.actor.actorId,
+          target: GUARDIAN_FAMILY_CHILD_REF,
+          detail: "inventory",
+        });
+        return { kind: "ok", httpStatus: 200, body: provider().inventory() };
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+
+    exportChildData(params: { readonly authorization: string | null }): GuardianCallResult {
+      try {
+        const session = requireSession(params.authorization, "data_export");
+        if (isCallResult(session)) {
+          return session;
+        }
+        const provider = dataLifecycleProvider;
+        if (provider === null) {
+          return errorResult(
+            new ContractValidationError([
+              problem("CONTRACT_INTERNAL", "lifecycle", "the data lifecycle provider is not wired."),
+            ]),
+          );
+        }
+        pushAudit("data_export", {
+          actorRole: session.actor.role,
+          actorId: session.actor.actorId,
+          target: GUARDIAN_FAMILY_CHILD_REF,
+          detail: "export_saved_content",
+        });
+        return { kind: "ok", httpStatus: 200, body: provider().exportData() };
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+
+    async eraseChildData(params: {
+      readonly authorization: string | null;
+      readonly body: unknown;
+    }): Promise<GuardianCallResult> {
+      try {
+        const session = requireSession(params.authorization, "data_erase");
+        if (isCallResult(session)) {
+          return session;
+        }
+        const provider = dataLifecycleProvider;
+        if (provider === null) {
+          return errorResult(
+            new ContractValidationError([
+              problem("CONTRACT_INTERNAL", "lifecycle", "the data lifecycle provider is not wired."),
+            ]),
+          );
+        }
+        // The subject is pinned server-side; the body only selects the action.
+        const action = parseChildDataActionRequest(params.body);
+        const result =
+          action.kind === "erase_child_data"
+            ? await provider().erase(session.actor.role)
+            : await provider().replayDeletions(session.actor.role);
+        pushAudit(action.kind === "erase_child_data" ? "data_erase" : "data_erase_replay", {
+          actorRole: session.actor.role,
+          actorId: session.actor.actorId,
+          target: GUARDIAN_FAMILY_CHILD_REF,
+          detail: `conv=${result.purged.conversations},hist=${result.purged.historyEntries},turn=${result.purged.turnStreams},mem=${result.purged.memories},dsh=${result.purged.dshSessions}`,
+        });
+        return { kind: "ok", httpStatus: 200, body: result };
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+
     assertModelInteractionAuthorized(actor: Readonly<ActorContext>): void {
       // Gate family members only: the single-family MVP's child and guardian
       // carry the family childRef; foreign/server principals pass (their
@@ -705,12 +837,25 @@ export function createGuardianService(options: GuardianServiceOptions = {}): Gua
       return isSwitchEnabled(authorizations, "third_party_data_egress");
     },
 
+    isConversationRecordingEnabled(): boolean {
+      return isSwitchEnabled(authorizations, "conversation_recording");
+    },
+
     configureEgressStatus(provider: () => GuardianEgressStatus): void {
       egressStatusProvider = provider;
     },
 
     configureUsageSummary(provider: () => GuardianUsageSummary): void {
       usageSummaryProvider = provider;
+    },
+
+    configureDataLifecycle(provider: () => {
+      readonly inventory: () => Readonly<ChildDataInventory>;
+      readonly exportData: () => Readonly<ChildDataExport>;
+      readonly erase: (operatorRole: string) => Promise<Readonly<ChildDataEraseResult>>;
+      readonly replayDeletions: (operatorRole: string) => Promise<Readonly<ChildDataEraseResult>>;
+    }): void {
+      dataLifecycleProvider = provider;
     },
 
     auditEntries(): readonly Readonly<GuardianAuditEntry>[] {

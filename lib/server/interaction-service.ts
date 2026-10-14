@@ -158,6 +158,21 @@ export interface InteractionServiceOptions {
    * pipeline's persona resolution (fail-closed, like the actor).
    */
   readonly resolvePersonaStyle?: () => unknown;
+  /**
+   * R1-09 (issue #21) conversation-recording gate, server-owned and evaluated
+   * dynamically (the guardian `conversation_recording` feature switch).
+   * - true / absent → pre-R1-09 behavior: the conversation history of each
+   *   conversation is retained (bounded per conversation) and ended turn
+   *   streams stay available for SSE replay within the process lifetime.
+   * - false → 默认最小化采集: NO conversation text is retained (history
+   *   stays empty; each turn runs context-free) and an ended turn stream is
+   *   removed from the registry immediately (the event buffer carries the
+   *   child text + output text, so a completed turn is a temp artifact that
+   *   must not outlive its live consumers). Late SSE subscribers after the
+   *   end see the same indistinguishable "not available" answer — disclosed
+   *   in docs/MEMORY_POLICY.md.
+   */
+  readonly isRecordingEnabled?: () => boolean;
 }
 
 export interface InteractionService {
@@ -181,6 +196,31 @@ export interface InteractionService {
   }): Promise<CancelTurnResult>;
   /** Test/audit surface: the in-memory conversation ids owned by an actor. */
   conversationsOwnedBy(actorId: unknown): readonly string[];
+  /**
+   * R1-09 server-internal lifecycle surface (used only by the server-side
+   * data-lifecycle service behind guardian-authorized HTTP routes): the
+   * retained conversation records (ids + history CONTENT) and turn-stream
+   * counters for one actor. Never exposed over HTTP as-is.
+   */
+  childDataSnapshot(actorId: unknown): {
+    readonly conversations: readonly {
+      readonly conversationId: string;
+      readonly sessionId: string;
+      readonly history: readonly { readonly role: "user" | "assistant"; readonly content: string }[];
+    }[];
+    readonly turnStreams: { readonly total: number; readonly running: number };
+  };
+  /**
+   * R1-09 server-internal lifecycle surface: subject-wide hard delete of
+   * every conversation record, retained history entry and turn stream
+   * (running turns are aborted first) of one actor. Returns structural
+   * counts only — the deleted content is never returned.
+   */
+  eraseChildData(actorId: unknown): Promise<{
+    readonly conversations: number;
+    readonly historyEntries: number;
+    readonly turnStreams: number;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +476,10 @@ export function createInteractionService(options: InteractionServiceOptions): In
   const authorizeTurn = options.authorizeTurn;
   const cancelPolicy = options.cancelPolicy;
   const resolvePersonaStyle = options.resolvePersonaStyle;
+  // R1-09 recording gate: absent → recording enabled (pre-R1-09 behavior;
+  // every pre-existing rig keeps its semantics). The composed web runtime
+  // wires the guardian `conversation_recording` switch (default OFF).
+  const isRecordingEnabled = options.isRecordingEnabled ?? (() => true);
 
   /** conversationId → record (in-memory, process-local). */
   const conversations = new Map<string, ConversationRecord>();
@@ -531,6 +575,17 @@ export function createInteractionService(options: InteractionServiceOptions): In
       wake();
     }
     stream.resolveEnded();
+    // R1-09 minimal collection: with the recording switch OFF, the ended
+    // turn's event buffer (child text + gate-approved output) is a temp
+    // artifact that must not outlive its live consumers. Live SSE iterators
+    // hold their own reference (they keep working); a subscriber arriving
+    // after the purge gets the same indistinguishable "not available" as a
+    // foreign trace. With recording ON, streams stay available for replay
+    // (pre-R1-09 behavior) until an explicit lifecycle erase.
+    if (!isRecordingEnabled()) {
+      turnStreams.delete(stream.traceId);
+      turnIndex.delete(stream.turnId);
+    }
   }
 
   async function delayAbortable(ms: number, signal: AbortSignal): Promise<void> {
@@ -610,13 +665,19 @@ export function createInteractionService(options: InteractionServiceOptions): In
       // assistant text only for completed, gate-approved output. One child
       // can never see another child's history: records are keyed by
       // conversation and bound to the verified actor at submit time.
+      // R1-09 recording gate: with the guardian recording switch OFF the
+      // conversation content is NEVER retained (默认最小化采集) — the turn
+      // still executes normally, but neither side of the exchange is stored,
+      // so the next turn runs context-free (disclosed trade-off,
+      // docs/MEMORY_POLICY.md).
+      const recording = isRecordingEnabled();
       const inputBlocked = result.safetyTraces.some(
         (trace) => trace.layer === "input" && trace.decision === "block",
       );
-      if (!inputBlocked) {
+      if (recording && !inputBlocked) {
         appendHistory(record, { role: "user", content: event.text.content });
       }
-      if (response.status === "completed" && response.content !== null) {
+      if (recording && response.status === "completed" && response.content !== null) {
         appendHistory(record, { role: "assistant", content: response.content.text });
       }
 
@@ -983,6 +1044,97 @@ export function createInteractionService(options: InteractionServiceOptions): In
     },
 
     conversationsOwnedBy,
+
+    childDataSnapshot(actorId: unknown): {
+      readonly conversations: readonly {
+        readonly conversationId: string;
+        readonly sessionId: string;
+        readonly history: readonly { readonly role: "user" | "assistant"; readonly content: string }[];
+      }[];
+      readonly turnStreams: { readonly total: number; readonly running: number };
+    } {
+      const owned: {
+        readonly conversationId: string;
+        readonly sessionId: string;
+        readonly history: readonly { readonly role: "user" | "assistant"; readonly content: string }[];
+      }[] = [];
+      if (typeof actorId !== "string") {
+        return Object.freeze({ conversations: Object.freeze(owned), turnStreams: { total: 0, running: 0 } });
+      }
+      for (const record of conversations.values()) {
+        if (record.actorId === actorId) {
+          owned.push({
+            conversationId: record.conversationId,
+            sessionId: record.sessionId,
+            history: record.history.map((entry) => ({ role: entry.role, content: entry.content })),
+          });
+        }
+      }
+      let total = 0;
+      let running = 0;
+      for (const stream of turnStreams.values()) {
+        if (stream.actorId === actorId) {
+          total += 1;
+          if (stream.status === "running") {
+            running += 1;
+          }
+        }
+      }
+      return Object.freeze({ conversations: Object.freeze(owned), turnStreams: { total, running } });
+    },
+
+    async eraseChildData(actorId: unknown): Promise<{
+      readonly conversations: number;
+      readonly historyEntries: number;
+      readonly turnStreams: number;
+    }> {
+      if (typeof actorId !== "string") {
+        return { conversations: 0, historyEntries: 0, turnStreams: 0 };
+      }
+      // 1. Abort every running turn of this actor first (data erase wins over
+      // in-flight work; cancelled output never reaches the child). Honest
+      // attribution: the abort is performed by the SERVER lifecycle
+      // operation — the guardian's operator identity lives in the
+      // data_erase audit entry of the guardian service.
+      const ownedStreams = [...turnStreams.values()].filter((stream) => stream.actorId === actorId);
+      for (const stream of ownedStreams) {
+        if (stream.status === "running") {
+          stream.cancelledBy = "system";
+          stream.controller.abort();
+        }
+      }
+      // 2. Give the runners their terminal tick (bounded; a runner that has
+      // not settled by then still had its consumption revoked via abort).
+      await Promise.race([
+        Promise.all(ownedStreams.map((stream) => stream.ended)),
+        delayAbortable(1_000, new AbortController().signal),
+      ]);
+      // 3. Hard-delete every owned conversation record (ids + history text).
+      let historyEntries = 0;
+      const erasedConversations = new Set<string>();
+      const erasedSessions = new Set<string>();
+      for (const record of conversations.values()) {
+        if (record.actorId === actorId) {
+          historyEntries += record.history.length;
+          erasedConversations.add(record.conversationId);
+          erasedSessions.add(record.sessionId);
+        }
+      }
+      for (const conversationId of erasedConversations) {
+        conversations.delete(conversationId);
+      }
+      // 4. Hard-delete every owned turn stream + its turn index entry (the
+      // event buffers carry child text: 临时工件 must not survive the erase).
+      for (const stream of ownedStreams) {
+        turnStreams.delete(stream.traceId);
+        turnIndex.delete(stream.turnId);
+      }
+      return {
+        conversations: erasedConversations.size,
+        historyEntries,
+        turnStreams: ownedStreams.length,
+      };
+    },
   });
 }
 

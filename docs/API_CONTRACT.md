@@ -148,7 +148,7 @@ ID 由服务端生成；错误回显只允许通过同一语法**再验证**的 
 | `/api/v1/guardian/authorizations` | POST | **仅 guardian** | `{ action }`：`acknowledge_disclosure` / `grant_consent` / `revoke_consent` / `set_feature_switch` / `set_persona_style` |
 | `/api/v1/guardian/audit` | GET | guardian / admin | 安全变更审计（见 12.4） |
 
-- 授权注册表 v0：consent `child_model_interaction`；功能开关 `third_party_data_egress`（**默认关闭**）。
+- 授权注册表 v0：consent `child_model_interaction`；功能开关 `third_party_data_egress`（**默认关闭**）与 `conversation_recording`（R1-09，**默认关闭**，见 §12.6）。
 - **告知先行**：`grant_consent` / `set_feature_switch(开启)` / `set_persona_style` 要求当前告知版本已被确认；`revoke_consent` 是 fail-safe 方向，**永远允许**。状态转移幂等：重复授权/撤销/同值开关返回 `unchanged` 且不产生重复审计；`set_persona_style` 同值重复提交（解析后风格与 provenance 均不变）同样返回 `unchanged` 且不产生重复审计——首次将默认值显式设为同值会重归属 provenance（`system_default` → `guardian_config`），仍按 `applied` 审计。
 - `set_persona_style` 经 persona 域唯一可信变更路径（`applyPersonaStyleKnobs`，source `guardian_config`）应用，携带 `{knobId, value, source}` 审计轨迹；未注册 knob/值 fail-closed 拒绝且不回显。
 
@@ -169,3 +169,23 @@ ID 由服务端生成；错误回显只允许通过同一语法**再验证**的 
 - 状态为进程内内存（单进程 MVP，同 §3 交付说明）；监护人会话/授权/审计随进程重启复位——持久化选型仍按 TECH_STACK §3 待定。
 - 告知文档中供应商保留/地域与危机渠道（110/120/12355）为**待核实占位**（承 #27 评审 caveat），在 UI 以"待核实"标记呈现。
 - 本节载荷为解析级 fail-closed 校验（`lib/domain/guardian/`），JSON Schema 发布物（§8 的 16 份）v0 不扩展到监护人载荷——扩展留待监护人载荷进入正式合同时一并登记。
+
+### 12.6 数据生命周期（R1-09）
+
+> 对应：[Issue #21](https://github.com/lybym/LumiThink/issues/21) ｜ [PRD FR-006 / FR-008 / §7.2](./PRD.md) ｜ [Roadmap R1-09](./ROADMAP.md) ｜ [MEMORY_POLICY](./MEMORY_POLICY.md) ｜ [PRIVACY_DATA_FLOW](./PRIVACY_DATA_FLOW.md) ｜ [ADR-0005](./adr/0005-child-data-lifecycle-v0.md)
+> 代码：`lib/domain/lifecycle/`（保留矩阵 + fail-closed 载荷）、`lib/server/data-lifecycle-service.ts`（跨存储组合）、`lib/server/guardian-service.ts`（授权面）｜ 测试：`tests/domain/lifecycle/policy.spec.ts`、`tests/server/data-lifecycle.spec.ts`
+
+**记录开关**：功能开关注册表新增 `conversation_recording`（**默认关闭** = 默认最小化采集）。关闭时轮次照常执行但会话正文不保留、已结束轮次的事件缓冲（临时工件）终态即清（SSE 迟到订阅者与外部 trace 得到同样的不可用应答）；开启需当前告知版本已确认（同 §12.2 幂等语义）。告知文档当前版本升级为 **1.1.0**（新增"对话保存说明"、改写监控边界；1.0.0 保留注册供历史确认审计）。
+
+**新增路由**（主体固定为服务端家庭注册表的 `chd_demo_001`，任何载荷都没有 subject 字段——清除无法被重定向到别的孩子）：
+
+| 路由 | 方法 | 角色 | 语义 |
+| --- | --- | --- | --- |
+| `/api/v1/guardian/data` | GET | guardian / admin | 结构化清单：会话 id + 保留正文条数、轮次缓冲、DSH 会话映射、记忆条目分状态、删除台账记录数、记录开关态——**无正文** |
+| `/api/v1/guardian/data/export` | GET | **仅 guardian** | 已保存内容导出：会话历史正文 + 完整记忆条目 + 诚实排除清单（value-free 审计、供应商侧、音频） |
+| `/api/v1/guardian/data/erase` | POST | **仅 guardian** | `{ protocolVersion, action: "erase_child_data" \| "replay_child_deletions" }`：主体级硬删除（会话历史、临时工件[先取消在途轮次]、记忆谱系、DSH 映射关闭）/ 删除重放（备份恢复后重删）；结果仅结构化计数 + tombstone id |
+
+- **删除语义**（AC 1）：erase 后跨 Session 记忆检索为 0、被删会话不可恢复进入旧 DSH 会话、被删轮次事件流不可重放；正文类删除不可回滚。
+- **审计**（交付范围 4）：`data_view / data_export / data_erase / data_erase_replay` 进监护人审计环（target=childRef，detail=有界计数）；删除台账为独立结构。**审计与台账结构上没有承载被删除正文的字段**（emit 校验拒绝未知字段，测试强制）；`memory.expire_cleanup` 的未授权拒绝从静默变为可观测 rejected 审计事实（承 #26 P2-4）。
+- **诚实边界**：删除台账与全部状态为进程内存（跨进程恢复台账不随行——持久化台账属 TECH_STACK §3 待定项；当前部署无离线备份，故该边界暂无实际暴露面）；供应商侧删除不可由本系统担保，撤销授权后仅保证不再发起新请求（§12.3 门禁不变）。
+- **范围注记维持**：§12.3 的"带会话的监护人取消入口属 R1-09+"**未被 #21 吸收**（issue #21 交付范围无取消项），注记保持原样留给后续 Issue。

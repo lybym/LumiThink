@@ -80,7 +80,7 @@ CI 门禁：`.github/workflows/r1-baseline-gate.yml`（Ubuntu：干净环境断�
 | 新领域持久化选型未定；旧 schema 与新领域之间的数据迁移策略只有“拒绝 + 显式归档”守卫，尚无批量迁移工具 | 未完成 | R1/R2 |
 | 真实模型接入、流式、取消、成本控制：R1-02 已交付域层 Model Gateway（`lib/domain/gateway/`：Provider 契约 + Mock + 预算/熔断/超时/取消 + 审计，见 [MODEL_GATEWAY](./MODEL_GATEWAY.md)）；R1-05 已把 Web MVP 文本端点接线到该域层（合同 v1.0 三路由 + SSE 流式 + 取消，Mock 为服务默认，零出网）；真实供应商激活（独立数据外发评审前置）仍未完成 | 部分完成 | R1-02（域层已交付）/ R1-05（Web MVP 接线已交付）/ Iteration B（真实供应商） |
 | 真实 DSH SDK 适配器绑定（独立进程拓扑）未完成：R1-05 以确定性进程内适配器绑定 `DshRuntimePort` 支撑 Web MVP 服务（仅会话生命周期面，消除 `no_port_bound` 缺陷窗口），根工程仍零 SDK 依赖；SDK 适配器与其独立验收待进程拓扑工作 | 未完成 | Iteration B / R1-05 后续 |
-| 监护人端、鉴权、隐私治理未实现；旧 parent 页面文案仍是旧产品语义 | 部分完成（R1-06 已交付最小监护人鉴权/授权/告知/功能开关与安全审计：`lib/domain/guardian/` + `lib/server/guardian-service.ts` + `/parent` 控制台 + API_CONTRACT §12 + ADR-0003；进程内内存态，数据查看/删除 UI 待 R1-09 API） | R1-06（最小面已交付）/ R1-09（数据生命周期 UI） |
+| 监护人端、鉴权、隐私治理未实现；旧 parent 页面文案仍是旧产品语义 | 部分完成（R1-06 已交付最小监护人鉴权/授权/告知/功能开关与安全审计：`lib/domain/guardian/` + `lib/server/guardian-service.ts` + `/parent` 控制台 + API_CONTRACT §12 + ADR-0003；R1-09 已交付数据生命周期最小实现：记录开关（默认关闭）+ 数据清单/导出/删除/重放 API 与控制台区 + MEMORY_POLICY/PRIVACY_DATA_FLOW 矩阵 + ADR-0005，`lib/domain/lifecycle/` + `lib/server/data-lifecycle-service.ts`；全部进程内内存态） | R1-06（最小面已交付）/ R1-09（数据生命周期已交付）/ 持久化选型（R1/R2） |
 | 旧页面在 R1-05 之前仅保证“可编译可启动”，不承诺 2.0 体验；R1-05 已将儿童页重建为 Lumi 对话 MVP（正式交互 API + 流式 + 停止 + 退出路径），旧数学工具移至 `/kid/playground`，parent 页面保持冻结原型 | 部分完成（儿童端已重建） | R1-05（儿童端）/ R1-06（监护人端） |
 
 > 变更本表前先更新对应 Roadmap/Issue；未完成项不得标记为完成。
