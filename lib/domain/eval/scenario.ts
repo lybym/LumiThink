@@ -34,8 +34,13 @@ import type { ToolCallCandidate } from "../safety/tool-gate.ts";
 /**
  * Supported evaluation schema versions. Appending an entry is the ONLY way
  * to accept a new version; unknown versions fail closed.
+ *
+ * v1.1 (R1-11, issue #23): adds the optional `versionStamps` field to the
+ * run report — the HARNESS §6.4 version-stamp merge performed by the
+ * subject-wiring issue that first drives a real skill surface through the
+ * harness. v1.0 reports remain valid and parse without stamps.
  */
-export const EVAL_SCHEMA_VERSIONS = Object.freeze(["1.0"] as const);
+export const EVAL_SCHEMA_VERSIONS = Object.freeze(["1.0", "1.1"] as const);
 
 export type EvalSchemaVersion = (typeof EVAL_SCHEMA_VERSIONS)[number];
 

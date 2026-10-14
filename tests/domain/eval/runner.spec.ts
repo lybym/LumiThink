@@ -237,7 +237,7 @@ test("citing an unreviewed evidence card fails closed", () => {
   const detail = resultOf(report, "emotion.applicable.daily-emotion-001").assertions.find(
     (assertion) => assertion.assertionId === "required_evidence",
   )?.detail;
-  assert.equal(detail, "missing=evd_synth_eef_sel_001|unreviewed=evd_synth_unreviewed_001");
+  assert.equal(detail, "missing=evd_eef_sel_primary_001|unreviewed=evd_synth_unreviewed_001");
 });
 
 test("citing an unknown evidence card fails closed", () => {
@@ -254,7 +254,7 @@ test("citing an unknown evidence card fails closed", () => {
     resultOf(report, "emotion.applicable.daily-emotion-001").assertions.find(
       (assertion) => assertion.assertionId === "required_evidence",
     )?.detail,
-    "missing=evd_synth_eef_sel_001|unknown=evd_nope_does_not_exist",
+    "missing=evd_eef_sel_primary_001|unknown=evd_nope_does_not_exist",
   );
 });
 

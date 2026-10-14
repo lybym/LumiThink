@@ -20,8 +20,22 @@
  */
 
 import { ContractValidationError, problem } from "../contract/core.ts";
-import type { EvalForbiddenAction, EvalExitPath, EvalScenario, EvalSkillRoute } from "./scenario.ts";
+import { EVAL_SKILL_IDS, type EvalForbiddenAction, type EvalExitPath, type EvalScenario, type EvalSkillId, type EvalSkillRoute } from "./scenario.ts";
 import { REFERENCE_SUBJECT_OBSERVATIONS } from "./fixtures.ts";
+
+/**
+ * Version stamps a subject can carry about the governance surfaces it
+ * exercises (HARNESS §6.4 version-stamp merge, delivered with the first
+ * real-skill subject wiring in R1-11 / issue #23). The runner copies these
+ * onto the report when present; both id sets and versions are validated
+ * fail-closed in the report parser. Skill/Evidence versions recorded here
+ * are RESOLVED from the shipped registries by the subject — never
+ * self-declared numbers.
+ */
+export interface EvalSubjectVersionStamps {
+  readonly skills: readonly Readonly<{ readonly skillId: EvalSkillId; readonly version: string }>[];
+  readonly evidence: readonly Readonly<{ readonly cardId: string; readonly version: string }>[];
+}
 
 /** What the subject actually did for one scenario (structural facts only). */
 export interface EvalObservation {
@@ -46,6 +60,11 @@ export interface EvalSubject {
   readonly subjectVersion: string;
   /** Structural description of what the subject represents. */
   readonly note: string;
+  /**
+   * Optional version stamps of the governance surfaces this subject
+   * exercises (merged into the v1.1 report when present; HARNESS §6.4).
+   */
+  readonly versionStamps?: EvalSubjectVersionStamps;
   observe(scenario: Readonly<EvalScenario>): Readonly<EvalObservation>;
 }
 

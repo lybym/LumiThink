@@ -82,11 +82,11 @@ InteractionEvent（统一入口）
 
 ## 6. 评测契约
 
-> R1-07（Issue #19）已交付首版 Evaluation Harness：代码 `lib/domain/eval/`，测试 `tests/domain/eval/`。以下为已实现契约。真实 Persona/Skill/Gateway 行为面经 `EvalSubject` 适配器接入（R1-04 已接入 persona 套件与 `persona_policy_subject`；R1-13/R1-11/R1-12 的 Skill/Gateway 面接入仍待后续 Issue）；接入前由版本化合成参考 subject（`synthetic_reference_subject@0.1.0`，固定行为表）保持既有 17 场景基线套件离线可执行，并作为前后对比的稳定基线——它不代表产品行为。
+> R1-07（Issue #19）已交付首版 Evaluation Harness：代码 `lib/domain/eval/`，测试 `tests/domain/eval/`。以下为已实现契约。真实 Persona/Skill/Gateway 行为面经 `EvalSubject` 适配器接入（R1-04 已接入 persona 套件与 `persona_policy_subject`；R1-11 已接入情绪支持 Skill 面与 `emotion_support_skill_subject`——见 §6.1/§6.4；R1-13/R1-12 的 Gateway/Skill 面接入仍待后续 Issue）；接入前由版本化合成参考 subject（`synthetic_reference_subject@0.1.0`，固定行为表）保持基线套件离线可执行，并作为前后对比的稳定基线——它不代表产品行为。
 
 ### 6.1 场景与套件（版本化 fixtures）
 
-- 固定合成场景集以版本化套件维护：`lumithink_eval_suite` v1.0.0（`EVAL_SUITE_V1`，`lib/domain/eval/fixtures.ts`）。全部正文以 `[synthetic]` 前缀标记，儿童引用沿用 R0 合成标识 `chd_demo_001` 语系；不依赖第三方真实模型与任何儿童数据，CI 可复现（根工程 `pnpm test`，R1 baseline gate）。R1-04 起，persona 边界回归以独立版本化套件 `lumithink_persona_eval_suite` v1.0.0（`PERSONA_EVAL_SUITE_V1`，`lib/domain/persona/eval-suite.ts`，6 个 `persona_boundary` 场景，全部 `critical`）经同一 runner 执行，基线 17 场景套件保持不变。
+- 固定合成场景集以版本化套件维护：`lumithink_eval_suite` v1.1.0（`EVAL_SUITE_V1`，`lib/domain/eval/fixtures.ts`）。全部正文以 `[synthetic]` 前缀标记，儿童引用沿用 R0 合成标识 `chd_demo_001` 语系；不依赖第三方真实模型与任何儿童数据，CI 可复现（根工程 `pnpm test`，R1 baseline gate）。R1-04 起，persona 边界回归以独立版本化套件 `lumithink_persona_eval_suite` v1.0.0（`PERSONA_EVAL_SUITE_V1`，`lib/domain/persona/eval-suite.ts`，6 个 `persona_boundary` 场景，全部 `critical`）经同一 runner 执行。v1.1.0（R1-11，issue #23）：情绪场景的 required-evidence 期望从合成控制卡迁移到真实绑定卡 `evd_eef_sel_primary_001@1.0.0`，policy-invalid 场景文本含路由器可命中的情绪信号（技能在位 + 诊断草稿仍被真实 Output Gate 阻断）；情绪 Skill 回归另以独立对比套件 `lumithink_emotion_skill_eval_suite` v1.0.0（`deriveEmotionSkillEvalSuite`，`lib/domain/skills/emotion-eval-suite.ts`，投影 shipped 5 个情绪场景）交付，供新旧版本经同一 runner + `compareEvalRuns` 对比。
 - 覆盖矩阵（issue #19 验收标准 1）：双 Skill（`emotion_support`、`homework_initiation`）× 适用 / 不适用 / 策略无效 / 儿童拒绝 / 危机分支；另含工具越权（未注册工具、注册工具权限越界、隐私越权导出）、假记忆（仅候选提议路径、禁止直接写入与自动标签）、证据不适用（禁引越界卡片）与 Prompt 注入（指令覆盖、角色伪造 + 隐私越权）。
 - 每个场景声明：场景 ID（稳定可检索）、期望路由、禁用动作、需引用/禁引 Evidence Card、预期退出/求助路径；场景经 fail-closed 解析器校验（未知字段/未注册枚举/不一致 gate probe 一律拒绝）。Evidence Card 含人工审核状态（PRD §8）。
 - 安全断言通过 gate probe 以固定合成输入直接驱动**真实** `evaluateTurnSafety` 流水线（Input/Tool/Output 三层），断言决策与规则 ID——安全基线不依赖任何模型自评。
@@ -111,13 +111,13 @@ InteractionEvent（统一入口）
 
 ### 6.4 报告与前后对比（issue #19 目标 4）
 
-- 运行产出版本化基线报告（`EvalRunReport` schema v1.0）：每场景 PASS/FAIL/SKIP、断言明细、耗时（ms）、`policyVersion`/`protocolVersion`/suite/subject 版本、待人工审核清单、LLM-Judge 槽位；canonical JSON 序列化（`serializeEvalRunReport`）字节稳定，且回读解析（`parseEvalRunReport`）重建计数并拒绝任何篡改（未知字段、计数不一致、状态与触发器矛盾）。
+- 运行产出版本化基线报告（`EvalRunReport` schema v1.1）：每场景 PASS/FAIL/SKIP、断言明细、耗时（ms）、`policyVersion`/`protocolVersion`/suite/subject 版本、待人工审核清单、LLM-Judge 槽位；canonical JSON 序列化（`serializeEvalRunReport`）字节稳定，且回读解析（`parseEvalRunReport`）重建计数并拒绝任何篡改（未知字段、计数不一致、状态与触发器矛盾）。**v1.1（R1-11，issue #23）**：报告新增可选 `versionStamps` 字段——subject 从 shipped Registry **解析得出**（非自报）的 Skill Manifest 版本与绑定 Evidence Card 版本并入报告版本戳（HARNESS §6.4 原定由 subject 接入 Issue 完成的合并点）；v1.0 报告仍可解析且禁止携带该字段，跨 schemaVersion 不可比。
 - 回归矩阵**零内容泄漏**：报告仅含场景 ID、规则 ID、断言状态与版本戳，正文与 `[synthetic]` 语料绝不进入报告（由测试强制）。
-- `compareEvalRuns` 以相同 schema/suite 版本与相同场景集合为可比性前提，跨套件拒绝比较并给出原因；按 pass > skip > fail 秩归类 regression/improvement 并报告套件状态迁移；`durationMs`/`ranAt` 不参与机器比较。DSH/插件版本随 R1-03 接线后并入报告版本戳（R1-03 调整：版本戳先行由 runtime trace 记录——组件/模型/规则/Skill/Evidence 版本、耗时与结果码；EvalRunReport schema 的字段合并在相应 subject 接入 Issue 中完成，避免本 Issue 单独扩展已冻结的报告 schema）。
+- `compareEvalRuns` 以相同 schema/suite 版本与相同场景集合为可比性前提，跨套件拒绝比较并给出原因；按 pass > skip > fail 秩归类 regression/improvement 并报告套件状态迁移；`durationMs`/`ranAt` 不参与机器比较。DSH/插件版本随 R1-03 接线后并入报告版本戳（R1-03 调整：版本戳先行由 runtime trace 记录——组件/模型/规则/Skill/Evidence 版本、耗时与结果码；Skill/Evidence 的 EvalRunReport 字段合并已随 R1-11 的 `emotion_support_skill_subject` 接入完成，见上）。
 
 ### 6.5 断言敏感性（负例控制）
 
-- `tests/domain/eval/runner.spec.ts` 以变异 subject/变异套件证明每类断言真实可触发：路由错配、禁用动作、证据缺失/未经审核/未知、退出路径缺失、gate 期望翻转、关键用例 SKIP、空套件、subject 崩溃与不可解析观察。
+- `tests/domain/eval/runner.spec.ts` 以变异 subject/变异套件证明每类断言真实可触发：路由错配、禁用动作、证据缺失/未经审核/未知、退出路径缺失、gate 期望翻转、关键用例 SKIP、空套件、subject 崩溃与不可解析观察。R1-11 起同理：`tests/domain/skills/emotion-eval-subject.spec.ts` 以变异（回归版）Skill surface 证明情绪场景的禁用动作/证据/退出断言真实可触发，并经 `compareEvalRuns` 将"同一场景新旧版本差异"作为可复现的 harness 对比交付（issue #23 AC 3）。
 
 ## 7. 与 DSH 的集成边界（v0；R1-03 起含端口定义）
 

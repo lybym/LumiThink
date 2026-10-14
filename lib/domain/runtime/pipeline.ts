@@ -63,6 +63,10 @@ import {
 import { personaIdentityDisclosureText, validatePersonaPolicyV0, type PersonaPolicyV0 } from "../persona/policy.ts";
 import { personaDefaultStyle, resolvePersonaTurn, type PersonaTurnResolution } from "../persona/turn.ts";
 import { loadSkillForChild } from "../evidence/registry.ts";
+import {
+  resolveEmotionSkillTurn,
+  type EmotionSkillTurnResolution,
+} from "../skills/emotion-support.ts";
 
 import {
   describeCordisToolSchema,
@@ -155,6 +159,13 @@ export interface CordisTurnResult {
   readonly route: Readonly<SkillRouteDecision>;
   readonly skillApplied: boolean;
   readonly skillVersion: string | null;
+  /**
+   * R1-11: structured emotion-skill resolution for turns where the routed
+   * skill executed (stage, situation, offered strategies, manifest-bound
+   * exits, evidence versions, limitation disclosures). Null on every other
+   * path (no route, non-emotion skill, degraded/rejected loads, early ends).
+   */
+  readonly skillResolution: Readonly<EmotionSkillTurnResolution> | null;
   readonly persona: Readonly<PersonaTurnResolution> | null;
   /** Input/tool/output safety traces in decision order. */
   readonly safetyTraces: readonly Readonly<SafetyTraceRecord>[];
@@ -280,6 +291,7 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
     readonly route: Readonly<SkillRouteDecision> | null;
     readonly skillApplied: boolean;
     readonly skillVersion: string | null;
+    readonly skillResolution: Readonly<EmotionSkillTurnResolution> | null;
     readonly persona: Readonly<PersonaTurnResolution> | null;
     readonly safetyTraces: readonly Readonly<SafetyTraceRecord>[];
     readonly failure: Readonly<CordisTurnFailure> | null;
@@ -291,6 +303,7 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
       route: parts.route ?? routeNoneFallback,
       skillApplied: parts.skillApplied,
       skillVersion: parts.skillVersion,
+      skillResolution: parts.skillResolution,
       persona: parts.persona,
       safetyTraces: Object.freeze([...parts.safetyTraces]),
       failure: parts.failure,
@@ -421,6 +434,7 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
           route: null,
           skillApplied: false,
           skillVersion: null,
+          skillResolution: null,
           persona: null,
           safetyTraces: [],
           failure: null,
@@ -483,6 +497,7 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
           route: null,
           skillApplied: false,
           skillVersion: null,
+          skillResolution: null,
           persona: null,
           safetyTraces: inputSafety.traces,
           failure: null,
@@ -512,6 +527,7 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
           route: null,
           skillApplied: false,
           skillVersion: null,
+          skillResolution: null,
           persona: null,
           safetyTraces: inputSafety.traces,
           failure: null,
@@ -552,6 +568,7 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
       const route = routeSkillForText(turnText);
       let skillApplied = false;
       let skillVersion: string | null = null;
+      let skillResolution: Readonly<EmotionSkillTurnResolution> | null = null;
       let skillHeader: string | null = null;
       const contextRefIds: string[] = [];
       const contextRefs: { kind: "evidence" | "memory"; refId: string; version: string | null }[] = [];
@@ -561,9 +578,22 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
         if (loaded.status === "served") {
           skillApplied = true;
           skillVersion = loaded.skillVersion;
-          skillHeader =
-            `Active skill: ${loaded.skillId}@${loaded.skillVersion} (evidence-bound; ` +
-            "follow its applicability and limitations without overriding persona boundaries).";
+          if (route.route === "emotion_support") {
+            // R1-11: the emotion skill executes its deterministic,
+            // evidence-bound strategy; the composed guideline (versions,
+            // stage directive, child-selectable strategies/exits, registry
+            // limitations) shapes the model messages for this turn. The v0
+            // pipeline passes priorStage null (stateless per turn; the
+            // stage transition table is exercised by the eval subject and
+            // the executor tests).
+            const resolution = resolveEmotionSkillTurn({ load: loaded, turnText, priorStage: null });
+            skillResolution = resolution;
+            skillHeader = resolution.guideline;
+          } else {
+            skillHeader =
+              `Active skill: ${loaded.skillId}@${loaded.skillVersion} (evidence-bound; ` +
+              "follow its applicability and limitations without overriding persona boundaries).";
+          }
           for (const entry of loaded.evidence) {
             contextRefIds.push(entry.cardId);
             contextRefs.push({ kind: "evidence", refId: entry.cardId, version: entry.cardVersion });
@@ -714,6 +744,7 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
           route,
           skillApplied,
           skillVersion,
+          skillResolution,
           persona,
           safetyTraces: inputSafety.traces,
           failure: { gatewayCode: gatewayError.code, contractErrorCode },
@@ -758,6 +789,7 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
           route,
           skillApplied,
           skillVersion,
+          skillResolution,
           persona,
           safetyTraces: inputSafety.traces,
           failure: null,
@@ -809,6 +841,7 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
         route,
         skillApplied,
         skillVersion,
+        skillResolution,
         persona,
         safetyTraces: [...inputSafety.traces, ...outputSafety.traces],
         failure: null,

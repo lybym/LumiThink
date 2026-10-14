@@ -27,7 +27,7 @@
  * node builtins) — enforced by tests/domain/boundary.spec.ts.
  */
 
-import { LATEST_PROTOCOL_VERSION } from "../contract/core.ts";
+import { ContractValidationError, LATEST_PROTOCOL_VERSION, problem } from "../contract/core.ts";
 import { SAFETY_POLICY_VERSION } from "../safety/policy.ts";
 
 import {
@@ -48,7 +48,7 @@ import {
   evaluateSubjectAssertions,
   type EvalAssertionResult,
 } from "./assertions.ts";
-import type { EvalObservation, EvalSubject } from "./subject.ts";
+import type { EvalObservation, EvalSubject, EvalSubjectVersionStamps } from "./subject.ts";
 
 /** Suite-level fail-closed triggers (issue #19 AC 2). */
 export const EVAL_FAIL_CLOSED_TRIGGERS = Object.freeze([
@@ -108,6 +108,13 @@ export interface EvalRunReport {
    * safety-critical assertions (issue #19 goal 2).
    */
   readonly llmJudge: { readonly used: false };
+  /**
+   * Version stamps of the governance surfaces the subject exercised
+   * (HARNESS §6.4 merge, R1-11): resolved skill manifest versions and bound
+   * evidence card versions. Present exactly when the subject provides them
+   * (report schema v1.1); v1.0 reports never carry this field.
+   */
+  readonly versionStamps?: EvalSubjectVersionStamps;
   /** Wall-clock stamp; excluded from machine comparisons. */
   readonly ranAt: string;
 }
@@ -157,6 +164,64 @@ function validateObservation(
 function scenarioIsSevereSafety(scenario: Readonly<EvalScenario>): boolean {
   return scenario.safetyCritical;
 }
+
+const STAMP_SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
+const MAX_VERSION_STAMPS = 10;
+
+/**
+ * Fail-closed validation of subject-provided version stamps. A stamp is
+ * only merged into the report when it is structurally sound: registered
+ * skill ids, eval-id-shaped card ids, semver versions and bounded counts.
+ * A corrupt stamp is a subject/developer bug and throws (never silently
+ * dropped) so a report cannot understate the surfaces it exercised.
+ */
+function validateSubjectVersionStamps(stamps: EvalSubjectVersionStamps): void {
+  const problems: string[] = [];
+  if (stamps === null || typeof stamps !== "object" || Array.isArray(stamps)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "versionStamps", "expected a version-stamp object."),
+    ]);
+  }
+  if (!Array.isArray(stamps.skills) || !Array.isArray(stamps.evidence)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "versionStamps", "skills and evidence must be arrays."),
+    ]);
+  }
+  if (stamps.skills.length > MAX_VERSION_STAMPS || stamps.evidence.length > MAX_VERSION_STAMPS) {
+    problems.push("stamp count over bound");
+  }
+  for (const entry of stamps.skills) {
+    if (
+      entry === null ||
+      typeof entry !== "object" ||
+      !(EVAL_SKILL_IDS as readonly string[]).includes((entry as { skillId?: unknown }).skillId as string) ||
+      typeof (entry as { version?: unknown }).version !== "string" ||
+      !STAMP_SEMVER_PATTERN.test((entry as { version: string }).version)
+    ) {
+      problems.push("invalid skill stamp");
+    }
+  }
+  for (const entry of stamps.evidence) {
+    if (
+      entry === null ||
+      typeof entry !== "object" ||
+      typeof (entry as { cardId?: unknown }).cardId !== "string" ||
+      !(entry as { cardId: string }).cardId.match(EVAL_ID_STAMP_PATTERN) ||
+      typeof (entry as { version?: unknown }).version !== "string" ||
+      !STAMP_SEMVER_PATTERN.test((entry as { version: string }).version)
+    ) {
+      problems.push("invalid evidence stamp");
+    }
+  }
+  if (problems.length > 0) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "versionStamps", problems.join("|")),
+    ]);
+  }
+}
+
+/** Eval-id shape for stamped card ids (mirrors scenario.ts EVAL_ID_PATTERN). */
+const EVAL_ID_STAMP_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/;
 
 function evaluateOneScenario(
   scenario: Readonly<EvalScenario>,
@@ -325,6 +390,14 @@ export function runEvaluation(
     })
     .map((entry) => Object.freeze(entry));
 
+  // Version-stamp merge (HARNESS §6.4, R1-11): the subject's resolved
+  // governance versions flow into the v1.1 report when provided; the merge
+  // validates fail-closed first.
+  const stamps = subject.versionStamps;
+  if (stamps !== undefined) {
+    validateSubjectVersionStamps(stamps);
+  }
+
   return Object.freeze({
     schemaVersion: EVAL_SCHEMA_VERSION,
     suiteId: validated.suiteId,
@@ -339,6 +412,7 @@ export function runEvaluation(
     counts: Object.freeze(counts),
     pendingHumanReview: Object.freeze(pendingHumanReview),
     llmJudge: Object.freeze({ used: false }),
+    ...(stamps === undefined ? {} : { versionStamps: stamps }),
     ranAt: options.ranAt ?? new Date().toISOString(),
   });
 }
