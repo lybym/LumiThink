@@ -8,6 +8,7 @@
 > R1-04 交付说明（Issue #16）：Persona v0 已成为第一个接入本契约的真实行为面——`lib/domain/persona/` 提供 `persona_policy_subject`（观察由真实 `resolvePersonaTurns` 输出派生，不自报）与独立 persona 套件 `lumithink_persona_eval_suite` v1.0.0（6 场景，经同一 `runEvaluation` 执行）；词表增量：`EVAL_FORBIDDEN_ACTIONS` 增 `ai_identity_concealment`，`EVAL_SCENARIO_CATEGORIES` 增 `persona_boundary`。合同见 [PERSONA](./PERSONA.md)。
 > R1-02 交付说明（Issue #14）：§3 模型接口由 `lib/domain/gateway/` 交付实现——Provider 契约（`ModelProvider.stream` 流式 delta + usage）、Mock Provider（CI 默认，零出网）、真实 Provider 适配器（构造门槛：显式 baseURL + 请求时 keySource + 数据外发评审确认，评审尚未发生故不启用）、每日预算/熔断/超时/取消与结构化脱敏审计；本合同 §3 的语义以 [MODEL_GATEWAY](./MODEL_GATEWAY.md) 为准（含"不越权回退"与"取消 ≠ DSH Agent Loop 取消"边界）。
 > R1-03 交付说明（Issue #15）：§1 执行图与 §2 State/Context 由 `lib/domain/runtime/` 交付首个领域编排实现——`createCordisPipeline`（Input Gate → Context Builder → Skill Router → Persona → Model Gateway → Output Gate → Recorder，全部复用真实 R1-01/R1-15/R1-02/R1-13/R1-04 模块）、`buildHarnessContext`/`composeModelMessages`（上下文预算 + `context_refs` 只含来源 ID/版本）、`routeSkillForText`（确定性路由 + 双 Skill 冲突仲裁 = 情绪优先）、`createDshSessionMapper`（DSH↔Lumi Session 映射与缺陷追踪）与 `DshRuntimePort`（SDK 适配器端口；真实 DSH SDK 仍按 TECH_STACK §1/§2 完全隔离，根工程不依赖 SDK 包，真实适配器绑定属 R1-05 进程拓扑）。Cordis 受限服务面（`lib/domain/runtime/cordis.ts`）以 R1-15 `SAFE_TOOL_REGISTRY` 为唯一白名单来源，模型可见 Tool Schema 经确定性改名（点→下划线）声明，组合树/白名单断言与负向越权测试见 `tests/domain/runtime/`。
+> R1-14 交付说明（Issue #26）：§5 的"记忆前"断点由 `lib/domain/memory/`（§5.1）交付首个真实实现——候选→确认→检索→更正→删除最小闭环，`memory.propose`/`memory.lookup` 在 Web 组合根绑定真实服务（不再是纯合成 Fake）；DSH Session/Trace 与 Memory 库分开审计、清理（见 §5.1 与 [ADR-0004](./adr/0004-child-memory-v0.md)）。
 
 ## 1. 执行图（v0）
 
@@ -80,6 +81,18 @@ InteractionEvent（统一入口）
 
 三层执行原则（PRD §5.1）：入口、工具前、输出后独立生效，不能仅靠 System Prompt 或单次 LLM 自检。安全失败**阻断发布**（Roadmap 跨阶段门禁）。
 
+### 5.1 记忆断点实现（R1-14，issue #26）
+
+> R1-14 交付 Child Memory v0：`lib/domain/memory/`（`schema.ts` 词表与 fail-closed 解析 + `service.ts` 可信服务），Web 组合根接线（`lib/server/web-mvp-runtime.ts`）。完整决策记录见 [ADR-0004](./adr/0004-child-memory-v0.md)。
+
+- **词表即防线**：记忆类型仅 `confirmed_preference`（经确认偏好）/ `necessary_fact`（必要事实）——心理/人格/能力/诊断标签类型在词表中不存在，任何此类提交得到区分性拒绝（`memory.type_not_allowed`）。自动路径（`agent_proposal`）另有确定性标签词屏（`memory.label_screen_block`，临床/人格词表子串匹配）；人工显式输入（儿童陈述/监护人输入）不做正文词屏（是可审计的人为确认，词表仍适用）。
+- **最小闭环**：候选（`proposeCandidate`，仅候选、绝不直写）→ 明确确认（`confirmCandidate`，仅儿童本人或监护人；system/agent 可提议但**永远不能自我确认**）→ 上下文检索（`retrieveForContext`，仅确认条目、排除过期与待复核、默认排除敏感项、id+版本-only、硬上限）→ 儿童更正（`correctMemory`，新条目 `supersedes` 旧条目；旧版本永久退出检索，不回放/不再灌入）→ 永久删除（`deleteMemory`，硬删除整条 `supersedes` 谱系；检索为 0，仅余结构化审计事实）。
+- **冲突与重复（确定性，无 NLP）**：同一 (subject, type) 仅允许一条激活事实；不同事实须走更正（supersede）路径。重复候选（归一化 claim 相同）在提议与确认两处均拒绝；过期候选拒绝确认（含惰性过期 + `expirePastCandidates` 清理）。
+- **失败路径零暗写**：所有拒绝路径不产生任何候选/条目，仅落结构化审计事实（action/outcome/rule ids；审计环不含 claim/儿童正文，容量有界，`purgeAudit` 可独立清理）。
+- **分离审计（AC 3）**：Memory 审计环与 DSH Session/运行时 Trace 是两个独立结构、独立生命周期（测试强制 `purgeAudit` 不触碰 trace）。
+- **跨会话语义**：记忆按 subject（childRef）而非 session 键控——确认后的事实对新会话可见（pipeline `memoryContext` 钩子逐轮检索、id+版本-only、失败可观测降级为 0 refs，`memory.context`/`memory_context_failed` trace）。**进程内跨会话**为 v0 边界：跨进程重启的持久化按 TECH_STACK §3 延后至数据建模决策，prisma schema 保持零改动（在 ADR-0004 与 PR 中披露）。
+- **旧数据隔离**：entry 词表无任何分数字段，旧 prisma CognitiveProfile 量化分数无法被正式模型继承（legacy intake guard + 词表测试强制）。
+
 ## 6. 评测契约
 
 > R1-07（Issue #19）已交付首版 Evaluation Harness：代码 `lib/domain/eval/`，测试 `tests/domain/eval/`。以下为已实现契约。真实 Persona/Skill/Gateway 行为面经 `EvalSubject` 适配器接入（R1-04 已接入 persona 套件与 `persona_policy_subject`；R1-11 已接入情绪支持 Skill 面与 `emotion_support_skill_subject`；R1-12 已接入困难任务启动 Skill 面与 `homework_initiation_skill_subject`——见 §6.1/§6.4；R1-13 的 Gateway/Skill 面接入仍待后续 Issue）；接入前由版本化合成参考 subject（`synthetic_reference_subject@0.1.0`，固定行为表）保持基线套件离线可执行，并作为前后对比的稳定基线——它不代表产品行为。
@@ -130,7 +143,7 @@ InteractionEvent（统一入口）
 ## 8. 未决问题（进入实现前必须回答）
 
 1. Input Gate 的监护人/儿童鉴权载体（R1-06 未实现；v0 仅定义 `actor` 语义）。
-2. Context Builder 的记忆检索排序与预算分配算法（依赖 R1-14 受控记忆落地）。
+2. Context Builder 的记忆检索排序与预算分配算法（**v0 已随 R1-14 给出首个确定性答案**：确认条目按 confirmedAt 新→旧 + id 降序、排除过期/待复核/（默认）敏感、硬上限 8 条、id+版本-only 进上下文，见 §5.1 与 `lib/domain/memory/service.ts`；相关性排序/逐 token 预算分配仍待 R2 记忆扩展时演进）。
 3. Orchestrator 对双 Skill 冲突请求的仲裁规则（R0-C 场景 3 的实现细节；已随 R1-03 交付确定性仲裁 `joint_emotion_precedence` v0——`routeSkillForText`，情绪信号优先，见 `lib/domain/runtime/skill-router.ts`）。
 4. Output Gate 的规则清单与误报处理流程（需要 R1-07 评测集支撑）。
 5. Recorder 的最小审计字段与脱敏规则（与 R1-08 日志治理合并决策）。
