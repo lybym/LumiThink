@@ -128,6 +128,13 @@ export interface GuardianDisclosureDocument {
  * (carried #27 review caveat: unverified external facts must not be
  * presented as verified).
  */
+/**
+ * Versioned guardian disclosure registry. v1.1.0 (R1-09, issue #21) is the
+ * first version that governs SAVED child content: it adds the guardian-
+ * visible save explanation (家长可见保存说明) and replaces the 1.0.0
+ * monitoring-boundary wording (which pre-dated any guardian data surface).
+ * 1.0.0 stays registered so its historical acknowledgments remain auditable.
+ */
 export const GUARDIAN_DISCLOSURES: Readonly<
   Record<string, GuardianDisclosureDocument>
 > = Object.freeze({
@@ -179,10 +186,76 @@ export const GUARDIAN_DISCLOSURES: Readonly<
       }),
     ]),
   }),
+  /**
+   * R1-09 (issue #21) disclosure: adds the data-lifecycle save explanation
+   * and rewrites the monitoring boundary to match the new guardian
+   * view/export/delete surface (explicit opt-in via the recording switch —
+   * never a default verbatim feed). Vendor facts stay pending verification.
+   */
+  "1.1.0": Object.freeze({
+    disclosureId: GUARDIAN_DISCLOSURE_ID,
+    version: "1.1.0",
+    language: "zh",
+    sections: Object.freeze([
+      Object.freeze({
+        sectionId: "ai_usage_scope",
+        heading: "AI 的使用范围",
+        body:
+          "Lumi 是一个面向儿童的学习与情绪支持 AI 伙伴。它只在孩子发起对话时处理当轮文本与最小必要上下文，" +
+          "不用于临床诊断、心理治疗或能力评分。孩子随时可以退出或拒绝建议，AI 身份始终明示。",
+        pendingVerification: false,
+      }),
+      Object.freeze({
+        sectionId: "third_party_processing_current",
+        heading: "当前第三方数据处理状态",
+        body:
+          "当前演示部署仅使用进程内 Mock 模型：模型调用不经过任何第三方网络服务，外部数据外发为零。" +
+          "「第三方数据外发」功能开关默认关闭。",
+        pendingVerification: false,
+      }),
+      Object.freeze({
+        sectionId: "third_party_processing_if_enabled",
+        heading: "若启用第三方模型/语音服务（LLM/ASR/TTS）",
+        body:
+          "启用后，对话文本将发送给所配置的模型供应商处理；语音路径（未来版本）还可能涉及 ASR/TTS 供应商。" +
+          "各供应商的数据用途、存储地域、保留期限与日志行为必须在启用前逐一完成独立数据外发评审；" +
+          "本说明中的供应商保留/地域描述为占位说明，未经核实前不作为已验证事实。供应商侧的删除能力无法由本系统担保，" +
+          "撤销授权后本系统不再向供应商发起新请求，但已外发数据的供应商侧保留以各供应商评审结论为准。",
+        pendingVerification: true,
+      }),
+      Object.freeze({
+        sectionId: "data_lifecycle_saving",
+        heading: "对话保存说明（记录开关）",
+        body:
+          "默认最小化采集：对话记录开关默认关闭，系统只保留运行必需的操作元数据（会话数、审计事实等），" +
+          "不保存完整聊天正文。开启「对话记录」后，每个会话最多保留最近 40 条对话文本，仅用于在会话内延续上下文；" +
+          "数据只在本进程内存中，进程重启即清空。无论开关状态如何，音频一律不采集、不存储（当前部署没有语音采集路径）。" +
+          "监护人可在数据生命周期区按授权身份查看、导出或删除已保存内容；删除为立即硬删除，并同步清除会话与临时工件。",
+        pendingVerification: false,
+      }),
+      Object.freeze({
+        sectionId: "monitoring_boundary",
+        heading: "家长可见范围与监控边界",
+        body:
+          "默认不提供对儿童对话的逐字监控；家长默认可见的是必要摘要与计数（会话数、模型调用次数等）、" +
+          "授权/开关/审计记录。仅当监护人显式开启「对话记录」后，家长才能按授权身份查看/导出已保存的对话文本，" +
+          "同一入口提供立即删除。开启记录属于显式选择而非默认行为；孩子知道自己与 AI 的互动会被如何记录。",
+        pendingVerification: false,
+      }),
+      Object.freeze({
+        sectionId: "crisis_channels_placeholder",
+        heading: "危机求助渠道（占位）",
+        body:
+          "安全策略中的紧急渠道（110/120、青少年热线 12355）目前是面向中文部署的公开占位值；" +
+          "生产启用前必须按部署地域核实并配置正确渠道。",
+        pendingVerification: true,
+      }),
+    ]),
+  }),
 });
 
 /** The current disclosure version every mutation is validated against. */
-export const CURRENT_GUARDIAN_DISCLOSURE_VERSION = "1.0.0" as const;
+export const CURRENT_GUARDIAN_DISCLOSURE_VERSION = "1.1.0" as const;
 
 export function currentGuardianDisclosure(): Readonly<GuardianDisclosureDocument> {
   // Registry lookups use Object.hasOwn only (carried #25/#15 review lesson):
@@ -203,7 +276,18 @@ export function currentGuardianDisclosure(): Readonly<GuardianDisclosureDocument
 export const GUARDIAN_CONSENT_IDS = Object.freeze(["child_model_interaction"] as const);
 export type GuardianConsentId = (typeof GUARDIAN_CONSENT_IDS)[number];
 
-export const GUARDIAN_FEATURE_SWITCH_IDS = Object.freeze(["third_party_data_egress"] as const);
+/**
+ * Feature switch registry. `third_party_data_egress` (R1-06) gates vendor
+ * transport BEFORE any request. `conversation_recording` (R1-09, issue #21)
+ * gates whether the serving surface RETAINS conversation text: the default
+ * is DISABLED — 默认最小化采集 (docs/MEMORY_POLICY.md) — so full chats are
+ * stored only when a guardian explicitly opts in (which requires the current
+ * disclosure to be acknowledged, same as every other enabling switch).
+ */
+export const GUARDIAN_FEATURE_SWITCH_IDS = Object.freeze([
+  "third_party_data_egress",
+  "conversation_recording",
+] as const);
 export type GuardianFeatureSwitchId = (typeof GUARDIAN_FEATURE_SWITCH_IDS)[number];
 
 export interface GuardianConsentState {
@@ -676,6 +760,13 @@ export const GUARDIAN_AUDIT_KINDS = Object.freeze([
   "style_change",
   "access_denied",
   "guardian_cancel",
+  // R1-09 (issue #21) data-lifecycle operations: structural facts only —
+  // target is the pinned family childRef, detail carries bounded counts;
+  // deleted content NEVER enters the audit (docs/MEMORY_POLICY.md).
+  "data_view",
+  "data_export",
+  "data_erase",
+  "data_erase_replay",
 ] as const);
 
 export type GuardianAuditKind = (typeof GUARDIAN_AUDIT_KINDS)[number];

@@ -66,7 +66,9 @@ import {
   createGuardianService,
   type GuardianService,
 } from "./guardian-service.ts";
+import { createDataLifecycleService, type DataLifecycleService } from "./data-lifecycle-service.ts";
 import { gateProviderEgress, buildProviderEgressStatus, type ProviderEgressRegistration } from "./provider-egress-gate.ts";
+import { GUARDIAN_FAMILY_CHILD_REF } from "../domain/guardian/authorizations.ts";
 
 export const WEB_MVP_MODEL_ID = "lumithink-mock-1" as const;
 export const WEB_MVP_PROVIDER_ID = "mock-local" as const;
@@ -86,6 +88,8 @@ export interface WebMvpRuntime {
   readonly trace: RuntimeTraceRecorder;
   /** R1-14 child memory service (own store + own audit ring). */
   readonly memory: MemoryService;
+  /** R1-09 child data lifecycle service (inventory/export/erase/replay). */
+  readonly lifecycle: DataLifecycleService;
 }
 
 /**
@@ -237,7 +241,27 @@ export function createWebMvpRuntime(): WebMvpRuntime {
     authorizeTurn: (actor) => guardian.assertModelInteractionAuthorized(actor),
     cancelPolicy: (canceller, owner) => guardian.familyCancelPolicy(canceller, owner),
     resolvePersonaStyle: () => guardian.currentFamilyStyle(),
+    // R1-09 (issue #21): the guardian recording switch governs whether the
+    // serving surface RETAINS conversation text. Default OFF = 默认最小化
+    // 采集 — no history is retained and ended turn event buffers are purged
+    // immediately (docs/MEMORY_POLICY.md).
+    isRecordingEnabled: () => guardian.isConversationRecordingEnabled(),
   });
+
+  // R1-09 data lifecycle service: subject-wide inventory / export / erase /
+  // deletion-replay across the memory store, the interaction state and the
+  // DSH session mapping (issue #21 交付范围 2/3). The guardian service
+  // authorizes the HTTP surfaces (data_read / data_export / data_erase) and
+  // records the structured audit facts.
+  const lifecycle = createDataLifecycleService({
+    childRef: GUARDIAN_FAMILY_CHILD_REF,
+    childActorId: WEB_MVP_ACTOR_ID,
+    interaction: service,
+    memory,
+    sessionMapper: pipeline.sessionMapper,
+    isRecordingEnabled: () => guardian.isConversationRecordingEnabled(),
+  });
+  guardian.configureDataLifecycle(() => lifecycle);
 
   // Guardian status feeds: real vendor request counters (the egress status
   // is AGGREGATED from the registered egress-gated providers via
@@ -258,7 +282,7 @@ export function createWebMvpRuntime(): WebMvpRuntime {
     conversationCount: service.conversationsOwnedBy(WEB_MVP_ACTOR_ID).length,
   }));
 
-  return { service, guardian, pipeline, gateway, trace, memory };
+  return { service, guardian, pipeline, gateway, trace, memory, lifecycle };
 }
 
 const RUNTIME_GLOBAL_KEY = Symbol.for("lumithink.web-mvp.runtime");

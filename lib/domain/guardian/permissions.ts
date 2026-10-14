@@ -33,8 +33,24 @@ import { type ActorContext } from "../contract/actor.ts";
 import { ContractValidationError, problem } from "../contract/core.ts";
 import { ADMIN_ACTOR_ID } from "./authorizations.ts";
 
-/** Guardian surfaces this issue exposes (docs/API_CONTRACT.md §12). */
-export type GuardianSurface = "status_read" | "audit_read" | "authorization_mutation" | "session_write";
+/**
+ * Guardian surfaces this issue exposes (docs/API_CONTRACT.md §12).
+ * R1-09 (issue #21) adds the data-lifecycle surfaces:
+ * - `data_read` (inventory: counts + ids, NO content) — guardian + admin;
+ * - `data_export` (authorized export of SAVED content) — guardian only: the
+ *   export carries child conversation text, so the independent maintainer
+ *   account (observe-only by design) has no export path;
+ * - `data_erase` (subject-wide hard delete + deletion replay) — guardian
+ *   only: deletion is a family decision.
+ */
+export type GuardianSurface =
+  | "status_read"
+  | "audit_read"
+  | "authorization_mutation"
+  | "session_write"
+  | "data_read"
+  | "data_export"
+  | "data_erase";
 
 /**
  * Role matrix. The contract knows exactly four roles (child | guardian |
@@ -43,13 +59,15 @@ export type GuardianSurface = "status_read" | "audit_read" | "authorization_muta
  * - read surfaces admit the family guardian and the admin principal;
  * - EVERY authorization mutation is guardian-only (the admin may observe,
  *   never reconfigure parental consent — issue #18 实现范围 1/3);
+ * - data export/erase carry child content or destroy it: guardian-only
+ *   (issue #21 交付范围 2: 按授权身份查看/导出/删除);
  * - child/voice_device never pass any guardian surface.
  */
 export function isGuardianSurfaceAllowed(
   actor: Readonly<ActorContext>,
   surface: GuardianSurface,
 ): boolean {
-  if (surface === "authorization_mutation") {
+  if (surface === "authorization_mutation" || surface === "data_export" || surface === "data_erase") {
     return actor.role === "guardian";
   }
   return (
@@ -73,8 +91,8 @@ export function assertGuardianSurfaceAccess(
   }
   // Role names are public vocabulary; the actor id is not echoed.
   const detail =
-    surface === "authorization_mutation"
-      ? "authorization mutations are guardian-only"
+    surface === "authorization_mutation" || surface === "data_export" || surface === "data_erase"
+      ? "this surface is guardian-only"
       : "allowed roles: guardian, system(admin)";
   throw new ContractValidationError([
     problem(

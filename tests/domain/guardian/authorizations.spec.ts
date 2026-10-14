@@ -254,11 +254,43 @@ test("the disclosure registry carries the current version with pending-verificat
 // State transitions
 // ---------------------------------------------------------------------------
 
-test("seed state: base consent active, third-party egress switch DISABLED, disclosure acked", () => {
+test("seed state: base consent active, BOTH switches DISABLED (recording defaults off), disclosure acked", () => {
   const state = initialGuardianAuthorizationState(NOW);
   assert.equal(state.disclosureAckVersion, CURRENT_GUARDIAN_DISCLOSURE_VERSION);
   assert.equal(state.consents.child_model_interaction.active, true);
   assert.equal(state.switches.third_party_data_egress.enabled, false);
+  // R1-09 (issue #21): 默认最小化采集 — the recording switch seeds DISABLED.
+  assert.equal(state.switches.conversation_recording.enabled, false);
+  assert.deepEqual([...GUARDIAN_FEATURE_SWITCH_IDS], ["third_party_data_egress", "conversation_recording"]);
+});
+
+test("the R1-09 recording switch follows guardian toggles with disclosure gating and idempotency", () => {
+  const state = initialGuardianAuthorizationState(NOW);
+  const enable = applyGuardianAuthorizationAction(
+    state,
+    { kind: "set_feature_switch", switchId: "conversation_recording", enabled: true },
+    NOW,
+  );
+  assert.equal(enable.status, "applied");
+  const enabled = enable.status === "applied" ? enable.next : state;
+  assert.equal(enabled.switches.conversation_recording.enabled, true);
+
+  // Same-value re-submission is unchanged (no churn).
+  const again = applyGuardianAuthorizationAction(
+    enabled,
+    { kind: "set_feature_switch", switchId: "conversation_recording", enabled: true },
+    NOW,
+  );
+  assert.equal(again.status, "unchanged");
+
+  // Disabling (the fail-safe/minimal direction) never requires a NEW ack.
+  const unacked = { ...enabled, disclosureAckVersion: null };
+  const disable = applyGuardianAuthorizationAction(
+    unacked,
+    { kind: "set_feature_switch", switchId: "conversation_recording", enabled: false },
+    NOW,
+  );
+  assert.equal(disable.status, "applied");
 });
 
 test("grants and switch enablement require the current disclosure acknowledgment; revocation never does", () => {

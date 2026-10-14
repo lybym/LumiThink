@@ -61,6 +61,26 @@ interface AuditEntry {
 
 type UiError = "auth" | "rejected" | "invalid" | "network";
 
+/** GET /api/v1/guardian/data shape (structural only — no content). */
+interface DataInventory {
+  childRef: string;
+  recordingEnabled: boolean;
+  conversations: { conversationId: string; sessionId: string; historyEntries: number }[];
+  turnStreams: { total: number; running: number };
+  dshSessions: { mapped: number };
+  memories: { total: number; candidates: number; confirmed: number; superseded: number; expired: number };
+  deletionLedger: { records: number; lastErasedAt: string | null };
+  generatedAt: string;
+}
+
+/** POST /api/v1/guardian/data/erase result (structural only). */
+interface EraseResult {
+  action: string;
+  erasedAt: string;
+  purged: { conversations: number; historyEntries: number; turnStreams: number; memories: number; dshSessions: number };
+  deletionRecordId: string;
+}
+
 const ERROR_COPY: Record<UiError, string> = {
   auth: "鉴权失败或会话已失效，请重新登录。",
   rejected: "请求被拒绝，请确认当前状态后重试。",
@@ -105,6 +125,9 @@ export default function ParentPage() {
   const [accessCode, setAccessCode] = useState("");
   const [status, setStatus] = useState<StatusSnapshot | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [inventory, setInventory] = useState<DataInventory | null>(null);
+  const [eraseResult, setEraseResult] = useState<EraseResult | null>(null);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [error, setError] = useState<UiError | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -187,6 +210,9 @@ export default function ParentPage() {
     setPrincipal(null);
     setStatus(null);
     setAudit([]);
+    setInventory(null);
+    setEraseResult(null);
+    setExportNotice(null);
   }
 
   async function act(body: Record<string, unknown>): Promise<void> {
@@ -199,6 +225,66 @@ export default function ParentPage() {
     setBusy(false);
     if (result !== null) {
       await refresh();
+    }
+  }
+
+  /** R1-09: refresh the structural data inventory (counts only). */
+  const refreshInventory = useCallback(async () => {
+    setEraseResult(null);
+    const data = await authedFetch("/api/v1/guardian/data");
+    if (data !== null) {
+      setInventory(data as DataInventory);
+    }
+  }, [authedFetch]);
+
+  /** R1-09: authorized export — download the JSON and show a summary. */
+  async function exportData(): Promise<void> {
+    setBusy(true);
+    setError(null);
+    setExportNotice(null);
+    const data = await authedFetch("/api/v1/guardian/data/export");
+    if (data !== null) {
+      const body = data as {
+        childRef: string;
+        conversations: { history: unknown[] }[];
+        memories: unknown[];
+      };
+      const historyCount = body.conversations.reduce((sum, c) => sum + (c.history?.length ?? 0), 0);
+      setExportNotice(`已导出 ${historyCount} 条会话文本、${body.memories.length} 条记忆条目。`);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `lumithink-child-data-export-${body.childRef}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      await refreshInventory();
+    }
+    setBusy(false);
+  }
+
+  /** R1-09: guardian-only hard delete (or post-restore replay). */
+  async function eraseData(action: "erase_child_data" | "replay_child_deletions"): Promise<void> {
+    const confirmed = window.confirm(
+      action === "erase_child_data"
+        ? "确认删除该儿童已保存的全部数据（记忆、会话历史、临时工件）？删除为立即硬删除，无法撤销。"
+        : "确认执行删除重放？将再次清除此前删除范围内重新出现的全部数据（用于备份恢复后）。"
+    );
+    if (!confirmed) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await authedFetch("/api/v1/guardian/data/erase", {
+      method: "POST",
+      body: { protocolVersion: "1.0", action },
+    });
+    setBusy(false);
+    if (result !== null) {
+      const body = result as EraseResult;
+      setEraseResult(body);
+      setInventory(null);
+      await refreshInventory();
     }
   }
 
@@ -255,6 +341,7 @@ export default function ParentPage() {
 
   const consent = status?.consents.find((entry) => entry.consentId === "child_model_interaction");
   const egressSwitch = status?.switches.find((entry) => entry.switchId === "third_party_data_egress");
+  const recordingSwitch = status?.switches.find((entry) => entry.switchId === "conversation_recording");
   const acknowledged = status?.disclosure.acknowledgedVersion === status?.disclosure.document.version;
   const isGuardian = principal === "guardian";
 
@@ -367,6 +454,42 @@ export default function ParentPage() {
           <div className="mt-4 rounded-xl bg-slate-50 p-4">
             <div className="flex items-center justify-between">
               <div>
+                <p className="text-sm font-semibold text-slate-800">对话记录（conversation_recording）</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  默认关闭（最小化采集）：不保存聊天正文。开启后每会话最多保留最近 40 条对话文本（进程内存，重启即清）；
+                  关闭后已结束轮次的临时缓冲立即清除。开启前请阅读上方「对话保存说明」。
+                </p>
+              </div>
+              <span
+                className={`ml-4 rounded px-2 py-1 text-xs font-semibold ${
+                  recordingSwitch?.enabled ? "bg-amber-100 text-amber-800" : "bg-slate-200 text-slate-700"
+                }`}
+              >
+                {recordingSwitch?.enabled ? "已开启" : "已关闭"}
+              </span>
+            </div>
+            {isGuardian ? (
+              <div className="mt-4">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() =>
+                    void act({
+                      action: "set_feature_switch",
+                      switchId: "conversation_recording",
+                      enabled: !recordingSwitch?.enabled,
+                    })
+                  }
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:border-slate-400 disabled:opacity-40"
+                >
+                  {recordingSwitch?.enabled ? "关闭记录" : "开启记录"}
+                </button>
+              </div>
+            ) : null}
+          </div>
+          <div className="mt-4 rounded-xl bg-slate-50 p-4">
+            <div className="flex items-center justify-between">
+              <div>
                 <p className="text-sm font-semibold text-slate-800">第三方数据外发（third_party_data_egress）</p>
                 <p className="mt-1 text-xs text-slate-500">
                   默认关闭。关闭时第三方供应商请求数为 0（网关在传输前拒绝）。当前部署未接入任何第三方供应商。
@@ -433,6 +556,106 @@ export default function ParentPage() {
           <p className="mt-3 text-xs text-slate-500">
             当前来源：{status.style.provenance.map((entry) => `${entry.knobId}=${entry.value}(${entry.source})`).join("，")}
           </p>
+        ) : null}
+      </div>
+
+      {/* 数据生命周期（R1-09：查看 / 导出 / 删除） */}
+      <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-slate-900">数据生命周期</h2>
+          {isGuardian ? (
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void refreshInventory()}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:border-slate-400 disabled:opacity-40"
+              >
+                查看数据清单
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void exportData()}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:border-slate-400 disabled:opacity-40"
+              >
+                导出已保存内容
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void eraseData("erase_child_data")}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
+              >
+                删除全部数据
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void eraseData("replay_child_deletions")}
+                className="rounded-lg border border-red-300 px-4 py-2 text-sm font-medium text-red-700 hover:border-red-400 disabled:opacity-40"
+              >
+                删除重放（备份恢复后）
+              </button>
+            </div>
+          ) : (
+            <span className="text-sm text-slate-500">数据导出与删除仅监护人可用；管理员只读清单。</span>
+          )}
+        </div>
+        <p className="mt-2 text-xs text-slate-500">
+          清单只含计数与 ID，不含正文；导出为授权身份的已保存内容（对话文本 + 记忆条目）；
+          删除为立即硬删除，覆盖记忆、会话历史、临时工件与 DSH 会话映射，并生成可重放的删除台账。
+          {inventory !== null ? (
+            <span className="ml-1">（生成于 {inventory.generatedAt}）</span>
+          ) : null}
+        </p>
+        {exportNotice !== null ? (
+          <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-800">{exportNotice}</p>
+        ) : null}
+        {eraseResult !== null ? (
+          <p className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-700">
+            {eraseResult.action === "erase_child_data" ? "删除完成" : "删除重放完成"}（{eraseResult.erasedAt}）：
+            会话 {eraseResult.purged.conversations} · 历史条目 {eraseResult.purged.historyEntries} ·
+            临时工件 {eraseResult.purged.turnStreams} · 记忆 {eraseResult.purged.memories} ·
+            DSH 会话 {eraseResult.purged.dshSessions} · 台账记录 {eraseResult.deletionRecordId.slice(0, 12)}…
+          </p>
+        ) : null}
+        {inventory !== null ? (
+          <dl className="mt-4 grid gap-2 text-sm md:grid-cols-2">
+            <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+              <dt className="text-slate-600">记录开关（对话记录）</dt>
+              <dd className="font-semibold text-slate-900">{inventory.recordingEnabled ? "开启" : "关闭"}</dd>
+            </div>
+            <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+              <dt className="text-slate-600">会话（含保留正文条数）</dt>
+              <dd className="font-semibold text-slate-900">
+                {inventory.conversations.length > 0
+                  ? inventory.conversations.map((c) => `${c.conversationId.slice(0, 10)}…(${c.historyEntries})`).join("，")
+                  : "0 个会话"}
+              </dd>
+            </div>
+            <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+              <dt className="text-slate-600">轮次缓冲（总数/进行中）</dt>
+              <dd className="font-semibold text-slate-900">
+                {inventory.turnStreams.total} / {inventory.turnStreams.running}
+              </dd>
+            </div>
+            <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+              <dt className="text-slate-600">DSH 会话映射</dt>
+              <dd className="font-semibold text-slate-900">{inventory.dshSessions.mapped}</dd>
+            </div>
+            <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+              <dt className="text-slate-600">记忆条目（候选/确认/被取代/过期）</dt>
+              <dd className="font-semibold text-slate-900">
+                {inventory.memories.total}（{inventory.memories.candidates}/{inventory.memories.confirmed}/
+                {inventory.memories.superseded}/{inventory.memories.expired}）
+              </dd>
+            </div>
+            <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+              <dt className="text-slate-600">删除台账记录数</dt>
+              <dd className="font-semibold text-slate-900">{inventory.deletionLedger.records}</dd>
+            </div>
+          </dl>
         ) : null}
       </div>
 

@@ -543,3 +543,59 @@ test("request fingerprints are semantic and stable across key order and client u
   const b = fingerprintInteractionRequest(reordered);
   assert.equal(a, b, "semantic payload (version/kind/conversation/text) defines the fingerprint");
 });
+
+test("request fingerprints are content-free digests — no verbatim text is stored (review R1 P0-1)", () => {
+  const content = webTextInteractionRequestTurn1.interaction.text.content;
+  const fingerprint = fingerprintInteractionRequest(parseInteractionRequest(webTextInteractionRequestTurn1));
+  // Hash-like bounded digest: 16 lowercase hex chars (64-bit FNV-1a).
+  assert.match(fingerprint, /^[0-9a-f]{16}$/);
+  // No fragment of the submitted child text survives in the digest.
+  for (const word of content.split(/(?<=[。，])|\s+/)) {
+    if (word.length >= 2) {
+      assert.ok(!fingerprint.includes(word), `the digest must not embed the submitted text fragment`);
+    }
+  }
+  // Deterministic: the same semantic payload hashes to the same digest, and
+  // distinguishing payloads hash differently (replay-vs-409 is preserved).
+  assert.equal(fingerprint, fingerprintInteractionRequest(parseInteractionRequest(webTextInteractionRequestTurn1)));
+  const differentText = parseInteractionRequest({
+    protocolVersion: "1.0",
+    interaction: {
+      kind: "text",
+      clientRequestId: "req_other_text_0001",
+      text: { content: "[synthetic] 换一段完全不同的内容。", format: "plain" },
+    },
+  });
+  assert.notEqual(fingerprint, fingerprintInteractionRequest(differentText));
+  const differentConversation = parseInteractionRequest({
+    protocolVersion: "1.0",
+    interaction: {
+      kind: "text",
+      clientRequestId: "req_other_conv_0001",
+      conversationId: "conv_other_conversation_1",
+      text: { content, format: "plain" },
+    },
+  });
+  assert.notEqual(fingerprint, fingerprintInteractionRequest(differentConversation));
+  // Degenerate payloads stay distinguishable (no truncation-style collapse).
+  const minimal = parseInteractionRequest({
+    protocolVersion: "1.0",
+    interaction: {
+      kind: "text",
+      clientRequestId: "req_min_text_0001",
+      text: { content: "a", format: "plain" },
+    },
+  });
+  const minimalOther = parseInteractionRequest({
+    protocolVersion: "1.0",
+    interaction: {
+      kind: "text",
+      clientRequestId: "req_min_text_0002",
+      text: { content: "b", format: "plain" },
+    },
+  });
+  assert.notEqual(
+    fingerprintInteractionRequest(minimal),
+    fingerprintInteractionRequest(minimalOther),
+  );
+});

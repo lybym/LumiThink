@@ -473,8 +473,25 @@ test("expirePastCandidates transitions past-expiry candidates (guardian/system o
   );
   assert.ok(expiring.ok);
   assert.equal(service.expirePastCandidates(child()), 0, "child may not run cleanup");
+  // Carried #26 review P2-4 (fixed in R1-09): the unauthorized cleanup
+  // denial is OBSERVABLE as a rejected audit fact — no silent no-op.
+  const rejected = service
+    .auditSnapshot()
+    .filter((entry) => entry.action === "memory.expire_cleanup");
+  assert.equal(rejected.length, 1);
+  const denial = rejected[0];
+  assert.ok(denial !== undefined);
+  assert.equal(denial.outcome, "rejected");
+  assert.equal(denial.actorRole, "child");
+  assert.deepEqual([...denial.ruleIds], ["memory.unauthorized"]);
   advanceSeconds(31 * 60);
   assert.equal(service.expirePastCandidates(guardian()), 1);
+  // The authorized run lands its own `ok` cleanup fact.
+  const cleanup = service
+    .auditSnapshot()
+    .filter((entry) => entry.action === "memory.expire_cleanup" && entry.outcome === "ok");
+  assert.equal(cleanup.length, 1);
+  assert.equal(cleanup[0]?.count, 1);
   // The expired candidate can no longer be confirmed.
   if (expiring.ok) {
     const confirm = service.confirmCandidate({ memoryId: expiring.entry.memoryId }, child());
