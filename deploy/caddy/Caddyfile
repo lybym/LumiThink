@@ -1,0 +1,41 @@
+# LumiThink R1-08 public ingress — TLS-terminating reverse proxy (issue #20
+# 交付范围 2: 公网入口强制 TLS/HTTPS；服务只暴露必要 Web/API 端口).
+#
+# Deployment: single Linux host, Caddy (or any TLS proxy with equivalent
+# config) owns 80/443; the app listens on 127.0.0.1:3000 ONLY. The DSH
+# runtime is an in-process adapter (no socket), the snapshot/state dir and
+# any future database are never proxied — there is no public route to them.
+#
+# Replace lumithink.example.com with the operator's real domain. Caddy
+# provisions/renews the ACME certificate automatically and adds HSTS.
+
+lumithink.example.com {
+	# Public entry is HTTPS-only; ACME HTTP-01 challenge handled by Caddy.
+	encode zstd gzip
+
+	# Baseline security headers (app sets nosniff/XFO/Referrer-Policy/CSP;
+	# the proxy adds the TLS-only headers).
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Streaming (SSE) must not be buffered.
+	reverse_proxy 127.0.0.1:3000 {
+		flush_interval -1
+		header_up X-Forwarded-Host {host}
+	}
+
+	log {
+		output file /var/log/caddy/lumithink-access.log {
+			roll_size 10MiB
+			roll_keep 10
+		}
+		# Never log query strings (they must never carry credentials or
+		# child content; the API contract rejects such payloads anyway).
+		format json
+	}
+}

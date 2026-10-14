@@ -10,7 +10,13 @@ import {
 
 test("an empty environment boots with safe defaults and no external requirements", () => {
   const env = readStartupEnv({});
-  assert.deepEqual(env, { nodeEnv: "development", port: null });
+  assert.deepEqual(env, {
+    nodeEnv: "development",
+    port: null,
+    guardianAccessCode: null,
+    adminAccessCode: null,
+    snapshot: { path: null, keyHex: null, keyFile: null, intervalMs: null, restoreReplay: false },
+  });
 
   assert.deepEqual(FIRST_BOOT_REQUIREMENTS.modelProviderKeysRequired, []);
   assert.equal(FIRST_BOOT_REQUIREMENTS.childDataRequired, false);
@@ -80,4 +86,131 @@ test("provider credentials present in the environment are ignored, never require
   const serialized = JSON.stringify(FIRST_BOOT_REQUIREMENTS);
   assert.equal(serialized.includes("DEEPSEEK_API_KEY"), false);
   assert.equal(serialized.includes("OPENAI_API_KEY"), false);
+});
+
+// ---------------------------------------------------------------------------
+// R1-08 (issue #20): deployment secrets + encrypted snapshot configuration.
+// ---------------------------------------------------------------------------
+
+const GOOD_CODE = "correct-horse-battery";
+const GOOD_KEY = "a".repeat(64);
+
+test("R1-08: real access codes parse only as a PAIR and reject demo collisions", () => {
+  // Both unset → demo mode.
+  assert.equal(readStartupEnv({}).guardianAccessCode, null);
+  // Both set → real mode.
+  const paired = readStartupEnv({
+    LUMITHINK_GUARDIAN_ACCESS_CODE: GOOD_CODE,
+    LUMITHINK_ADMIN_ACCESS_CODE: GOOD_CODE,
+  });
+  assert.equal(paired.guardianAccessCode, GOOD_CODE);
+  assert.equal(paired.adminAccessCode, GOOD_CODE);
+  // Exactly one set → fail-closed (a half-real deployment would silently
+  // leave the other role on the published demo code).
+  assert.throws(() => readStartupEnv({ LUMITHINK_GUARDIAN_ACCESS_CODE: GOOD_CODE }), (error: unknown) => {
+    assert.ok(error instanceof StartupEnvError);
+    assert.match(error.problems.join(" "), /must be set together/);
+    return true;
+  });
+  // Demo-code collision is a misconfiguration.
+  assert.throws(
+    () =>
+      readStartupEnv({
+        LUMITHINK_GUARDIAN_ACCESS_CODE: "lumithink-guardian-demo",
+        LUMITHINK_ADMIN_ACCESS_CODE: GOOD_CODE,
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof StartupEnvError);
+      assert.match(error.problems.join(" "), /must not be the published synthetic demo code/);
+      return true;
+    },
+  );
+  // Shape bounds (12-128, no whitespace), values never echoed.
+  assert.throws(
+    () =>
+      readStartupEnv({
+        LUMITHINK_GUARDIAN_ACCESS_CODE: "short",
+        LUMITHINK_ADMIN_ACCESS_CODE: GOOD_CODE,
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof StartupEnvError);
+      assert.match(error.problems.join(" "), /LUMITHINK_GUARDIAN_ACCESS_CODE/);
+      assert.equal(error.problems.join(" ").includes("short"), false);
+      return true;
+    },
+  );
+});
+
+test("R1-08: snapshot config requires a key, exactly one source, and valid shapes", () => {
+  // Path without a key → plaintext snapshots are never allowed.
+  assert.throws(() => readStartupEnv({ LUMITHINK_SNAPSHOT_PATH: "/var/lib/lumithink/snapshot.bin" }), (error: unknown) => {
+    assert.ok(error instanceof StartupEnvError);
+    assert.match(error.problems.join(" "), /snapshots are always encrypted/);
+    return true;
+  });
+  // Both key sources → ambiguous, fail-closed.
+  assert.throws(
+    () =>
+      readStartupEnv({
+        LUMITHINK_SNAPSHOT_PATH: "/tmp/snapshot.bin",
+        LUMITHINK_SNAPSHOT_KEY: GOOD_KEY,
+        LUMITHINK_SNAPSHOT_KEY_FILE: "/etc/lumithink/snapshot.key",
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof StartupEnvError);
+      assert.match(error.problems.join(" "), /mutually exclusive/);
+      return true;
+    },
+  );
+  // Key-file source is accepted and carried as a path.
+  const withFile = readStartupEnv({
+    LUMITHINK_SNAPSHOT_PATH: "/var/lib/lumithink/snapshot.bin",
+    LUMITHINK_SNAPSHOT_KEY_FILE: "/etc/lumithink/snapshot.key",
+    LUMITHINK_SNAPSHOT_INTERVAL_MS: "30000",
+  });
+  assert.equal(withFile.snapshot.path, "/var/lib/lumithink/snapshot.bin");
+  assert.equal(withFile.snapshot.keyFile, "/etc/lumithink/snapshot.key");
+  assert.equal(withFile.snapshot.keyHex, null);
+  assert.equal(withFile.snapshot.intervalMs, 30000);
+  // Inline key is normalized to lowercase hex.
+  const withKey = readStartupEnv({
+    LUMITHINK_SNAPSHOT_PATH: "/tmp/snapshot.bin",
+    LUMITHINK_SNAPSHOT_KEY: "A".repeat(64),
+  });
+  assert.equal(withKey.snapshot.keyHex, GOOD_KEY);
+  // Bad key shape fails with the NAME only.
+  assert.throws(
+    () => readStartupEnv({ LUMITHINK_SNAPSHOT_PATH: "/tmp/snapshot.bin", LUMITHINK_SNAPSHOT_KEY: "zz" }),
+    (error: unknown) => {
+      assert.ok(error instanceof StartupEnvError);
+      assert.match(error.problems.join(" "), /LUMITHINK_SNAPSHOT_KEY must be exactly 64 hex/);
+      return true;
+    },
+  );
+  // Interval bounds.
+  assert.throws(
+    () =>
+      readStartupEnv({
+        LUMITHINK_SNAPSHOT_PATH: "/tmp/snapshot.bin",
+        LUMITHINK_SNAPSHOT_KEY: GOOD_KEY,
+        LUMITHINK_SNAPSHOT_INTERVAL_MS: "10",
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof StartupEnvError);
+      assert.match(error.problems.join(" "), /LUMITHINK_SNAPSHOT_INTERVAL_MS/);
+      return true;
+    },
+  );
+});
+
+test("R1-08: restore-replay flag accepts only the documented booleans", () => {
+  const base = { LUMITHINK_SNAPSHOT_PATH: "/tmp/snapshot.bin", LUMITHINK_SNAPSHOT_KEY: GOOD_KEY };
+  assert.equal(readStartupEnv(base).snapshot.restoreReplay, false);
+  assert.equal(readStartupEnv({ ...base, LUMITHINK_SNAPSHOT_RESTORE_REPLAY: "1" }).snapshot.restoreReplay, true);
+  assert.equal(readStartupEnv({ ...base, LUMITHINK_SNAPSHOT_RESTORE_REPLAY: "false" }).snapshot.restoreReplay, false);
+  assert.throws(() => readStartupEnv({ ...base, LUMITHINK_SNAPSHOT_RESTORE_REPLAY: "yes" }), (error: unknown) => {
+    assert.ok(error instanceof StartupEnvError);
+    assert.match(error.problems.join(" "), /LUMITHINK_SNAPSHOT_RESTORE_REPLAY/);
+    return true;
+  });
 });

@@ -1,0 +1,43 @@
+# LumiThink R1-08 single-host production configuration template (issue #20).
+#
+# Deployment model: systemd restricted process (deploy/lumithink.service) with
+# an EnvironmentFile at /etc/lumithink/lumithink.env — root-owned, mode 0600,
+# readable only by root (the unit drops privileges itself). NEVER commit real
+# values; this template documents shapes only. Secrets NEVER enter Git or
+# ordinary logs (lib/server/secrets-registry.ts + audit redaction; dirty-marker
+# tests enforce it).
+
+# --- Node runtime -------------------------------------------------------------
+NODE_ENV=production
+# The app listens on LOOPBACK ONLY (the reverse proxy terminates TLS on 443).
+PORT=3000
+NEXT_TELEMETRY_DISABLED=1
+
+# --- Guardian / admin access codes (R1-08 real credentials) -------------------
+# Both variables are a PAIR: setting exactly one fails the boot (fail-closed).
+# 12-128 chars, no whitespace, never the published synthetic demo codes.
+# The values are hashed (SHA-256) at composition; the raw values are never
+# logged, echoed or persisted. Rotation: replace both values + restart.
+# LUMITHINK_GUARDIAN_ACCESS_CODE=<generate: openssl rand -base64 18>
+# LUMITHINK_ADMIN_ACCESS_CODE=<generate: openssl rand -base64 18>
+
+# --- Encrypted runtime snapshot (R1-08 encrypted backup) ----------------------
+# AES-256-GCM key, EXACTLY 64 hex chars (32 bytes). Give ONE of:
+#   LUMITHINK_SNAPSHOT_KEY          (inline; least preferred — prefer the file)
+#   LUMITHINK_SNAPSHOT_KEY_FILE     (controlled mount, e.g. /etc/lumithink/snapshot.key)
+# Generate: openssl rand -hex 32
+# LUMITHINK_SNAPSHOT_KEY_FILE=/etc/lumithink/snapshot.key
+# Snapshot file (state dir must be writable by the service user, 0750).
+# LUMITHINK_SNAPSHOT_PATH=/var/lib/lumithink/snapshot.bin
+# Snapshot cadence in ms (confirmed mutations always snapshot immediately).
+# LUMITHINK_SNAPSHOT_INTERVAL_MS=60000
+# Set to 1 ONLY when restoring an OLDER archive (deploy/restore.sh does this
+# automatically): after the boot restore the child-deletion ledger is replayed
+# once so a restore can never resurrect deleted data (ADR-0005).
+# LUMITHINK_SNAPSHOT_RESTORE_REPLAY=0
+
+# --- Explicitly NOT here ------------------------------------------------------
+# Model provider keys: the app never reads provider credentials at startup.
+# The default provider is the in-process Mock (zero egress). Real-provider
+# activation requires the independent data-egress review (issue #14 note);
+# its key would be request-time injected per MODEL_GATEWAY.md, never here.

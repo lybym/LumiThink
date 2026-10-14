@@ -60,7 +60,10 @@ import type { ErrorEnvelope } from "../domain/contract/errors.ts";
 import {
   ADMIN_ACTOR_ID,
   GUARDIAN_ACTOR_ID,
+  GUARDIAN_CONSENT_IDS,
+  GUARDIAN_DISCLOSURES,
   GUARDIAN_FAMILY_CHILD_REF,
+  GUARDIAN_FEATURE_SWITCH_IDS,
   applyGuardianAuthorizationAction,
   buildGuardianStatusSnapshot,
   initialGuardianAuthorizationState,
@@ -70,7 +73,11 @@ import {
   parseGuardianAuditEntry,
   type GuardianAuditEntry,
   type GuardianAuthorizationState,
+  type GuardianConsentId,
+  type GuardianConsentState,
   type GuardianEgressStatus,
+  type GuardianFeatureSwitchId,
+  type GuardianSwitchState,
   type GuardianUsageSummary,
 } from "../domain/guardian/authorizations.ts";
 import { assertGuardianSurfaceAccess, canCancelFamilyTurn } from "../domain/guardian/permissions.ts";
@@ -89,8 +96,11 @@ import {
   type PersonaStyleWithProvenance,
 } from "../domain/persona/turn.ts";
 import {
+  PERSONA_KNOB_SOURCES,
+  PERSONA_KNOB_VALUES,
   PERSONA_STYLE_KNOBS,
   type PersonaPolicyV0,
+  type PersonaStyleKnobId,
   type PersonaStyleState,
 } from "../domain/persona/policy.ts";
 import { resolveActivePersona } from "../domain/persona/registry.ts";
@@ -142,6 +152,13 @@ interface GuardianSession {
   readonly expiresAtMs: number;
 }
 
+export interface GuardianCredentialDigests {
+  /** SHA-256 hex digest of the real guardian access code. */
+  readonly guardian: string;
+  /** SHA-256 hex digest of the real independent-admin access code. */
+  readonly admin: string;
+}
+
 export interface GuardianServiceOptions {
   /** Persona policy snapshot the guardian style path applies knobs to. */
   readonly personaPolicy?: Readonly<PersonaPolicyV0>;
@@ -151,6 +168,44 @@ export interface GuardianServiceOptions {
   readonly nowFactory?: () => string;
   /** Session token factory (tests inject deterministic tokens). */
   readonly tokenFactory?: () => string;
+  /**
+   * R1-08 real credentials (issue #20): SHA-256 hex digests of the real
+   * access codes. When present, login verifies against THESE digests and the
+   * published synthetic demo codes are rejected. The RAW code values never
+   * enter this service — the digests are computed by the composition root
+   * from the injected environment and the raw values live only in the
+   * secrets registry for redaction. Absent (default) keeps the disclosed
+   * synthetic demo mode (ADR-0003, R1-08 disposition).
+   */
+  readonly credentialDigests?: GuardianCredentialDigests;
+  /**
+   * R1-08 defense-in-depth redaction hook (secrets registry). Applied to the
+   * `target`/`detail` audit fields before validation, so a credential value
+   * can never travel into the audit ring even through a future free-text
+   * field.
+   */
+  readonly redact?: (text: string) => string;
+  /**
+   * R1-08 encrypted-snapshot hook: invoked after every CONFIRMED state
+   * change (applied authorization mutation, applied style change, completed
+   * data erase/replay). The composition root wires this to the atomic
+   * snapshot write, so confirmed family decisions are durable immediately.
+   */
+  readonly onConfirmedStateChange?: () => void;
+}
+
+/**
+ * Confirmed guardian state for the R1-08 encrypted runtime snapshot:
+ * authorizations + persona style + the bounded security audit ring with its
+ * sequence continuity. Live sessions and lockout counters are deliberately
+ * NOT part of it (fail-closed: a restore always requires fresh logins and
+ * resets brute-force pressure — disclosed in docs/adr/0006-*.md).
+ */
+export interface GuardianConfirmedState {
+  readonly authorizations: Readonly<GuardianAuthorizationState>;
+  readonly style: Readonly<PersonaStyleWithProvenance>;
+  readonly auditEntries: readonly Readonly<GuardianAuditEntry>[];
+  readonly auditNextSeq: number;
 }
 
 export interface GuardianService {
@@ -216,13 +271,241 @@ export interface GuardianService {
     },
   ): void;
   auditEntries(): readonly Readonly<GuardianAuditEntry>[];
+
+  // -- R1-08 encrypted runtime snapshot ports (issue #20) -------------------
+  /** Confirmed state for the encrypted snapshot (authorizations+style+audit). */
+  exportConfirmedState(): Readonly<GuardianConfirmedState>;
+  /**
+   * Replace the confirmed state from a validated snapshot (boot-time restore;
+   * the runtime validates every entry before calling this — a failure throws
+   * and the runtime refuses to boot fail-closed). Live sessions and lockout
+   * counters are untouched (they do not survive restarts by design).
+   */
+  restoreConfirmedState(state: Readonly<GuardianConfirmedState>): void;
+  /** "real" when credential digests were injected, "demo" otherwise. */
+  credentialMode(): "real" | "demo";
+  /**
+   * R1-08: append the boot-restore disclosure to the (restored) audit ring —
+   * structural facts only (source + bounded counts), actorRole null (the
+   * restore is a server composition event, not an actor action).
+   */
+  recordSnapshotRestored(detail: string): void;
 }
 
-/** Constant-time digest comparison (length-independent). */
-function digestsEqual(a: string, b: string): boolean {
-  const da = createHash("sha256").update(a, "utf8").digest();
-  const db = createHash("sha256").update(b, "utf8").digest();
-  return timingSafeEqual(da, db);
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
+
+/**
+ * R1-08: validate an injected credential digest (hex, 64 chars). A malformed
+ * digest is a configuration error and fails the construction — fail-closed,
+ * value never echoed.
+ */
+function parseCredentialDigest(name: "guardian" | "admin", raw: string): Buffer {
+  if (typeof raw !== "string" || !SHA256_HEX_PATTERN.test(raw)) {
+    throw new ContractValidationError([
+      problem(
+        "CONTRACT_FIELD_INVALID",
+        "credentialDigests",
+        `credentialDigests.${name} must be a 64-character lowercase hex SHA-256 digest.`,
+      ),
+    ]);
+  }
+  return Buffer.from(raw, "hex");
+}
+
+/** Registered disclosure versions (for restored authorization validation). */
+const REGISTERED_DISCLOSURE_VERSIONS: readonly string[] = Object.freeze(
+  Object.keys(GUARDIAN_DISCLOSURES),
+);
+
+/**
+ * Validate a restored GuardianAuthorizationState (R1-08 snapshot restore).
+ * Fail-closed: unknown fields, unregistered ids, wrong shapes and unknown
+ * disclosure versions are all rejected.
+ */
+function parseRestoredAuthorizations(value: unknown): GuardianAuthorizationState {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "authorizations", "restored authorizations must be an object."),
+    ]);
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== 4 || !keys.every((k) => ["disclosureAckVersion", "disclosureAckAt", "consents", "switches"].includes(k))) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "authorizations", "restored authorizations carry unknown or missing fields."),
+    ]);
+  }
+  const ackVersion = record.disclosureAckVersion;
+  if (ackVersion !== null && (typeof ackVersion !== "string" || !REGISTERED_DISCLOSURE_VERSIONS.includes(ackVersion))) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "disclosureAckVersion", "restored disclosure version is not registered."),
+    ]);
+  }
+  const ackAt = record.disclosureAckAt;
+  if (ackAt !== null && (typeof ackAt !== "string" || ackAt.length === 0 || ackAt.length > 40)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "disclosureAckAt", "restored disclosure ack time must be null or a bounded timestamp."),
+    ]);
+  }
+  const consents = {} as Record<GuardianConsentId, GuardianConsentState>;
+  const rawConsents = record.consents;
+  if (rawConsents === null || typeof rawConsents !== "object" || Array.isArray(rawConsents)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "consents", "restored consents must be an object."),
+    ]);
+  }
+  if (Object.keys(rawConsents).length !== GUARDIAN_CONSENT_IDS.length) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "consents", "restored consents must carry exactly the registered consent ids."),
+    ]);
+  }
+  for (const consentId of GUARDIAN_CONSENT_IDS) {
+    const raw = (rawConsents as Record<string, unknown>)[consentId];
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", "consents", `restored consent ${consentId} must be an object.`),
+      ]);
+    }
+    const consentRecord = raw as Record<string, unknown>;
+    if (
+      Object.keys(consentRecord).length !== 3 ||
+      typeof consentRecord.consentId !== "string" ||
+      consentRecord.consentId !== consentId ||
+      typeof consentRecord.active !== "boolean" ||
+      (consentRecord.changedAt !== null && (typeof consentRecord.changedAt !== "string" || consentRecord.changedAt.length === 0 || consentRecord.changedAt.length > 40))
+    ) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", "consents", `restored consent ${consentId} has an invalid shape.`),
+      ]);
+    }
+    consents[consentId] = Object.freeze({
+      consentId,
+      active: consentRecord.active,
+      changedAt: (consentRecord.changedAt ?? null) as string | null,
+    });
+  }
+  const switches = {} as Record<GuardianFeatureSwitchId, GuardianSwitchState>;
+  const rawSwitches = record.switches;
+  if (rawSwitches === null || typeof rawSwitches !== "object" || Array.isArray(rawSwitches)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "switches", "restored switches must be an object."),
+    ]);
+  }
+  if (Object.keys(rawSwitches).length !== GUARDIAN_FEATURE_SWITCH_IDS.length) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "switches", "restored switches must carry exactly the registered switch ids."),
+    ]);
+  }
+  for (const switchId of GUARDIAN_FEATURE_SWITCH_IDS) {
+    const raw = (rawSwitches as Record<string, unknown>)[switchId];
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", "switches", `restored switch ${switchId} must be an object.`),
+      ]);
+    }
+    const switchRecord = raw as Record<string, unknown>;
+    if (
+      Object.keys(switchRecord).length !== 3 ||
+      typeof switchRecord.switchId !== "string" ||
+      switchRecord.switchId !== switchId ||
+      typeof switchRecord.enabled !== "boolean" ||
+      (switchRecord.changedAt !== null && (typeof switchRecord.changedAt !== "string" || switchRecord.changedAt.length === 0 || switchRecord.changedAt.length > 40))
+    ) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", "switches", `restored switch ${switchId} has an invalid shape.`),
+      ]);
+    }
+    switches[switchId] = Object.freeze({
+      switchId,
+      enabled: switchRecord.enabled,
+      changedAt: (switchRecord.changedAt ?? null) as string | null,
+    });
+  }
+  return Object.freeze({
+    disclosureAckVersion: (ackVersion ?? null) as string | null,
+    disclosureAckAt: (ackAt ?? null) as string | null,
+    consents: Object.freeze(consents),
+    switches: Object.freeze(switches),
+  });
+}
+
+/**
+ * Validate a restored persona style + provenance (R1-08 snapshot restore).
+ * Knob ids/values/sources must be registered; unknown fields fail closed.
+ */
+function parseRestoredStyle(value: unknown): PersonaStyleWithProvenance {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "style", "restored style must be an object."),
+    ]);
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== 2 || !keys.every((k) => k === "style" || k === "provenance")) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "style", "restored style carries unknown or missing fields."),
+    ]);
+  }
+  const rawStyle = record.style;
+  if (rawStyle === null || typeof rawStyle !== "object" || Array.isArray(rawStyle)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "style", "restored style.state must be an object."),
+    ]);
+  }
+  const styleRecord = rawStyle as Record<string, unknown>;
+  if (Object.keys(styleRecord).length !== PERSONA_STYLE_KNOBS.length) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "style", "restored style must carry exactly the registered knobs."),
+    ]);
+  }
+  const style: Record<string, string> = {};
+  for (const knob of PERSONA_STYLE_KNOBS) {
+    const raw = styleRecord[knob];
+    const allowed = PERSONA_KNOB_VALUES[knob];
+    if (typeof raw !== "string" || !(allowed as readonly string[]).includes(raw)) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", "style", `restored style knob ${knob} has an unregistered value.`),
+      ]);
+    }
+    style[knob] = raw;
+  }
+  const rawProvenance = record.provenance;
+  if (!Array.isArray(rawProvenance) || rawProvenance.length === 0 || rawProvenance.length > 64) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "provenance", "restored provenance must be a bounded non-empty array."),
+    ]);
+  }
+  const provenance = rawProvenance.map((raw) => {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", "provenance", "restored provenance entry must be an object."),
+      ]);
+    }
+    const entry = raw as Record<string, unknown>;
+    if (
+      Object.keys(entry).length !== 3 ||
+      typeof entry.knobId !== "string" ||
+      !(PERSONA_STYLE_KNOBS as readonly string[]).includes(entry.knobId) ||
+      typeof entry.value !== "string" ||
+      entry.value.length === 0 ||
+      entry.value.length > 40 ||
+      typeof entry.source !== "string" ||
+      !(PERSONA_KNOB_SOURCES as readonly string[]).includes(entry.source)
+    ) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", "provenance", "restored provenance entry has an invalid shape."),
+      ]);
+    }
+    return Object.freeze({
+      knobId: entry.knobId as PersonaStyleKnobId,
+      value: entry.value,
+      source: entry.source as (typeof PERSONA_KNOB_SOURCES)[number],
+    });
+  });
+  return Object.freeze({
+    style: Object.freeze(style) as PersonaStyleState,
+    provenance: Object.freeze(provenance) as readonly PersonaKnobProvenanceEntry[],
+  });
 }
 
 /**
@@ -258,12 +541,82 @@ function styleResolutionEquals(
   });
 }
 
+/**
+ * Validate a full restored GuardianConfirmedState (R1-08 snapshot restore)
+ * WITHOUT touching service state — the pure validator the composition root
+ * runs BEFORE any restore commit (all-or-nothing restore) and that
+ * restoreConfirmedState itself reuses. Fail-closed.
+ */
+export function parseGuardianConfirmedState(value: {
+  readonly authorizations: unknown;
+  readonly style: unknown;
+  readonly auditEntries: unknown;
+  readonly auditNextSeq: unknown;
+}): GuardianConfirmedState {
+  const nextAuthorizations = parseRestoredAuthorizations(value.authorizations);
+  const nextStyle = parseRestoredStyle(value.style);
+  if (!Array.isArray(value.auditEntries)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "auditEntries", "restored audit entries must be an array."),
+    ]);
+  }
+  if (value.auditEntries.length > MAX_AUDIT_ENTRIES) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "auditEntries", "restored audit ring exceeds the bounded capacity."),
+    ]);
+  }
+  const nextAudit = value.auditEntries.map((entry) => parseGuardianAuditEntry(entry));
+  for (let i = 1; i < nextAudit.length; i += 1) {
+    if (nextAudit[i].seq <= nextAudit[i - 1].seq) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", "auditEntries", "restored audit entries must have strictly increasing seq."),
+      ]);
+    }
+  }
+  if (
+    typeof value.auditNextSeq !== "number" ||
+    !Number.isInteger(value.auditNextSeq) ||
+    value.auditNextSeq < 0 ||
+    (nextAudit.length > 0 && value.auditNextSeq <= nextAudit[nextAudit.length - 1].seq)
+  ) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "auditNextSeq", "restored audit sequence must continue past the last entry."),
+    ]);
+  }
+  return Object.freeze({
+    authorizations: nextAuthorizations,
+    style: nextStyle,
+    auditEntries: Object.freeze(nextAudit),
+    auditNextSeq: value.auditNextSeq,
+  });
+}
+
 export function createGuardianService(options: GuardianServiceOptions = {}): GuardianService {
   const policy = options.personaPolicy ?? resolveActivePersona();
   const clock = options.clock ?? (() => Date.now());
   const nowFactory = options.nowFactory ?? (() => new Date().toISOString());
   const tokenFactory =
     options.tokenFactory ?? (() => randomBytes(32).toString("base64url"));
+  // R1-08: defense-in-depth redaction (secrets registry) on audit fields.
+  const redact = options.redact ?? ((text: string): string => text);
+  const notifyConfirmedStateChange = options.onConfirmedStateChange ?? ((): void => {});
+  // R1-08: credential verification material. With injected digests the login
+  // verifies against the REAL access codes and the published demo codes are
+  // rejected; without them the disclosed synthetic demo mode applies.
+  const credentialModeValue: "real" | "demo" = options.credentialDigests === undefined ? "demo" : "real";
+  const credentialRecords: ReadonlyArray<{
+    readonly principal: GuardianPrincipal;
+    readonly digest: Buffer;
+  }> =
+    options.credentialDigests === undefined
+      ? [
+          { principal: "guardian", digest: createHash("sha256").update(GUARDIAN_DEMO_ACCESS_CODE, "utf8").digest() },
+          { principal: "admin", digest: createHash("sha256").update(ADMIN_DEMO_ACCESS_CODE, "utf8").digest() },
+        ]
+      : [
+          { principal: "guardian", digest: parseCredentialDigest("guardian", options.credentialDigests.guardian) },
+          { principal: "admin", digest: parseCredentialDigest("admin", options.credentialDigests.admin) },
+        ];
 
   // Seeded demo state (disclosed): disclosure acked, base consent active,
   // third-party egress switch DISABLED (fail-closed default).
@@ -301,8 +654,10 @@ export function createGuardianService(options: GuardianServiceOptions = {}): Gua
       kind,
       actorRole: fields.actorRole ?? null,
       actorId: fields.actorId ?? null,
-      target: fields.target ?? null,
-      detail: fields.detail ?? null,
+      // R1-08: credential values are redacted before validation — even a
+      // future free-text field cannot carry a secret into the audit ring.
+      target: fields.target === null || fields.target === undefined ? null : redact(fields.target),
+      detail: fields.detail === null || fields.detail === undefined ? null : redact(fields.detail),
     });
     audit.push(entry);
     if (audit.length > MAX_AUDIT_ENTRIES) {
@@ -320,6 +675,14 @@ export function createGuardianService(options: GuardianServiceOptions = {}): Gua
   // seeded state, which is precisely the provenance an auditor must be able
   // to see (initialGuardianAuthorizationState doc comment; API_CONTRACT
   // §12.4).
+  pushAudit("seed", {
+    actorRole: null,
+    actorId: null,
+    target: "credential_mode",
+    // R1-08 disclosure: whether this process verifies the real injected
+    // credentials or the published synthetic demo codes.
+    detail: credentialModeValue,
+  });
   pushAudit("seed", {
     actorRole: null,
     actorId: null,
@@ -430,11 +793,15 @@ export function createGuardianService(options: GuardianServiceOptions = {}): Gua
   }
 
   function principalForCode(accessCode: string): GuardianPrincipal | null {
-    if (digestsEqual(accessCode, GUARDIAN_DEMO_ACCESS_CODE)) {
-      return "guardian";
-    }
-    if (digestsEqual(accessCode, ADMIN_DEMO_ACCESS_CODE)) {
-      return "admin";
+    // R1-08: constant-time comparison of the SUBMITTED code's SHA-256 digest
+    // against the configured per-principal digests (real injected credentials
+    // or the disclosed synthetic demo codes). The submitted code itself is
+    // never stored, logged or echoed.
+    const submitted = createHash("sha256").update(accessCode, "utf8").digest();
+    for (const record of credentialRecords) {
+      if (timingSafeEqual(submitted, record.digest)) {
+        return record.principal;
+      }
     }
     return null;
   }
@@ -628,6 +995,8 @@ export function createGuardianService(options: GuardianServiceOptions = {}): Gua
             target: action.updates.map((update) => update.knobId).join(","),
             detail: "guardian_config",
           });
+          // R1-08: the confirmed family style change is snapshot-durable.
+          notifyConfirmedStateChange();
           return { kind: "ok", httpStatus: 200, body: { protocolVersion: "1.0", outcome: "applied" } };
         }
 
@@ -647,6 +1016,9 @@ export function createGuardianService(options: GuardianServiceOptions = {}): Gua
         }
         authorizations = transition.next;
         if (transition.status === "applied") {
+          // R1-08: the confirmed family decision (ack/consent/switch) is
+          // snapshot-durable immediately after the audit entry lands.
+          notifyConfirmedStateChange();
           switch (action.kind) {
             case "acknowledge_disclosure":
               pushAudit("disclosure_ack", {
@@ -790,6 +1162,8 @@ export function createGuardianService(options: GuardianServiceOptions = {}): Gua
           target: GUARDIAN_FAMILY_CHILD_REF,
           detail: `conv=${result.purged.conversations},hist=${result.purged.historyEntries},turn=${result.purged.turnStreams},mem=${result.purged.memories},dsh=${result.purged.dshSessions}`,
         });
+        // R1-08: the deletion ledger grew — the tombstone durability point.
+        notifyConfirmedStateChange();
         return { kind: "ok", httpStatus: 200, body: result };
       } catch (error) {
         return errorResult(error);
@@ -860,6 +1234,50 @@ export function createGuardianService(options: GuardianServiceOptions = {}): Gua
 
     auditEntries(): readonly Readonly<GuardianAuditEntry>[] {
       return audit.slice();
+    },
+
+    // -- R1-08 encrypted runtime snapshot ports (issue #20) ------------------
+
+    exportConfirmedState(): Readonly<GuardianConfirmedState> {
+      return Object.freeze({
+        authorizations,
+        style,
+        auditEntries: Object.freeze(audit.slice()),
+        auditNextSeq: auditSeq + 1,
+      });
+    },
+
+    restoreConfirmedState(state: Readonly<GuardianConfirmedState>): void {
+      // Validate EVERYTHING before swapping (atomic restore; a failure leaves
+      // the service untouched and the runtime refuses to boot fail-closed).
+      const parsed = parseGuardianConfirmedState(state);
+      authorizations = parsed.authorizations;
+      style = parsed.style;
+      audit.length = 0;
+      audit.push(...parsed.auditEntries);
+      auditSeq = parsed.auditNextSeq;
+      // Re-disclose THIS process's credential mode: the restored ring carries
+      // the ORIGINAL process's seed burst, so the live mode must be seeded
+      // again for the ring to describe the running process truthfully.
+      pushAudit("seed", {
+        actorRole: null,
+        actorId: null,
+        target: "credential_mode",
+        detail: credentialModeValue,
+      });
+    },
+
+    credentialMode(): "real" | "demo" {
+      return credentialModeValue;
+    },
+
+    recordSnapshotRestored(detail: string): void {
+      pushAudit("snapshot_restored", {
+        actorRole: null,
+        actorId: null,
+        target: "runtime_snapshot",
+        detail: redact(detail),
+      });
     },
   });
 }

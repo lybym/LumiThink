@@ -62,7 +62,7 @@
  */
 
 import { parseActorContext, type ActorContext } from "../contract/actor.ts";
-import { isValidContractId, type ContractProblem } from "../contract/core.ts";
+import { ContractValidationError, isValidContractId, problem, type ContractProblem } from "../contract/core.ts";
 import {
   admitMemoryEntry,
   MAX_MEMORY_AUDIT_ENTRIES,
@@ -72,11 +72,56 @@ import {
   claimCarriesPsychologicalLabel,
   memoryFactKey,
   parseMemoryCandidateInput,
+  parseMemoryEntry,
   type MemoryAuditAction,
   type MemoryAuditEntry,
   type MemoryEntry,
   type MemoryRejectionCode,
 } from "./schema.ts";
+
+/** R1-08: hard bound of one encrypted-snapshot memory restore batch. */
+const MAX_RESTORE_ENTRIES = 1000;
+
+/**
+ * R1-08: pure validation of one snapshot memory-restore batch (no commit).
+ * Used by restoreEntries AND the composition root's all-or-nothing
+ * pre-validation pass. Fails closed on unknown fields, duplicate ids and
+ * incomplete supersedes lineages.
+ */
+export function validateMemoryRestoreEntries(rawEntries: unknown): readonly Readonly<MemoryEntry>[] {
+  if (!Array.isArray(rawEntries)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "entries", "restored memory entries must be an array."),
+    ]);
+  }
+  if (rawEntries.length > MAX_RESTORE_ENTRIES) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "entries", `restored memory entries exceed the ${MAX_RESTORE_ENTRIES}-entry bound.`),
+    ]);
+  }
+  const prepared = rawEntries.map((raw) => parseMemoryEntry(raw));
+  const seen = new Set<string>();
+  for (const entry of prepared) {
+    if (seen.has(entry.memoryId)) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", "entries", "restored memory ids must be unique."),
+      ]);
+    }
+    seen.add(entry.memoryId);
+  }
+  for (const entry of prepared) {
+    if (entry.supersedes !== null && !seen.has(entry.supersedes)) {
+      throw new ContractValidationError([
+        problem(
+          "CONTRACT_FIELD_INVALID",
+          "entries",
+          "restored supersedes lineage must be complete: every predecessor must be part of the same batch.",
+        ),
+      ]);
+    }
+  }
+  return Object.freeze(prepared);
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -142,6 +187,14 @@ export interface MemoryService {
   auditSnapshot(): readonly Readonly<MemoryAuditEntry>[];
   /** Cleanup: clear the audit ring (separate from any data deletion). */
   purgeAudit(): void;
+  /**
+   * R1-08 (issue #20) encrypted-snapshot restore port: re-materialize
+   * validated full entries (candidate/confirmed/superseded/expired) into the
+   * store. Called ONCE at composition by the server runtime — never from an
+   * HTTP path. Every entry is re-validated through the schema's full-entry
+   * parser; duplicate ids and incomplete supersedes lineages fail closed.
+   */
+  restoreEntries(rawEntries: unknown): { readonly restored: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -751,6 +804,14 @@ export function createMemoryService(options: MemoryServiceOptions = {}): MemoryS
 
     purgeAudit(): void {
       audit.length = 0;
+    },
+
+    restoreEntries(rawEntries: unknown): { readonly restored: number } {
+      const prepared = validateMemoryRestoreEntries(rawEntries);
+      for (const entry of prepared) {
+        store.set(entry.memoryId, entry);
+      }
+      return { restored: prepared.length };
     },
   });
 }

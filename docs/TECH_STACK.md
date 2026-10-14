@@ -33,6 +33,7 @@
 
 - `prisma/schema.prisma`（SQLite）是**冻结的旧原型 schema**：`RawEvent` / `CognitiveProfile` 语义不得作为 2.0 业务事实，详见 [LEGACY_AUDIT](./LEGACY_AUDIT.md) 与 `lib/domain/legacy-guard.ts` 的强制守卫。
 - 新领域模型（R1 受控记忆、Evidence、Skill 等）的持久化选型（SQLite 直用 / Prisma 新 schema / 其他）**待定**，由 R1/R2 的数据建模任务决策；决策前不得复用旧 schema 表达新语义。
+- R1-08（issue #20）引入**加密运行时快照**作为部署层备份（`lib/server/snapshot/`：AES-256-GCM 整档加密 + 原子写；选定事实源 = 进程内组合态）：这是部署基础设施而非新领域 schema，**prisma schema 保持零差异**，无 DATA_MODEL/migration 触发（决策与边界见 [ADR-0006](./adr/0006-deployment-secrets-backup-v0.md) §2.5）。
 - 本次基线**未修改**任何持久化 schema，因此无 DATA_MODEL 变更、无迁移、无迁移测试要求（守卫测试即为“旧数据不得进入新领域”的迁移门禁证据）。
 - 首次启动不需要 `DATABASE_URL`、真实模型密钥或儿童数据：`lib/env.ts` 校验启动环境，`/api/health` 在空环境下返回 `ok`（CI 以“未设置任何密钥/数据库 URL”的干净环境证明）。
 
@@ -74,13 +75,13 @@ CI 门禁：`.github/workflows/r1-baseline-gate.yml`（Ubuntu：干净环境断�
 
 | 风险 | 状态 | 归属 |
 | --- | --- | --- |
-| R0 容器/部署层最小权限边界（进程外文件系统、网络出口、数据库密钥隔离）未做 | 未完成，DSH 进程内守卫已验证 | R0 收尾 / R1-08 |
+| R0 容器/部署层最小权限边界（进程外文件系统、网络出口、数据库密钥隔离）未做 | **R1-08 已交付部署层最小权限面**（issue #20）：systemd 受限进程（专用用户/ProtectSystem/无能力集/系统调用过滤/环回绑定）+ Caddy TLS 唯一公网入口 + 端口白名单（[deploy/runbook.md](../deploy/runbook.md)）；DSH 进程内适配器无对外 socket；数据库密钥隔离不适用（SQLite 未启用，启用时随持久化选型重审） | R1-08（已交付）/ R1-10（环境一致性、发布回退） |
 | R0-C（双 Skill 纵向闭环）、R0-D（Session/Memory 治理）未开始 | 未完成 | R0 → R1 |
 | HARNESS.md 仅为 v0 草案，无实现 | 未完成 | R1-03/R1-07 |
 | 新领域持久化选型未定；旧 schema 与新领域之间的数据迁移策略只有“拒绝 + 显式归档”守卫，尚无批量迁移工具 | 未完成 | R1/R2 |
 | 真实模型接入、流式、取消、成本控制：R1-02 已交付域层 Model Gateway（`lib/domain/gateway/`：Provider 契约 + Mock + 预算/熔断/超时/取消 + 审计，见 [MODEL_GATEWAY](./MODEL_GATEWAY.md)）；R1-05 已把 Web MVP 文本端点接线到该域层（合同 v1.0 三路由 + SSE 流式 + 取消，Mock 为服务默认，零出网）；真实供应商激活（独立数据外发评审前置）仍未完成 | 部分完成 | R1-02（域层已交付）/ R1-05（Web MVP 接线已交付）/ Iteration B（真实供应商） |
 | 真实 DSH SDK 适配器绑定（独立进程拓扑）未完成：R1-05 以确定性进程内适配器绑定 `DshRuntimePort` 支撑 Web MVP 服务（仅会话生命周期面，消除 `no_port_bound` 缺陷窗口），根工程仍零 SDK 依赖；SDK 适配器与其独立验收待进程拓扑工作 | 未完成 | Iteration B / R1-05 后续 |
-| 监护人端、鉴权、隐私治理未实现；旧 parent 页面文案仍是旧产品语义 | 部分完成（R1-06 已交付最小监护人鉴权/授权/告知/功能开关与安全审计：`lib/domain/guardian/` + `lib/server/guardian-service.ts` + `/parent` 控制台 + API_CONTRACT §12 + ADR-0003；R1-09 已交付数据生命周期最小实现：记录开关（默认关闭）+ 数据清单/导出/删除/重放 API 与控制台区 + MEMORY_POLICY/PRIVACY_DATA_FLOW 矩阵 + ADR-0005，`lib/domain/lifecycle/` + `lib/server/data-lifecycle-service.ts`；全部进程内内存态） | R1-06（最小面已交付）/ R1-09（数据生命周期已交付）/ 持久化选型（R1/R2） |
+| 监护人端、鉴权、隐私治理未实现；旧 parent 页面文案仍是旧产品语义 | 部分完成（R1-06 已交付最小监护人鉴权/授权/告知/功能开关与安全审计：`lib/domain/guardian/` + `lib/server/guardian-service.ts` + `/parent` 控制台 + API_CONTRACT §12 + ADR-0003；R1-09 已交付数据生命周期最小实现：记录开关（默认关闭）+ 数据清单/导出/删除/重放 API 与控制台区 + MEMORY_POLICY/PRIVACY_DATA_FLOW 矩阵 + ADR-0005，`lib/domain/lifecycle/` + `lib/server/data-lifecycle-service.ts`；全部进程内内存态。R1-08 已交付部署硬化（issue #20）：真实访问码注入（服务端仅持 SHA-256 摘要）+ Secrets 注册表/审计脱敏 + 每请求 nonce CSP + 加密运行时快照（ADR-0006）；全局锁定语义维持，按账户锁定留作显式后续） | R1-06（最小面已交付）/ R1-09（数据生命周期已交付）/ R1-08（部署硬化已交付）/ 持久化选型（R1/R2） |
 | 旧页面在 R1-05 之前仅保证“可编译可启动”，不承诺 2.0 体验；R1-05 已将儿童页重建为 Lumi 对话 MVP（正式交互 API + 流式 + 停止 + 退出路径），旧数学工具移至 `/kid/playground`，parent 页面保持冻结原型 | 部分完成（儿童端已重建） | R1-05（儿童端）/ R1-06（监护人端） |
 
 > 变更本表前先更新对应 Roadmap/Issue；未完成项不得标记为完成。

@@ -1,6 +1,11 @@
 /**
  * R1-05 web MVP server infrastructure — composition root (issue #17),
- * extended by R1-06 guardian authorization wiring (issue #18).
+ * extended by R1-06 guardian authorization wiring (issue #18), R1-09 data
+ * lifecycle wiring (issue #21) and the R1-08 deployment-hardening surfaces
+ * (issue #20): real credential digests, the secrets registry with audit
+ * redaction, and the encrypted runtime-snapshot subsystem (boot restore,
+ * interval writer, confirmed-mutation writes, shutdown flush, optional
+ * ADR-0005 deletion replay).
  *
  * Wires the delivered R1 domains into the serving surface exactly once per
  * process:
@@ -53,6 +58,7 @@ import { createDshSessionMapper } from "../domain/runtime/session-map.ts";
 import { createRuntimeTraceRecorder, type RuntimeTraceRecorder } from "../domain/runtime/trace.ts";
 import type { CordisServiceHandler } from "../domain/runtime/cordis.ts";
 
+import { readStartupEnv } from "../env.ts";
 import { createInProcessDshAdapter } from "./dsh-inprocess-adapter.ts";
 import {
   createInteractionService,
@@ -64,11 +70,31 @@ import {
 } from "./interaction-service.ts";
 import {
   createGuardianService,
+  type GuardianCredentialDigests,
   type GuardianService,
 } from "./guardian-service.ts";
 import { createDataLifecycleService, type DataLifecycleService } from "./data-lifecycle-service.ts";
 import { gateProviderEgress, buildProviderEgressStatus, type ProviderEgressRegistration } from "./provider-egress-gate.ts";
 import { GUARDIAN_FAMILY_CHILD_REF } from "../domain/guardian/authorizations.ts";
+import {
+  createSecretsRegistry,
+  type SecretsRegistry,
+} from "./secrets-registry.ts";
+import {
+  cleanupSnapshotTempSync,
+  readSnapshotFileSync,
+  readSnapshotKeyFileSync,
+  snapshotFileExistsSync,
+  writeSnapshotFileSync,
+  SnapshotStoreError,
+} from "./snapshot/snapshot-store.ts";
+import {
+  captureRuntimeSnapshot,
+  restoreRuntimeSnapshot,
+  type RuntimeSnapshotSource,
+  type SnapshotCapableRuntime,
+} from "./snapshot/runtime-snapshot.ts";
+import { createHash } from "node:crypto";
 
 export const WEB_MVP_MODEL_ID = "lumithink-mock-1" as const;
 export const WEB_MVP_PROVIDER_ID = "mock-local" as const;
@@ -90,6 +116,27 @@ export interface WebMvpRuntime {
   readonly memory: MemoryService;
   /** R1-09 child data lifecycle service (inventory/export/erase/replay). */
   readonly lifecycle: DataLifecycleService;
+  /** R1-08 secrets registry (slot enumeration + redaction; never values). */
+  readonly secrets: SecretsRegistry;
+}
+
+/** R1-08 encrypted-snapshot subsystem configuration (issue #20). */
+export interface WebMvpSnapshotConfig {
+  /** Absolute path of the encrypted snapshot file. */
+  readonly path: string;
+  /** 32-byte AES-256-GCM key as 64 hex chars. */
+  readonly keyHex: string;
+  /** Snapshot interval ms (default 60_000, minimum 1_000). */
+  readonly intervalMs?: number;
+  /** Replay the child-deletion ledger once after a boot restore (AC 2). */
+  readonly restoreReplay?: boolean;
+}
+
+export interface WebMvpRuntimeOptions {
+  /** R1-08 encrypted snapshot subsystem (absent → disabled, demo default). */
+  readonly snapshot?: WebMvpSnapshotConfig;
+  /** R1-08 real credential digests (absent → disclosed synthetic demo mode). */
+  readonly credentialDigests?: GuardianCredentialDigests;
 }
 
 /**
@@ -111,10 +158,62 @@ export const WEB_MVP_GATEWAY_BUDGET = Object.freeze({
  * the egress-gated provider, then the pipeline, then the interaction
  * service with the guardian hooks, and finally the guardian status feeds
  * (vendor request counters + usage summary).
+ *
+ * R1-08 (issue #20): with `options.snapshot` the encrypted runtime-snapshot
+ * subsystem is attached — boot-time restore (with optional ADR-0005
+ * deletion replay), an interval writer, an immediate write on every
+ * confirmed guardian mutation and a shutdown flush. With
+ * `options.credentialDigests` the guardian verifies REAL access codes
+ * (digests only) and the raw values are registered in the secrets registry
+ * for redaction; the synthetic demo mode applies otherwise.
  */
-export function createWebMvpRuntime(): WebMvpRuntime {
+export function createWebMvpRuntime(options: WebMvpRuntimeOptions = {}): WebMvpRuntime {
   const trace = createRuntimeTraceRecorder();
-  const guardian = createGuardianService();
+  const secrets = createSecretsRegistry();
+  if (options.credentialDigests !== undefined) {
+    // The registry only ever sees the DIGESTS here — the raw code values
+    // were consumed by the caller (getWebMvpRuntime) and never enter this
+    // module. Digests are registered so a digest accidentally reaching a
+    // log is still redacted.
+    secrets.registerValue("guardian_access_code", options.credentialDigests.guardian);
+    secrets.registerValue("admin_access_code", options.credentialDigests.admin);
+  }
+  if (options.snapshot !== undefined) {
+    secrets.registerValue("snapshot_encryption_key", options.snapshot.keyHex);
+  }
+
+  // R1-08 snapshot writer: sync capture + atomic encrypted write. Failures
+  // are observable (terse stderr line, no payload) but never break the
+  // guardian mutation that triggered them.
+  const snapshotConfig = options.snapshot;
+  let snapshotRuntime: SnapshotCapableRuntime | null = null;
+  const performSnapshotWrite = (source: RuntimeSnapshotSource): void => {
+    const current = snapshotRuntime;
+    if (current === null || snapshotConfig === undefined) {
+      return;
+    }
+    try {
+      cleanupSnapshotTempSync(snapshotConfig.path);
+      const snapshot = captureRuntimeSnapshot(current, {
+        source,
+        childActorId: WEB_MVP_ACTOR_ID,
+      });
+      writeSnapshotFileSync(snapshotConfig.path, JSON.stringify(snapshot), snapshotConfig.keyHex);
+    } catch (error) {
+      console.error(
+        "[lumithink:snapshot] write failed:",
+        error instanceof SnapshotStoreError ? error.message : "unexpected error",
+      );
+    }
+  };
+
+  const guardian = createGuardianService({
+    ...(options.credentialDigests !== undefined ? { credentialDigests: options.credentialDigests } : {}),
+    redact: (text: string) => secrets.redact(text),
+    ...(snapshotConfig !== undefined
+      ? { onConfirmedStateChange: () => performSnapshotWrite("confirmed-mutation") }
+      : {}),
+  });
   const memory = createMemoryService();
 
   /**
@@ -282,7 +381,96 @@ export function createWebMvpRuntime(): WebMvpRuntime {
     conversationCount: service.conversationsOwnedBy(WEB_MVP_ACTOR_ID).length,
   }));
 
-  return { service, guardian, pipeline, gateway, trace, memory, lifecycle };
+  const runtime: WebMvpRuntime = {
+    service,
+    guardian,
+    pipeline,
+    gateway,
+    trace,
+    memory,
+    lifecycle,
+    secrets,
+  };
+
+  // -- R1-08 encrypted snapshot subsystem -----------------------------------
+  if (snapshotConfig !== undefined) {
+    snapshotRuntime = runtime;
+
+    // 1. Boot-time restore: a snapshot file present at composition is the
+    //    previous process's confirmed state. Undecryptable/corrupt files
+    //    fail the composition (fail-closed boot refusal — the operator
+    //    fixes the key or consciously removes the file; runbook documented).
+    if (snapshotFileExistsSync(snapshotConfig.path)) {
+      const plaintext = readSnapshotFileSync(snapshotConfig.path, snapshotConfig.keyHex);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(plaintext) as unknown;
+      } catch {
+        throw new SnapshotStoreError("bad_json", "the snapshot file does not contain valid JSON.");
+      }
+      const restorePromise = restoreRuntimeSnapshot(
+        runtime,
+        parsed,
+        {
+          childActorId: WEB_MVP_ACTOR_ID,
+          replayAfterRestore: snapshotConfig.restoreReplay === true,
+        },
+      ).then((result) => {
+        // Persist the post-restore state (with the restore audit entry and
+        // any replay tombstone) so the on-box file is self-consistent.
+        performSnapshotWrite("boot-restore");
+        return result;
+      });
+      // The restore itself is synchronous state installation; only the
+      // optional ADR-0005 replay is asynchronous (microtask-only at boot —
+      // no in-flight turns exist). Surface a replay failure loudly.
+      void restorePromise.catch((error: unknown) => {
+        console.error(
+          "[lumithink:snapshot] restore failed:",
+          error instanceof Error ? error.message : "unexpected error",
+        );
+      });
+    } else {
+      // First boot: seed the encrypted file so the drill surface exists
+      // from the first confirmed change onward.
+      performSnapshotWrite("manual");
+    }
+
+    // 2. Interval writer (bounded loss window for non-confirmed content).
+    const intervalMs = Math.max(1_000, snapshotConfig.intervalMs ?? 60_000);
+    const snapshotTimer = setInterval(() => performSnapshotWrite("interval"), intervalMs);
+    snapshotTimer.unref?.();
+
+    // 3. Shutdown flush (SIGTERM/SIGINT → final snapshot, then exit — the
+    //    deployment unit's graceful-stop path; registered once per process).
+    registerShutdownSnapshotFlush(() => performSnapshotWrite("shutdown"));
+  }
+
+  return runtime;
+}
+
+let shutdownFlushRegistered = false;
+
+/**
+ * R1-08: register the once-per-process SIGTERM/SIGINT flush. The handler
+ * writes the final snapshot and EXITS (a registered handler suppresses the
+ * default terminate, so the deployment unit's stop path stays bounded).
+ */
+function registerShutdownSnapshotFlush(flush: () => void): void {
+  if (shutdownFlushRegistered) {
+    return;
+  }
+  shutdownFlushRegistered = true;
+  const handler = (): void => {
+    try {
+      flush();
+    } catch {
+      // A failed shutdown flush must not hang the stop path.
+    }
+    process.exit(0);
+  };
+  process.once("SIGTERM", handler);
+  process.once("SIGINT", handler);
 }
 
 const RUNTIME_GLOBAL_KEY = Symbol.for("lumithink.web-mvp.runtime");
@@ -291,6 +479,15 @@ const RUNTIME_GLOBAL_KEY = Symbol.for("lumithink.web-mvp.runtime");
  * Process singleton (survives Next.js dev hot-reload; one pipeline, one
  * idempotency ledger, one turn registry and one guardian authorization
  * state per process).
+ *
+ * R1-08: the composition reads the validated startup environment ONCE per
+ * process —
+ * - `LUMITHINK_GUARDIAN_ACCESS_CODE` / `LUMITHINK_ADMIN_ACCESS_CODE` (both
+ *   or none): real credential digests replace the disclosed demo mode;
+ * - `LUMITHINK_SNAPSHOT_PATH` + key (env or controlled-mount key file): the
+ *   encrypted snapshot subsystem is attached (boot restore, interval,
+ *   confirmed-mutation writes, shutdown flush; optional restore replay).
+ * With everything unset the synthetic demo boot is unchanged (CI + local).
  */
 export function getWebMvpRuntime(): WebMvpRuntime {
   const container = globalThis as Record<symbol, WebMvpRuntime | undefined>;
@@ -298,7 +495,27 @@ export function getWebMvpRuntime(): WebMvpRuntime {
   if (existing !== undefined) {
     return existing;
   }
-  const created = createWebMvpRuntime();
+  const env = readStartupEnv();
+  let snapshotConfig: WebMvpSnapshotConfig | undefined;
+  if (env.snapshot.path !== null) {
+    snapshotConfig = {
+      path: env.snapshot.path,
+      keyHex: env.snapshot.keyHex ?? readSnapshotKeyFileSync(env.snapshot.keyFile as string),
+      ...(env.snapshot.intervalMs !== null ? { intervalMs: env.snapshot.intervalMs } : {}),
+      restoreReplay: env.snapshot.restoreReplay,
+    };
+  }
+  const credentialDigests: GuardianCredentialDigests | undefined =
+    env.guardianAccessCode === null || env.adminAccessCode === null
+      ? undefined
+      : {
+          guardian: createHash("sha256").update(env.guardianAccessCode, "utf8").digest("hex"),
+          admin: createHash("sha256").update(env.adminAccessCode, "utf8").digest("hex"),
+        };
+  const created = createWebMvpRuntime({
+    ...(snapshotConfig !== undefined ? { snapshot: snapshotConfig } : {}),
+    ...(credentialDigests !== undefined ? { credentialDigests } : {}),
+  });
   container[RUNTIME_GLOBAL_KEY] = created;
   return created;
 }

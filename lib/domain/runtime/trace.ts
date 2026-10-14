@@ -208,6 +208,29 @@ export type RuntimeTraceEvent =
       readonly resultCode: RuntimeResultCode;
     }
   | {
+      /**
+       * R1-08 (issue #20 交付范围 4): the successful model call as an
+       * auditable structural fact — request id, model identity and the
+       * TOKEN COST of the turn (usage + micro-USD cost from the gateway
+       * result), so the audit trace answers "what did this turn cost and
+       * which model answered" without any content fields.
+       */
+      readonly type: "model.completed";
+      readonly component: "model_gateway";
+      readonly atMs: number;
+      readonly traceId: string;
+      readonly turnId: string;
+      readonly sessionId: string;
+      readonly requestId: string;
+      readonly modelId: string;
+      readonly providerId: string;
+      readonly attempts: number;
+      readonly inputTokens: number;
+      readonly outputTokens: number;
+      readonly costMicroUsd: number;
+      readonly durationMs: number;
+    }
+  | {
       readonly type: "tool.rejected";
       readonly component: "tool_gate";
       readonly atMs: number;

@@ -7,7 +7,9 @@ import type { NextConfig } from "next";
  * header instead of cookies, so no CSRF/cookie-affecting header knobs are
  * needed; these three headers close the classic content-sniffing /
  * framing / referrer leaks without touching Next.js runtime behavior.
- * Broader deployment hardening (HTTPS, CSP with nonces, HSTS) is R1-08.
+ * R1-08 (issue #20) adds the per-request nonce CSP via middleware.ts
+ * (lib/server/security-headers.ts); HSTS + TLS belong to the reverse proxy
+ * (deploy/runbook.md).
  */
 const nextConfig: NextConfig = {
   async headers() {

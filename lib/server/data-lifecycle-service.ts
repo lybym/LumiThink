@@ -39,6 +39,7 @@
  */
 
 import { parseActorContext, type ActorContext } from "../domain/contract/actor.ts";
+import { ContractValidationError, problem } from "../domain/contract/core.ts";
 import type { DshSessionMapper } from "../domain/runtime/session-map.ts";
 import {
   GUARDIAN_FAMILY_CHILD_REF,
@@ -107,12 +108,50 @@ export interface DataLifecycleService {
   replayDeletions(operatorRole: string): Promise<Readonly<ChildDataEraseResult>>;
   /** Tombstone ledger snapshot (content-free; audit surface). */
   deletionRecords(): readonly Readonly<ChildDataDeletionRecord>[];
+  /**
+   * R1-08 (issue #20) encrypted-snapshot restore port: re-seed the tombstone
+   * ledger from a validated snapshot so post-restore replays cover the full
+   * deletion history. Every record is re-validated (content-free shape) and
+   * the seq must continue strictly; called ONCE at composition.
+   */
+  restoreLedger(records: unknown): { readonly restored: number };
 }
 
 /** Default tombstone id factory (`del_` + bounded random body). */
 function defaultDeletionIdFactory(): string {
   const random = Math.random().toString(36).slice(2, 10);
   return `del_${Date.now().toString(36)}${random}`.slice(0, 68);
+}
+
+/**
+ * R1-08: pure validation of one snapshot deletion-ledger restore batch (no
+ * commit). Used by restoreLedger AND the composition root's all-or-nothing
+ * pre-validation pass. Content-free shapes only.
+ */
+export function validateDeletionLedgerRestorePayload(records: unknown): readonly Readonly<ChildDataDeletionRecord>[] {
+  if (!Array.isArray(records)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "records", "restored deletion records must be an array."),
+    ]);
+  }
+  if (records.length > MAX_DELETION_LEDGER_RECORDS) {
+    throw new ContractValidationError([
+      problem(
+        "CONTRACT_FIELD_INVALID",
+        "records",
+        `restored deletion ledger exceeds the ${MAX_DELETION_LEDGER_RECORDS}-record bound.`,
+      ),
+    ]);
+  }
+  const prepared = records.map((record) => validateChildDataDeletionRecord(record));
+  for (let i = 1; i < prepared.length; i += 1) {
+    if (prepared[i].seq <= prepared[i - 1].seq) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", "records", "restored deletion records must have strictly increasing seq."),
+      ]);
+    }
+  }
+  return Object.freeze(prepared);
 }
 
 export function createDataLifecycleService(
@@ -329,6 +368,18 @@ export function createDataLifecycleService(
 
     deletionRecords(): readonly Readonly<ChildDataDeletionRecord>[] {
       return Object.freeze([...ledger]);
+    },
+
+    restoreLedger(records: unknown): { readonly restored: number } {
+      if (ledger.length > 0) {
+        throw new ContractValidationError([
+          problem("CONTRACT_FIELD_INVALID", "records", "the deletion ledger can only be restored into an empty service."),
+        ]);
+      }
+      const prepared = validateDeletionLedgerRestorePayload(records);
+      ledger.push(...prepared);
+      ledgerSeq = prepared.length > 0 ? prepared[prepared.length - 1].seq : 0;
+      return { restored: prepared.length };
     },
   });
 }

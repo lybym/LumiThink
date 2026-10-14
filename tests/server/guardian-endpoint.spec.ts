@@ -243,12 +243,14 @@ test("an 8h-old session is rejected as untrusted and its server entry is cleaned
 test("a fresh service discloses its seeded state as `seed` audit entries", () => {
   const rig = createRig();
   const seeds = rig.guardian.auditEntries().filter((entry) => entry.kind === "seed");
-  // The four seeded elements (R1-09 update): acked disclosure 1.1.0, the
-  // active base consent, and BOTH feature switches disabled — the recording
-  // switch seeds disabled (默认最小化采集, issue #21).
+  // The five seeded elements (R1-08 update): the credential mode disclosure
+  // (demo mode by default), acked disclosure 1.1.0, the active base consent,
+  // and BOTH feature switches disabled — the recording switch seeds disabled
+  // (默认最小化采集, issue #21).
   assert.deepEqual(
     seeds.map((entry) => [entry.target, entry.detail]),
     [
+      ["credential_mode", "demo"],
       ["1.1.0", "acknowledged"],
       ["child_model_interaction", "active"],
       ["third_party_data_egress", "disabled"],

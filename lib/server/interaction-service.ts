@@ -57,6 +57,7 @@
 
 import {
   CONTRACT_ID_PREFIXES,
+  isValidContractId,
   type ContractIdKind,
   type ContractProblem,
   ContractValidationError,
@@ -71,6 +72,7 @@ import {
   fingerprintInteractionRequest,
   normalizeInteractionRequest,
   parseInteractionRequest,
+  TEXT_LIMITS,
   type InteractionEvent,
   type InteractionRequest,
 } from "../domain/contract/interaction.ts";
@@ -240,6 +242,31 @@ export interface InteractionService {
     readonly acceptedAt: string;
     readonly fingerprint: string;
   }[];
+
+  // -- R1-08 encrypted runtime snapshot restore ports (issue #20) -----------
+  /**
+   * R1-08 boot-time restore: re-materialize retained conversation records
+   * from an encrypted snapshot. Called ONCE at composition by the runtime
+   * wiring (never from an HTTP path); every record is re-validated
+   * fail-closed (contract-id grammars, bounded history, known roles) and
+   * records bind to the SERVER-PINNED child actorId — a snapshot can never
+   * fabricate a conversation for another actor. Duplicate conversation ids
+   * inside the restore payload (or colliding with live state) fail closed.
+   */
+  restoreChildData(
+    records: unknown,
+    actorId: unknown,
+  ): { readonly conversations: number; readonly historyEntries: number };
+  /**
+   * R1-08 boot-time restore: re-seed the (actorId, requestId) idempotency
+   * ledger from the snapshot so pre-restart requestIds keep their replay
+   * protection. Entries are re-validated fail-closed (contract grammars,
+   * 16-hex fingerprint, bounded timestamps).
+   */
+  restoreIdempotencyLedger(
+    entries: unknown,
+    actorId: unknown,
+  ): { readonly entries: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +510,184 @@ export function safeErrorResult(
     }
   }
   return { kind: "error", httpStatus, envelope };
+}
+
+// ---------------------------------------------------------------------------
+// R1-08 snapshot restore payload validators (pure; shared by the boot ports
+// and the composition root's all-or-nothing pre-validation)
+// ---------------------------------------------------------------------------
+
+const RESTORED_CONTENT_MAX_CODE_POINTS = TEXT_LIMITS.maxChars * 2;
+const FINGERPRINT_HEX_PATTERN = /^[0-9a-f]{16}$/;
+
+export interface RestoredChildDataRecord {
+  readonly conversationId: string;
+  readonly sessionId: string;
+  readonly history: readonly { readonly role: "user" | "assistant"; readonly content: string }[];
+}
+
+/**
+ * Validate a restored child-data payload (fail-closed, no commit): contract
+ * id grammars, bounded history, known roles, unique ids. The conversation
+ * ids must not collide with the service's LIVE state — so the collision
+ * check is injected (null for the pure pre-validation pass, the live set
+ * for the commit port).
+ */
+export function validateChildDataRestorePayload(
+  records: unknown,
+  liveConversationIds: ReadonlySet<string> | null,
+): readonly RestoredChildDataRecord[] {
+  if (!Array.isArray(records)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "records", "restored child data must be an array."),
+    ]);
+  }
+  if (records.length > MAX_CONVERSATIONS_PER_ACTOR) {
+    throw new ContractValidationError([
+      problem(
+        "CONTRACT_FIELD_INVALID",
+        "records",
+        `restored child data exceeds the ${MAX_CONVERSATIONS_PER_ACTOR}-conversation bound.`,
+      ),
+    ]);
+  }
+  const prepared: RestoredChildDataRecord[] = [];
+  const seen = new Set<string>();
+  for (const raw of records) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", "records", "restored conversation record must be an object."),
+      ]);
+    }
+    const record = raw as Record<string, unknown>;
+    if (
+      Object.keys(record).length !== 3 ||
+      !isValidContractId("conversationId", record.conversationId) ||
+      !isValidContractId("sessionId", record.sessionId) ||
+      !Array.isArray(record.history)
+    ) {
+      throw new ContractValidationError([
+        problem(
+          "CONTRACT_FIELD_INVALID",
+          "records",
+          "restored conversation record must carry a grammar-valid conversationId, sessionId and history array (no other fields).",
+        ),
+      ]);
+    }
+    const conversationId = record.conversationId as string;
+    if (seen.has(conversationId) || liveConversationIds?.has(conversationId) === true) {
+      throw new ContractValidationError([
+        problem(
+          "CONTRACT_FIELD_INVALID",
+          "records",
+          "restored conversation ids must be unique and must not collide with live state.",
+        ),
+      ]);
+    }
+    seen.add(conversationId);
+    if (record.history.length > MAX_HISTORY_ENTRIES) {
+      throw new ContractValidationError([
+        problem(
+          "CONTRACT_FIELD_INVALID",
+          "history",
+          `restored history exceeds the ${MAX_HISTORY_ENTRIES}-entry bound.`,
+        ),
+      ]);
+    }
+    const history: { readonly role: "user" | "assistant"; readonly content: string }[] = [];
+    for (const rawEntry of record.history) {
+      if (rawEntry === null || typeof rawEntry !== "object" || Array.isArray(rawEntry)) {
+        throw new ContractValidationError([
+          problem("CONTRACT_FIELD_INVALID", "history", "restored history entry must be an object."),
+        ]);
+      }
+      const entry = rawEntry as Record<string, unknown>;
+      const role = entry.role;
+      const content = entry.content;
+      if (
+        Object.keys(entry).length !== 2 ||
+        (role !== "user" && role !== "assistant") ||
+        typeof content !== "string" ||
+        [...content].length === 0 ||
+        [...content].length > RESTORED_CONTENT_MAX_CODE_POINTS
+      ) {
+        throw new ContractValidationError([
+          problem(
+            "CONTRACT_FIELD_INVALID",
+            "history",
+            "restored history entry must carry a known role and bounded content (no other fields).",
+          ),
+        ]);
+      }
+      history.push(Object.freeze({ role, content }));
+    }
+    prepared.push(
+      Object.freeze({
+        conversationId,
+        sessionId: record.sessionId as string,
+        history: Object.freeze(history),
+      }),
+    );
+  }
+  return Object.freeze(prepared);
+}
+
+/**
+ * Validate a restored idempotency-ledger payload (fail-closed, no commit):
+ * contract id grammars, bounded timestamps, 16-hex content-free fingerprints.
+ */
+export function validateIdempotencyRestorePayload(entries: unknown): readonly StoredInteraction[] {
+  if (!Array.isArray(entries)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "entries", "restored ledger entries must be an array."),
+    ]);
+  }
+  if (entries.length > MAX_IDEMPOTENCY_LEDGER_ENTRIES) {
+    throw new ContractValidationError([
+      problem(
+        "CONTRACT_FIELD_INVALID",
+        "entries",
+        `restored ledger exceeds the ${MAX_IDEMPOTENCY_LEDGER_ENTRIES}-entry bound.`,
+      ),
+    ]);
+  }
+  const prepared = entries.map((raw) => {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", "entries", "restored ledger entry must be an object."),
+      ]);
+    }
+    const entry = raw as Record<string, unknown>;
+    if (
+      Object.keys(entry).length !== 6 ||
+      !isValidContractId("requestId", entry.requestId) ||
+      !isValidContractId("conversationId", entry.conversationId) ||
+      !isValidContractId("turnId", entry.turnId) ||
+      !isValidContractId("traceId", entry.traceId) ||
+      typeof entry.acceptedAt !== "string" ||
+      entry.acceptedAt.length === 0 ||
+      entry.acceptedAt.length > 40 ||
+      typeof entry.fingerprint !== "string" ||
+      !FINGERPRINT_HEX_PATTERN.test(entry.fingerprint)
+    ) {
+      throw new ContractValidationError([
+        problem(
+          "CONTRACT_FIELD_INVALID",
+          "entries",
+          "restored ledger entry must carry grammar-valid ids, a bounded timestamp and a 16-hex fingerprint (no other fields).",
+        ),
+      ]);
+    }
+    return Object.freeze({
+      requestId: entry.requestId as string,
+      conversationId: entry.conversationId as string,
+      turnId: entry.turnId as string,
+      traceId: entry.traceId as string,
+      acceptedAt: entry.acceptedAt,
+      fingerprint: entry.fingerprint,
+    }) as StoredInteraction;
+  });
+  return Object.freeze(prepared);
 }
 
 export function createInteractionService(options: InteractionServiceOptions): InteractionService {
@@ -1239,6 +1444,55 @@ export function createInteractionService(options: InteractionServiceOptions): In
         }
       }
       return Object.freeze(entries);
+    },
+
+    // -- R1-08 encrypted runtime snapshot restore ports (issue #20) ----------
+
+    restoreChildData(
+      records: unknown,
+      actorId: unknown,
+    ): { readonly conversations: number; readonly historyEntries: number } {
+      if (typeof actorId !== "string") {
+        throw new ContractValidationError([
+          problem("CONTRACT_FIELD_INVALID", "actorId", "restore requires a server-pinned actor id string."),
+        ]);
+      }
+      // Validate (incl. live-state collision) before any commit.
+      const prepared = validateChildDataRestorePayload(
+        records,
+        new Set(conversations.keys()),
+      );
+      // Commit phase: bind every restored record to the SERVER-PINNED actor.
+      let historyEntries = 0;
+      for (const item of prepared) {
+        historyEntries += item.history.length;
+        conversations.set(item.conversationId, {
+          conversationId: item.conversationId,
+          actorId: actorId as string,
+          // The original sessionId is preserved for the inventory/audit
+          // surfaces; the DSH mapping itself is NOT restored (a fresh
+          // process mints a new mapped session on the next turn — disclosed).
+          sessionId: item.sessionId,
+          history: item.history,
+        } satisfies ConversationRecord);
+      }
+      return { conversations: prepared.length, historyEntries };
+    },
+
+    restoreIdempotencyLedger(
+      entries: unknown,
+      actorId: unknown,
+    ): { readonly entries: number } {
+      if (typeof actorId !== "string") {
+        throw new ContractValidationError([
+          problem("CONTRACT_FIELD_INVALID", "actorId", "restore requires a server-pinned actor id string."),
+        ]);
+      }
+      const prepared = validateIdempotencyRestorePayload(entries);
+      for (const stored of prepared) {
+        rememberLedger(`${actorId as string}\u0000${stored.requestId}`, stored);
+      }
+      return { entries: prepared.length };
     },
   });
 }

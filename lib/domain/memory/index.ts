@@ -6,4 +6,4 @@
  * — enforced by tests/domain/boundary.spec.ts.
  */
 export * from "./schema.ts";
-export { createMemoryService, type MemoryService, type MemoryServiceOptions, type MemoryDeleteResult, type MemoryRetrievalResult, type MemoryWriteResult } from "./service.ts";
+export { createMemoryService, validateMemoryRestoreEntries, type MemoryService, type MemoryServiceOptions, type MemoryDeleteResult, type MemoryRetrievalResult, type MemoryWriteResult } from "./service.ts";

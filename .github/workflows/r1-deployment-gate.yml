@@ -1,0 +1,213 @@
+name: R1 deployment gate
+
+# R1-08 (Issue #20): the single-host Linux deployment artifacts must be
+# syntactically valid AND the deployment smoke must prove on a clean Ubuntu
+# runner what AC 1/AC 4 demand at the CI level: synthetic-data boot, health
+# check, security headers, loopback-only binding, the encrypted snapshot
+# round-trip and session-policy recovery across a restart.
+on:
+  pull_request:
+    paths:
+      - 'deploy/**'
+      - 'scripts/**'
+      - 'middleware.ts'
+      - 'lib/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/r1-deployment-gate.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/**'
+      - 'scripts/**'
+      - 'middleware.ts'
+      - 'lib/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/r1-deployment-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r1-deployment-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24.21.0'
+  PNPM_VERSION: '10.34.7'
+  NEXT_TELEMETRY_DISABLED: '1'
+  CI: 'true'
+
+jobs:
+  artifacts:
+    name: Deployment artifacts (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Shell scripts pass bash -n
+        shell: bash
+        run: |
+          set -euo pipefail
+          for script in deploy/*.sh; do
+            bash -n "${script}"
+            echo "bash -n OK: ${script}"
+          done
+
+      - name: systemd unit passes systemd-analyze verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          systemd-analyze verify deploy/lumithink.service 2>&1 | tee /tmp/unit-verify.log
+          # systemd-analyze verify warns about missing local users/files (they
+          # exist only on the deploy host); FAIL only on real syntax errors.
+          if grep -qE 'Error|error|Failed to parse' /tmp/unit-verify.log; then
+            echo "::error::systemd unit has parse errors"
+            exit 1
+          fi
+          echo "unit syntax OK"
+
+      - name: Env template carries no real secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The template documents SHAPES only; every value line must be a
+          # comment or a non-secret default.
+          if grep -E '^LUMITHINK_(GUARDIAN|ADMIN)_ACCESS_CODE=.+' deploy/env/production.example | grep -vE '(generate|<|>)' ; then
+            echo "::error::env template must not carry real credential values"
+            exit 1
+          fi
+          echo "template clean"
+
+  deployment-smoke:
+    name: Linux deployment smoke (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install exact pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Install exact Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Assert the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$(node --version)" = "v${NODE_VERSION}" ]
+          [ "$(pnpm --version)" = "${PNPM_VERSION}" ]
+
+      - name: Frozen-lockfile install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Boot with the encrypted snapshot subsystem (synthetic data)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LUMITHINK_SNAPSHOT_PATH="${RUNNER_TEMP}/lumithink-state/snapshot.bin"
+          export LUMITHINK_SNAPSHOT_KEY="$(openssl rand -hex 32)"
+          export PORT=3123
+          echo "LUMITHINK_SNAPSHOT_PATH=${LUMITHINK_SNAPSHOT_PATH}" >> smoke.env
+          echo "LUMITHINK_SNAPSHOT_KEY=${LUMITHINK_SNAPSHOT_KEY}" >> smoke.env
+          echo "PORT=3123" >> smoke.env
+          mkdir -p "$(dirname "${LUMITHINK_SNAPSHOT_PATH}")"
+          node --experimental-strip-types scripts/check-startup-env.ts
+          set -a; source smoke.env; set +a
+          node_modules/.bin/next start -H 127.0.0.1 -p 3123 > server1.log 2>&1 &
+          echo $! > server.pid
+          for _ in $(seq 1 60); do
+            if body="$(curl -fsS http://127.0.0.1:3123/api/health 2>/dev/null)"; then
+              echo "${body}" | grep -q '"status":"ok"' && exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::server did not become healthy"; tail -50 server1.log; exit 1
+
+      - name: Security headers + loopback-only binding (AC 4)
+        shell: bash
+        run: |
+          set -euo pipefail
+          headers="$(curl -fsSI http://127.0.0.1:3123/api/health)"
+          echo "${headers}"
+          echo "${headers}" | grep -qi '^content-security-policy: .*nonce-' || { echo "::error::CSP nonce missing"; exit 1; }
+          echo "${headers}" | grep -qi '^content-security-policy: .*strict-dynamic' || { echo "::error::strict-dynamic missing"; exit 1; }
+          echo "${headers}" | grep -qi '^x-content-type-options: nosniff' || { echo "::error::nosniff missing"; exit 1; }
+          echo "${headers}" | grep -qi '^x-frame-options: DENY' || { echo "::error::XFO missing"; exit 1; }
+          echo "${headers}" | grep -qi '^referrer-policy: strict-origin-when-cross-origin' || { echo "::error::referrer-policy missing"; exit 1; }
+          # The app must listen on loopback ONLY (public exposure belongs to
+          # the TLS proxy).
+          if ss -ltn | grep 3123 | grep -qv '127.0.0.1:3123'; then
+            echo "::error::app bound beyond loopback"; ss -ltn; exit 1
+          fi
+          echo "headers + binding OK"
+
+      - name: Guardian mutation lands an encrypted snapshot immediately
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source smoke.env; set +a
+          token="$(curl -fsS -X POST http://127.0.0.1:3123/api/v1/guardian/session \
+            -H 'content-type: application/json' \
+            -d '{"protocolVersion":"1.0","accessCode":"lumithink-guardian-demo"}' \
+            | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).sessionToken))')"
+          echo "${token}" > guardian.token
+          curl -fsS -X POST http://127.0.0.1:3123/api/v1/guardian/authorizations \
+            -H "authorization: Bearer ${token}" -H 'content-type: application/json' \
+            -d '{"protocolVersion":"1.0","action":"set_feature_switch","switchId":"conversation_recording","enabled":true}' \
+            | grep -q '"outcome":"applied"'
+          test -s "${LUMITHINK_SNAPSHOT_PATH}" || { echo "::error::snapshot not written"; exit 1; }
+          node --experimental-strip-types scripts/snapshot-cli.ts verify "${LUMITHINK_SNAPSHOT_PATH}" --key-hex "${LUMITHINK_SNAPSHOT_KEY}" > /dev/null
+          echo "snapshot written + verified"
+
+      - name: Restart and prove session-policy recovery (AC 1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source smoke.env; set +a
+          kill -TERM "$(cat server.pid)"
+          for _ in $(seq 1 20); do kill -0 "$(cat server.pid)" 2>/dev/null || break; sleep 1; done
+          node_modules/.bin/next start -H 127.0.0.1 -p 3123 > server2.log 2>&1 &
+          echo $! > server.pid
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:3123/api/health 2>/dev/null | grep -q '"status":"ok"' && break
+            sleep 1
+          done
+          token="$(curl -fsS -X POST http://127.0.0.1:3123/api/v1/guardian/session \
+            -H 'content-type: application/json' \
+            -d '{"protocolVersion":"1.0","accessCode":"lumithink-guardian-demo"}' \
+            | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).sessionToken))')"
+          status="$(curl -fsS http://127.0.0.1:3123/api/v1/guardian/authorizations -H "authorization: Bearer ${token}")"
+          echo "${status}"
+          echo "${status}" | grep -q '"switchId":"conversation_recording","enabled":true' || {
+            echo "::error::session policy did not survive the restart"; exit 1;
+          }
+          audit="$(curl -fsS http://127.0.0.1:3123/api/v1/guardian/audit -H "authorization: Bearer ${token}")"
+          echo "${audit}" | grep -q '"kind":"snapshot_restored"' || {
+            echo "::error::restore not disclosed in the audit ring"; exit 1;
+          }
+          echo "restart recovery OK"
+
+      - name: Stop the smoke server
+        if: always()
+        shell: bash
+        run: |
+          kill -TERM "$(cat server.pid)" 2>/dev/null || true
+          tail -20 server1.log server2.log 2>/dev/null || true
