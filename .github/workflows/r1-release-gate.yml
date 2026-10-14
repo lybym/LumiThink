@@ -491,6 +491,64 @@ jobs:
       - name: Frozen-lockfile install (on the checked-out N+1 tree)
         run: pnpm install --frozen-lockfile
 
+      - name: Write the drill report with the migration-risk assessment
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The report and its leak scan run BEFORE the phases: they only
+          # depend on the resolved SHAs + the assessment, and the scan needs
+          # scripts/release-gate/ which exists on the N+1 tree but NOT on the
+          # version-N tree the later phases check out. The execution status
+          # of the phases is carried by the workflow run, not this artifact.
+          # tri-state: the report must stay VALID JSON even when an earlier
+          # step failed and the assessment never ran (null = not assessed).
+          case "${STATE_SCHEMA_CHANGED:-unknown}" in
+            true)  state_json='true';  risk='THIS RUN: the state-schema surface (prisma schema or lib/server/snapshot) changed between N and N+1 — rollback compatibility observed by this drill must be re-reviewed in the PR.' ;;
+            false) state_json='false'; risk='THIS RUN: state-schema surface unchanged between N and N+1; rollback risk assessed low.' ;;
+            *)     state_json='null';  risk='THIS RUN: the state-schema assessment did not run (an earlier drill step failed); rollback risk not assessed.' ;;
+          esac
+          {
+            echo '{'
+            echo '  "drill": "r1-upgrade-rollback-synthetic",'
+            echo '  "issue": "https://github.com/lybym/LumiThink/issues/22",'
+            echo "  \"baseSha\": \"${DRILL_BASE_SHA}\","
+            echo "  \"headSha\": \"${DRILL_HEAD_SHA}\","
+            echo '  "phases": ['
+            echo '    { "phase": "N", "action": "empty-host deploy of the base version", "assertions": ["health ok", "demo default state", "mutation applied", "snapshot written"] },'
+            echo '    { "phase": "N+1", "action": "upgrade on the same encrypted snapshot", "assertions": ["health ok", "N-era state survived", "snapshot_restored audited", "N+1-era mutation applied"] },'
+            echo '    { "phase": "N-rollback", "action": "roll back to the base version", "assertions": ["health ok", "N+1-era state read back by N", "snapshot_restored audited"] }'
+            echo '  ],'
+            echo '  "dependencyDriftBetweenNAndHead": false,'
+            echo "  \"stateSchemaChanged\": ${state_json},"
+            echo '  "nonReversibleMigrationRisks": ['
+            echo '    "Snapshot format is lumithink.runtime-snapshot/v1; this drill PROVES version N still reads the N+1-era snapshot. A future snapshot-format bump must keep the previous version able to read the old state (or explicitly declare rollback unsupported in docs/RELEASE_GATE.md §5) — the drill fails the moment N can no longer read the N+1 state.",'
+            echo '    "Confirmed-change → snapshot write has a millisecond-level atomic-write window: a crash exactly inside it reverts that one change (disclosed in deploy/runbook.md §5). Not a data migration, but a rollback-semantics boundary.",'
+            echo '    "Tombstone replay on restore (deploy/restore.sh marker) is intentionally irreversible — a restore re-applies deletions and never resurrects erased data (ADR-0005).",'
+            echo '    "prisma/schema.prisma stays frozen (digest locked in release/release-manifest.json); SQLite persistence is deferred (TECH_STACK §3). Any schema change is a new data-modeling decision requiring migrations + migration tests before it can ship.",'
+            echo "    \"${risk}\""
+            echo '  ]'
+            echo '}'
+          } > "${RUNNER_TEMP}/r1-drill-report.json"
+          # The report is a release artifact: it must be valid JSON.
+          node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')); console.log('drill report JSON OK')" "${RUNNER_TEMP}/r1-drill-report.json"
+          cat "${RUNNER_TEMP}/r1-drill-report.json"
+
+      - name: Scan the drill report for credential/child-data leaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/release-gate/cli.ts scan-leaks \
+            --file "${RUNNER_TEMP}/r1-drill-report.json"
+
+      - name: Upload the drill report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r1-upgrade-rollback-drill-report
+          if-no-files-found: warn
+          retention-days: 14
+          path: ${{ runner.temp }}/r1-drill-report.json
+
       - name: 'Phase N — empty-host deploy of the base version'
         shell: bash
         run: |
@@ -502,8 +560,8 @@ jobs:
           rm -rf "${drill_dir}"
           mkdir -p "${drill_dir}"
           {
-            echo "SNAPSHOT_PATH=${drill_dir}/snapshot.bin"
-            echo "SNAPSHOT_KEY=$(openssl rand -hex 32)"
+            echo "LUMITHINK_SNAPSHOT_PATH=${drill_dir}/snapshot.bin"
+            echo "LUMITHINK_SNAPSHOT_KEY=$(openssl rand -hex 32)"
           } > "${RUNNER_TEMP}/drill.env"
           set -a; source "${RUNNER_TEMP}/drill.env"; set +a
           export PORT=3123
@@ -532,8 +590,8 @@ jobs:
             -H "authorization: Bearer ${token}" -H 'content-type: application/json' \
             -d '{"protocolVersion":"1.0","action":"set_feature_switch","switchId":"conversation_recording","enabled":true}' \
             | grep -q '"outcome":"applied"' || { echo "::error::phase N: mutation rejected"; exit 1; }
-          test -s "${SNAPSHOT_PATH}" || { echo "::error::phase N: snapshot not written"; exit 1; }
-          echo "phase N snapshot digest: $(sha256sum "${SNAPSHOT_PATH}" | awk '{print $1}')"
+          test -s "${LUMITHINK_SNAPSHOT_PATH}" || { echo "::error::phase N: snapshot not written"; exit 1; }
+          echo "phase N snapshot digest: $(sha256sum "${LUMITHINK_SNAPSHOT_PATH}" | awk '{print $1}')"
           kill -TERM "${server_pid}"
           for _ in $(seq 1 20); do kill -0 "${server_pid}" 2>/dev/null || break; sleep 1; done
           echo "phase N (empty-host deploy) OK"
@@ -620,57 +678,3 @@ jobs:
           for _ in $(seq 1 20); do kill -0 "${server_pid}" 2>/dev/null || break; sleep 1; done
           echo "phase N rollback (state readable by N, no resurrection) OK"
 
-      - name: Write the drill report with the migration-risk assessment
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          # tri-state: the report must stay VALID JSON even when an earlier
-          # step failed and the assessment never ran (null = not assessed).
-          case "${STATE_SCHEMA_CHANGED:-unknown}" in
-            true)  state_json='true';  risk='THIS RUN: the state-schema surface (prisma schema or lib/server/snapshot) changed between N and N+1 — rollback compatibility observed by this drill must be re-reviewed in the PR.' ;;
-            false) state_json='false'; risk='THIS RUN: state-schema surface unchanged between N and N+1; rollback risk assessed low.' ;;
-            *)     state_json='null';  risk='THIS RUN: the state-schema assessment did not run (an earlier drill step failed); rollback risk not assessed.' ;;
-          esac
-          {
-            echo '{'
-            echo '  "drill": "r1-upgrade-rollback-synthetic",'
-            echo '  "issue": "https://github.com/lybym/LumiThink/issues/22",'
-            echo "  \"baseSha\": \"${DRILL_BASE_SHA}\","
-            echo "  \"headSha\": \"${DRILL_HEAD_SHA}\","
-            echo '  "phases": ['
-            echo '    { "phase": "N", "action": "empty-host deploy of the base version", "assertions": ["health ok", "demo default state", "mutation applied", "snapshot written"] },'
-            echo '    { "phase": "N+1", "action": "upgrade on the same encrypted snapshot", "assertions": ["health ok", "N-era state survived", "snapshot_restored audited", "N+1-era mutation applied"] },'
-            echo '    { "phase": "N-rollback", "action": "roll back to the base version", "assertions": ["health ok", "N+1-era state read back by N", "snapshot_restored audited"] }'
-            echo '  ],'
-            echo '  "dependencyDriftBetweenNAndHead": false,'
-            echo "  \"stateSchemaChanged\": ${state_json},"
-            echo '  "nonReversibleMigrationRisks": ['
-            echo '    "Snapshot format is lumithink.runtime-snapshot/v1; this drill PROVES version N still reads the N+1-era snapshot. A future snapshot-format bump must keep the previous version able to read the old state (or explicitly declare rollback unsupported in docs/RELEASE_GATE.md §5) — the drill fails the moment N can no longer read the N+1 state.",'
-            echo '    "Confirmed-change → snapshot write has a millisecond-level atomic-write window: a crash exactly inside it reverts that one change (disclosed in deploy/runbook.md §5). Not a data migration, but a rollback-semantics boundary.",'
-            echo '    "Tombstone replay on restore (deploy/restore.sh marker) is intentionally irreversible — a restore re-applies deletions and never resurrects erased data (ADR-0005).",'
-            echo '    "prisma/schema.prisma stays frozen (digest locked in release/release-manifest.json); SQLite persistence is deferred (TECH_STACK §3). Any schema change is a new data-modeling decision requiring migrations + migration tests before it can ship.",'
-            echo "    \"${risk}\""
-            echo '  ]'
-            echo '}'
-          } > "${RUNNER_TEMP}/r1-drill-report.json"
-          # The report is a release artifact: it must be valid JSON.
-          node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')); console.log('drill report JSON OK')" "${RUNNER_TEMP}/r1-drill-report.json"
-          cat "${RUNNER_TEMP}/r1-drill-report.json"
-
-      - name: Scan the drill report for credential/child-data leaks
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --experimental-strip-types scripts/release-gate/cli.ts scan-leaks \
-            --file "${RUNNER_TEMP}/r1-drill-report.json"
-
-      - name: Upload the drill report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: r1-upgrade-rollback-drill-report
-          if-no-files-found: warn
-          retention-days: 14
-          path: ${{ runner.temp }}/r1-drill-report.json
