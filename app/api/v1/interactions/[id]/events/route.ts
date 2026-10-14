@@ -22,17 +22,22 @@ function parseLastEventSeq(raw: string | null): number | undefined {
  * resumed from Last-Event-ID) and followed live until stream.end. Frames
  * are contract-canonical (`event: <kind>` + canonical JSON payload); the
  * interaction service validates every frame on the way out.
+ *
+ * Next.js App Router constraint: sibling dynamic segments of one level must
+ * share ONE slug name, so both /{traceId}/events and /{turnId}/cancel use
+ * the filesystem segment `[id]` — the wire URLs are unchanged and each
+ * handler interprets the id per its route (events: traceId, cancel: turnId).
  */
 export async function GET(
   request: Request,
-  context: { params: Promise<{ traceId: string }> },
+  context: { params: Promise<{ id: string }> },
 ): Promise<Response> {
-  const { traceId } = await context.params;
+  const { id } = await context.params;
   const nowIso = new Date().toISOString();
   const actor = resolveWebMvpActor(nowIso);
   const result = getWebMvpRuntime().service.openEventStream({
     actor,
-    traceId,
+    traceId: id,
     lastEventSeq: parseLastEventSeq(request.headers.get("last-event-id")),
   });
   if (result.kind === "error") {
