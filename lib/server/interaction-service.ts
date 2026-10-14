@@ -42,6 +42,15 @@
  * web MVP). No persisted schema is introduced or changed; durable
  * persistence is a later R1 data-modeling decision (docs/TECH_STACK.md §3).
  *
+ * R1-06 (issue #18): three optional server-owned hooks wire guardian
+ * authorization into this service without changing its contract semantics —
+ * `authorizeTurn` (family consent gate, runs before the ledger so a revoked
+ * authorization rejects even replays), `cancelPolicy` (a family guardian may
+ * stop own-family child turns; contract §6 `guardian_stop`) and
+ * `resolvePersonaStyle` (the trusted `guardian_config` persona style, passed
+ * through to the pipeline and re-validated there). Cancel attribution now
+ * records the real canceller role (`turn.cancelled.by`).
+ *
  * This module stays framework-free (no next/react/prisma imports) so the
  * endpoint behavior is testable with node:test like the domain layers.
  */
@@ -125,6 +134,30 @@ export interface InteractionServiceOptions {
   };
   /** ms to wait for a cancelled turn to reach its terminal state. */
   readonly cancelSettleMs?: number;
+  /**
+   * R1-06 submit-time turn authorization (e.g. the guardian family consent
+   * gate). Called AFTER contract parsing rejected all client identity
+   * fields and BEFORE the idempotency ledger / turn start; throwing
+   * ContractValidationError rejects the submission fail-closed. Absent →
+   * no additional gate (pre-R1-06 behavior).
+   */
+  readonly authorizeTurn?: (actor: Readonly<ActorContext>) => void;
+  /**
+   * R1-06 family cancellation policy: may `canceller` stop a turn owned by
+   * `owner`? Only consulted when the canceller is NOT the owner (own-turn
+   * cancel keeps the existing actorId scoping). Absent → guardian-style
+   * cross-principal cancel is not permitted (pre-R1-06 behavior).
+   */
+  readonly cancelPolicy?: (
+    canceller: Readonly<ActorContext>,
+    owner: { readonly actorId: string; readonly childRef: string | null; readonly turnId: string },
+  ) => boolean;
+  /**
+   * R1-06 trusted persona style provider (guardian `guardian_config` path).
+   * Called per submission; the returned value is re-validated by the
+   * pipeline's persona resolution (fail-closed, like the actor).
+   */
+  readonly resolvePersonaStyle?: () => unknown;
 }
 
 export interface InteractionService {
@@ -292,10 +325,17 @@ interface TurnStream {
   readonly turnId: string;
   readonly conversationId: string;
   readonly actorId: string;
+  /** Server-resolved childRef of the owning actor (family cancel policy). */
+  readonly childRef: string | null;
   readonly controller: AbortController;
   events: StreamEvent[];
   seq: number;
   status: TurnStreamStatus;
+  /**
+   * Role that aborted this turn (set by the cancel path; null while the
+   * turn runs untouched) — the `turn.cancelled` `by` attribution.
+   */
+  cancelledBy: "child" | "guardian" | "system" | null;
   /** Resolves when the stream reached its terminal state (stream.end pushed). */
   readonly ended: Promise<void>;
   /** Resolver of `ended`; owned by the stream so endStream can signal it. */
@@ -314,10 +354,17 @@ const DEFAULT_CANCEL_SETTLE_MS = 5_000;
  * The cancel event's `by` role. Text interactions and cancels only admit
  * child|guardian|system (voice_device is rejected upstream by the contract
  * role matrix); this defensive projection keeps the payload type exact.
+ * R1-06: the recorded `cancelledBy` attribution (whoever actually aborted —
+ * including a family guardian via the cancel policy) wins over the owner's
+ * own role.
  */
 function cancelledByFor(
+  stream: TurnStream,
   actor: Readonly<ActorContext>,
 ): "child" | "guardian" | "system" {
+  if (stream.cancelledBy !== null) {
+    return stream.cancelledBy;
+  }
   return actor.role === "guardian" || actor.role === "system" ? actor.role : "child";
 }
 
@@ -386,6 +433,9 @@ export function createInteractionService(options: InteractionServiceOptions): In
   const interFrameDelayMs = Math.max(0, options.stream?.interFrameDelayMs ?? DEFAULT_INTER_FRAME_DELAY_MS);
   const cancelSettleMs = options.cancelSettleMs ?? DEFAULT_CANCEL_SETTLE_MS;
   const childAgeYears = options.childAgeYears;
+  const authorizeTurn = options.authorizeTurn;
+  const cancelPolicy = options.cancelPolicy;
+  const resolvePersonaStyle = options.resolvePersonaStyle;
 
   /** conversationId → record (in-memory, process-local). */
   const conversations = new Map<string, ConversationRecord>();
@@ -424,6 +474,7 @@ export function createInteractionService(options: InteractionServiceOptions): In
     readonly turnId: string;
     readonly conversationId: string;
     readonly actorId: string;
+    readonly childRef: string | null;
   }): TurnStream {
     let resolveEnded!: () => void;
     const ended = new Promise<void>((resolve) => {
@@ -434,10 +485,12 @@ export function createInteractionService(options: InteractionServiceOptions): In
       turnId: ids.turnId,
       conversationId: ids.conversationId,
       actorId: ids.actorId,
+      childRef: ids.childRef,
       controller: new AbortController(),
       events: [],
       seq: 0,
       status: "running",
+      cancelledBy: null,
       ended,
       resolveEnded,
       waiters: new Set(),
@@ -517,6 +570,7 @@ export function createInteractionService(options: InteractionServiceOptions): In
       turnId: event.turnId,
       conversationId: event.conversationId,
       actorId: actor.actorId,
+      childRef: actor.childRef,
     });
     turnStreams.set(stream.traceId, stream);
     turnIndex.set(stream.turnId, stream.traceId);
@@ -534,6 +588,9 @@ export function createInteractionService(options: InteractionServiceOptions): In
           childAgeYears,
           history: record.history,
           signal: stream.controller.signal,
+          // R1-06: the trusted family style (guardian_config provenance) is
+          // re-validated inside the pipeline's persona resolution.
+          ...(resolvePersonaStyle === undefined ? {} : { personaStyle: resolvePersonaStyle() }),
         });
       } catch {
         // A pipeline contract violation is a server bug: degrade fail-closed
@@ -566,7 +623,7 @@ export function createInteractionService(options: InteractionServiceOptions): In
       // Cancellation that already happened (caller stop) → terminal
       // cancelled frames; no content of a cancelled turn is ever emitted.
       if (stream.controller.signal.aborted) {
-        pushEvent(stream, "turn.cancelled", { type: "cancelled", by: cancelledByFor(actor) });
+        pushEvent(stream, "turn.cancelled", { type: "cancelled", by: cancelledByFor(stream, actor) });
         endStream(stream);
         return;
       }
@@ -586,7 +643,7 @@ export function createInteractionService(options: InteractionServiceOptions): In
           await delayAbortable(interFrameDelayMs, stream.controller.signal);
         }
         if (stream.controller.signal.aborted) {
-          pushEvent(stream, "turn.cancelled", { type: "cancelled", by: cancelledByFor(actor) });
+          pushEvent(stream, "turn.cancelled", { type: "cancelled", by: cancelledByFor(stream, actor) });
           endStream(stream);
           return;
         }
@@ -637,7 +694,14 @@ export function createInteractionService(options: InteractionServiceOptions): In
         // 1. Fail-closed request parsing (rejects client identity fields).
         const request: Readonly<InteractionRequest> = parseInteractionRequest(params.body);
 
-        // 2. Idempotency ledger keyed to (verifiedActor, requestId).
+        // 2. R1-06 submit-time authorization (e.g. family consent gate):
+        // runs BEFORE the idempotency ledger, so a revoked authorization
+        // rejects even replays — no new model work can start.
+        if (authorizeTurn !== undefined) {
+          authorizeTurn(verified);
+        }
+
+        // 3. Idempotency ledger keyed to (verifiedActor, requestId).
         const ledgerKey = `${verified.actorId}\u0000${request.interaction.clientRequestId}`;
         const stored = idempotencyLedger.get(ledgerKey) ?? null;
         const decision = resolveIdempotentRetry({ stored, incomingRequest: request });
@@ -652,7 +716,7 @@ export function createInteractionService(options: InteractionServiceOptions): In
           rejectDuplicateRequest();
         }
 
-        // 3. Conversation ownership (server-owned; cross-actor continuation
+        // 4. Conversation ownership (server-owned; cross-actor continuation
         // is a CONTRACT_CROSS_CONVERSATION rejection, no existence leak).
         const owned = conversationsOwnedBy(verified.actorId);
         const requested = request.interaction.conversationId;
@@ -685,7 +749,7 @@ export function createInteractionService(options: InteractionServiceOptions): In
           sessionId = record.sessionId;
         }
 
-        // 4. Canonical event (contract normalization, ingress server-decided).
+        // 5. Canonical event (contract normalization, ingress server-decided).
         const { event } = normalizeInteractionRequest(request, {
           actor: verified,
           ingress,
@@ -697,10 +761,10 @@ export function createInteractionService(options: InteractionServiceOptions): In
           boundConversationIds: owned,
         });
 
-        // 5. Session binding (server-owned SessionRef; re-validated).
+        // 6. Session binding (server-owned SessionRef; re-validated).
         createSessionRef(verified, { sessionId, conversationId, createdAt: now });
 
-        // 6. Ledger BEFORE execution so replays can never double-execute.
+        // 7. Ledger BEFORE execution so replays can never double-execute.
         rememberLedger(ledgerKey, {
           requestId: request.interaction.clientRequestId,
           conversationId,
@@ -710,7 +774,7 @@ export function createInteractionService(options: InteractionServiceOptions): In
           fingerprint: fingerprintInteractionRequest(request),
         });
 
-        // 7. Conversation record + background turn.
+        // 8. Conversation record + background turn.
         let record = conversations.get(conversationId);
         if (record === undefined) {
           record = {
@@ -723,7 +787,7 @@ export function createInteractionService(options: InteractionServiceOptions): In
         }
         startTurn({ actor: verified, event, sessionId, record });
 
-        // 8. Immediate contract ack (child connects to the SSE stream).
+        // 9. Immediate contract ack (child connects to the SSE stream).
         return {
           kind: "ack",
           httpStatus: 200,
@@ -861,7 +925,23 @@ export function createInteractionService(options: InteractionServiceOptions): In
         }
         const traceId = turnIndex.get(request.turnId);
         const stream = traceId === undefined ? undefined : turnStreams.get(traceId);
-        if (stream === undefined || stream.actorId !== verified.actorId) {
+        // Ownership: the turn's owner always may cancel; R1-06 additionally
+        // consults the family cancel policy (guardian stops own-family child
+        // turns). Unknown, foreign and policy-denied turns are all the same
+        // safe no-op — no existence leak.
+        let permitted = stream !== undefined && stream.actorId === verified.actorId;
+        if (
+          !permitted &&
+          stream !== undefined &&
+          cancelPolicy !== undefined
+        ) {
+          permitted = cancelPolicy(verified, {
+            actorId: stream.actorId,
+            childRef: stream.childRef,
+            turnId: stream.turnId,
+          });
+        }
+        if (stream === undefined || !permitted) {
           // Unknown or foreign turn: safe no-op without existence leaks.
           return {
             kind: "result",
@@ -883,6 +963,10 @@ export function createInteractionService(options: InteractionServiceOptions): In
             body: buildCancelResult(request, "already_final", now),
           };
         }
+        // Honest attribution: record WHO aborted (owner or family guardian)
+        // before signalling, so `turn.cancelled.by` names the real canceller.
+        stream.cancelledBy =
+          verified.role === "guardian" || verified.role === "system" ? verified.role : "child";
         // First-class caller cancellation: aborts the in-flight model call
         // and terminates remaining fragment emission (see module header for
         // the documented true-cancel boundary).

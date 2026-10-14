@@ -61,7 +61,7 @@ import {
   type ModelGateway,
 } from "../gateway/index.ts";
 import { personaIdentityDisclosureText, validatePersonaPolicyV0, type PersonaPolicyV0 } from "../persona/policy.ts";
-import { personaDefaultStyle, resolvePersonaTurn, type PersonaTurnResolution } from "../persona/turn.ts";
+import { personaDefaultStyle, resolvePersonaTurn, type PersonaStyleWithProvenance, type PersonaTurnResolution } from "../persona/turn.ts";
 import { loadSkillForChild } from "../evidence/registry.ts";
 import {
   resolveEmotionSkillTurn,
@@ -169,6 +169,14 @@ export interface CordisTurnInput {
   readonly history?: readonly unknown[];
   /** Caller cancellation signal (user stop; first-class, never retried). */
   readonly signal?: AbortSignal;
+  /**
+   * R1-06 optional trusted persona style override (e.g. the guardian
+   * `guardian_config` path supplied by the serving layer). Validated
+   * fail-closed by the persona turn resolution below (same discipline as
+   * `actor`: unknown re-validated server values cannot enter a turn).
+   * Absent → the pipeline's default style (system_default).
+   */
+  readonly personaStyle?: unknown;
 }
 
 export interface CordisTurnFailure {
@@ -566,9 +574,17 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
       if (turnProblems.length > 0) {
         throw new ContractValidationError(turnProblems);
       }
+      // R1-06: an explicit trusted style (guardian_config) is passed through
+      // and re-validated by resolvePersonaTurn (assertValidStyleState) — a
+      // malformed override fails the turn closed instead of degrading to the
+      // default silently.
+      const turnStyle =
+        rawInput.personaStyle === undefined
+          ? personaStyle
+          : (rawInput.personaStyle as Readonly<PersonaStyleWithProvenance>);
       const persona = resolvePersonaTurn({
         policy: options.personaPolicy,
-        style: personaStyle,
+        style: turnStyle,
         actor,
         untrustedInputs: [{ provenance: "user_prompt_text", text: turnText }],
         turnIndex: 0,
