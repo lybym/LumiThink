@@ -28,7 +28,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-
 import { canonicalJson, SUPPORTED_PROTOCOL_VERSIONS } from "../../lib/domain/contract/core.ts";
 import { REGISTRIES_V0_VERSION } from "../../lib/domain/evidence/registry.ts";
 import {
@@ -129,9 +128,19 @@ export interface ReleaseManifest {
   readonly commit?: string;
 }
 
+/**
+ * Digest a repo file from its WORKING-TREE bytes normalized to the
+ * repo-internal LF form. Rationale (r1-10 CI round 1): a Windows checkout
+ * (core.autocrlf) yields CRLF bytes while the Linux CI checkout yields LF
+ * bytes for the same committed blob — raw working-tree digests would make
+ * the release manifest machine-dependent and fail the cross-platform gate.
+ * Normalizing to LF pins the digest to the committed content, which is what
+ * a release is actually reviewed against.
+ */
 async function sha256File(relativePath: string): Promise<string> {
   const bytes = await readFile(new URL(`../../${relativePath}`, import.meta.url));
-  return createHash("sha256").update(bytes).digest("hex");
+  const normalized = Buffer.from(bytes.toString("utf8").replace(/\r\n/g, "\n"), "utf8");
+  return createHash("sha256").update(normalized).digest("hex");
 }
 
 /** Read the exact DSH plugin pins from the R0 PoC package manifest. */
