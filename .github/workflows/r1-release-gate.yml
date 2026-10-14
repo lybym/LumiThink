@@ -1,0 +1,645 @@
+name: R1 release gate
+
+# R1-10 (issue #22): the R1 release gate composes with — and never weakens —
+# the existing gates:
+#   - r0-zero-skip-gate.yml   (R0 PoC 35/35 0-SKIP, ubuntu+windows) — untouched;
+#   - r1-baseline-gate.yml    (frozen install / typecheck / unit / build / boot);
+#   - r1-deployment-gate.yml  (deploy artifacts + Linux deployment smoke).
+# THIS workflow adds the release-level evidence:
+#   1. release-eval-manifest — the child professional & safety evaluation
+#      suites through the real harness, the release manifest drift gate
+#      (version/schema/dependency/deploy-artifact drift auto-blocks), and the
+#      credential/child-data leak scan over the gate artifacts;
+#   2. web-mock-e2e — the Web UI contract over real HTTP with the mock
+#      provider (zero egress, no real child data, no provider credentials);
+#   3. upgrade-rollback-drill — the synthetic drill AC 2 demands: deploy
+#      version N on an empty host, upgrade to N+1, roll back to N, all
+#      sharing one encrypted snapshot, with a dependency-drift fail-closed
+#      guard and a non-reversible-migration risk assessment in the report.
+# Manual staging→approval→release→rollback gates live in docs/RELEASE_GATE.md.
+
+on:
+  pull_request:
+    paths:
+      - 'lib/**'
+      - 'app/**'
+      - 'middleware.ts'
+      - 'prisma/**'
+      - 'scripts/**'
+      - 'release/**'
+      - 'deploy/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/r1-release-gate.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/**'
+      - 'app/**'
+      - 'middleware.ts'
+      - 'prisma/**'
+      - 'scripts/**'
+      - 'release/**'
+      - 'deploy/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/r1-release-gate.yml'
+  workflow_dispatch:
+
+# Minimal token: the gate only needs to read the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: r1-release-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Same pinned toolchain as the other R1/R0 gates.
+  NODE_VERSION: '24.21.0'
+  PNPM_VERSION: '10.34.7'
+  NEXT_TELEMETRY_DISABLED: '1'
+  CI: 'true'
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Job 1: release evaluations + release manifest gate + leak scan.
+  # -------------------------------------------------------------------------
+  release-eval-manifest:
+    name: Release evals + manifest gate (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install exact pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Install exact Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Assert the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$(node --version)" = "v${NODE_VERSION}" ]
+          [ "$(pnpm --version)" = "${PNPM_VERSION}" ]
+
+      - name: Prove the clean-environment contract (no real credentials/data)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL must stay unset in the release gate"
+            exit 1
+          fi
+          for key in DEEPSEEK_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY; do
+            if [ -n "${!key:-}" ]; then
+              echo "::error::${key} must stay unset in the release gate (no real provider credentials in CI)"
+              exit 1
+            fi
+          done
+          echo "clean environment confirmed: no DATABASE_URL, no provider keys, no real child data"
+
+      - name: Frozen-lockfile install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Run the release evaluation suites (child professional & safety)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/release-gate/cli.ts run-evals \
+            --out "${RUNNER_TEMP}/r1-eval-reports"
+
+      - name: Write the per-run release manifest record (app version + commit)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/release-gate/cli.ts manifest \
+            --out "${RUNNER_TEMP}/r1-release-manifest.json" \
+            --commit "${GITHUB_SHA}"
+          cat "${RUNNER_TEMP}/r1-release-manifest.json"
+
+      - name: Enforce the release manifest + report gate (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/release-gate/cli.ts verify \
+            --baseline release/release-manifest.json \
+            --reports "${RUNNER_TEMP}/r1-eval-reports"
+
+      - name: Upload sanitized release evidence (content-free reports + manifest)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r1-release-eval-reports
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/r1-eval-reports/*.report.json
+            ${{ runner.temp }}/r1-release-manifest.json
+
+  # -------------------------------------------------------------------------
+  # Job 2: Web Mock E2E over real HTTP (mock provider, zero egress).
+  # -------------------------------------------------------------------------
+  web-mock-e2e:
+    name: Web mock E2E (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install exact pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Install exact Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Assert the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$(node --version)" = "v${NODE_VERSION}" ]
+          [ "$(pnpm --version)" = "${PNPM_VERSION}" ]
+
+      - name: Prove the clean-environment contract (no real credentials/data)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL must stay unset in the web mock E2E"
+            exit 1
+          fi
+          for key in DEEPSEEK_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY; do
+            if [ -n "${!key:-}" ]; then
+              echo "::error::${key} must stay unset in the web mock E2E"
+              exit 1
+            fi
+          done
+          echo "clean environment confirmed"
+
+      - name: Frozen-lockfile install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Boot the web app on loopback (mock provider by default)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PORT=3123
+          node --experimental-strip-types scripts/check-startup-env.ts
+          node_modules/.bin/next start -H 127.0.0.1 -p 3123 > server.log 2>&1 &
+          echo $! > server.pid
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3123/api/health 2>/dev/null | grep -q '"status":"ok"'; then
+              echo "server healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::server did not become healthy"
+          tail -50 server.log
+          exit 1
+
+      - name: Web mock E2E round-trip over real HTTP
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/r1-web-e2e.mjs <<'E2E'
+          const base = "http://127.0.0.1:3123";
+          const fail = (message) => {
+            console.error("::error::" + message);
+            process.exit(1);
+          };
+
+          const health = await fetch(base + "/api/health");
+          if (!health.ok) fail("health endpoint not ok");
+          const healthBody = await health.json();
+          if (healthBody.status !== "ok") fail("health status not ok");
+          if (healthBody.legacyDomainGuard !== "armed") fail("legacy domain guard not armed");
+
+          const body = (id, text) => ({
+            protocolVersion: "1.0",
+            interaction: {
+              kind: "text",
+              clientRequestId: id,
+              text: { content: text, format: "plain" },
+              clientContext: { client: "web", clientVersion: "2.0.0-web" },
+            },
+          });
+          const post = (payload) =>
+            fetch(base + "/api/v1/interactions", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+
+          // 1. Submit a synthetic child turn → structured ack.
+          const first = await post(
+            body("req_e2e00000001", "[synthetic] 今天数学作业有点难，可以陪我一起开始吗"),
+          );
+          if (first.status !== 200) fail("submit did not return 200");
+          const ack = await first.json();
+          if (ack.status !== "accepted") fail("ack status not accepted");
+          if (ack.protocolVersion !== "1.0") fail("ack protocolVersion is not 1.0");
+          if (typeof ack.streamUrl !== "string" || ack.streamUrl.indexOf("/api/v1/interactions/") !== 0) {
+            fail("ack streamUrl malformed");
+          }
+          if (typeof ack.cancelUrl !== "string" || ack.cancelUrl.indexOf("/api/v1/interactions/") !== 0) {
+            fail("ack cancelUrl malformed");
+          }
+
+          // 2. Coherent SSE round-trip: started → deltas → completed → end.
+          const stream = await fetch(base + ack.streamUrl, {
+            headers: { accept: "text/event-stream" },
+          });
+          if (!stream.ok) fail("event stream not ok");
+          const raw = await stream.text();
+          const frames = raw
+            .split("\n\n")
+            .map((chunk) => {
+              const line = chunk.split("\n").find((candidate) => candidate.startsWith("data: "));
+              return line === undefined ? null : JSON.parse(line.slice(6));
+            })
+            .filter((frame) => frame !== null);
+          if (frames.length < 4) fail("event stream too short");
+          if (frames[0].kind !== "stream.started") fail("first frame is not stream.started");
+          if (frames[frames.length - 1].kind !== "stream.end") fail("last frame is not stream.end");
+          const deltas = frames.filter((frame) => frame.kind === "agent.delta");
+          if (deltas.length < 1) fail("no agent.delta frames");
+          const completed = frames.find((frame) => frame.kind === "agent.completed");
+          if (completed === undefined) fail("no agent.completed frame");
+          if (completed.payload.type !== "completed" || completed.payload.response.status !== "completed") {
+            fail("turn did not complete");
+          }
+          const joined = deltas
+            .map((frame) => (frame.payload.type === "delta" ? frame.payload.text : ""))
+            .join("");
+          const completedText =
+            completed.payload.response.content === null ? "" : completed.payload.response.content.text;
+          if (joined !== completedText) fail("streamed deltas do not equal the completed content");
+
+          // 3. Forged actor identity is rejected fail-closed (no echo).
+          const forged = body("req_e2e00000002", "[synthetic] 你好");
+          forged.interaction.actor = { role: "child", actorId: "act_impersonate1" };
+          const forgedRes = await post(forged);
+          if (forgedRes.status !== 403) fail("forged actor was not rejected with 403");
+          const forgedBody = await forgedRes.json();
+          if (forgedBody.error === undefined || forgedBody.error.code !== "CONTRACT_UNTRUSTED_IDENTITY") {
+            fail("forged actor error code mismatch");
+          }
+          if (JSON.stringify(forgedBody).indexOf("impersonate") !== -1) {
+            fail("the forged identity was echoed back");
+          }
+
+          // 4. The cancel route answers with a structured terminal status.
+          const second = await post(body("req_e2e00000003", "[synthetic] 给我讲一个长一点的小故事吧"));
+          if (second.status !== 200) fail("second submit did not return 200");
+          const ack2 = await second.json();
+          await fetch(base + ack2.streamUrl).then((response) => response.text());
+          const cancelRes = await fetch(base + ack2.cancelUrl, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              protocolVersion: "1.0",
+              turnId: ack2.turnId,
+              conversationId: ack2.conversationId,
+              reason: "user_stop",
+            }),
+          });
+          if (cancelRes.status !== 200) fail("cancel did not return 200");
+          const cancelBody = await cancelRes.json();
+          if (cancelBody.status !== "cancelled" && cancelBody.status !== "already_final") {
+            fail("cancel status unexpected");
+          }
+
+          // 5. Idempotent replay returns the duplicate ack.
+          const replay = await post(
+            body("req_e2e00000001", "[synthetic] 今天数学作业有点难，可以陪我一起开始吗"),
+          );
+          if (replay.status !== 200) fail("replay did not return 200");
+          const replayBody = await replay.json();
+          if (replayBody.status !== "duplicate") fail("replay status is not duplicate");
+          if (replayBody.turnId !== ack.turnId) fail("replay turn id mismatch");
+
+          console.log(
+            "web mock E2E OK: health, ack, coherent SSE round-trip, forged-actor 403, cancel, idempotent replay",
+          );
+          E2E
+          node /tmp/r1-web-e2e.mjs
+
+      - name: Prove zero egress beyond loopback while the server runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          server_pid="$(cat server.pid)"
+          # The server may own child sockets (next-server); include them.
+          child_pids="$(pgrep -P "${server_pid}" 2>/dev/null | tr '\n' ',' || true)"
+          pid_pattern="pid=(${server_pid},${child_pids}),"
+          # Every TCP connection owned by the app process tree must be
+          # loopback-only. (The model provider is the in-process mock:
+          # local_no_egress by construction; this is runner-level evidence.)
+          violations="$(ss -tnp 2>/dev/null | grep 'ESTAB' | grep -Ev '127\.0\.0\.1' | grep -E "${pid_pattern}" || true)"
+          if [ -n "${violations}" ]; then
+            echo "${violations}"
+            echo "::error::the app process tree opened a non-loopback connection"
+            exit 1
+          fi
+          echo "zero egress confirmed (mock provider, loopback-only)"
+
+      - name: Stop the web server
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f server.pid ]; then
+            kill -TERM "$(cat server.pid)" 2>/dev/null || true
+          fi
+          tail -20 server.log 2>/dev/null || true
+
+  # -------------------------------------------------------------------------
+  # Job 3: synthetic upgrade/rollback drill (AC 2).
+  # Empty host → deploy N → upgrade N+1 → rollback N, one shared encrypted
+  # snapshot, plus dependency-drift and state-schema risk assessment.
+  # -------------------------------------------------------------------------
+  upgrade-rollback-drill:
+    name: Upgrade/rollback drill N→N+1→N (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout (full history for the N/N+1 versions)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install exact pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Install exact Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Assert the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$(node --version)" = "v${NODE_VERSION}" ]
+          [ "$(pnpm --version)" = "${PNPM_VERSION}" ]
+
+      - name: Resolve drill versions N (base) and N+1 (head)
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          base_sha="$(git rev-parse -q --verify 'HEAD^1' || git rev-parse 'HEAD~1')"
+          if [ -z "${base_sha}" ]; then
+            echo "::error::cannot resolve the base version for the drill"
+            exit 1
+          fi
+          if [ "${base_sha}" = "${head_sha}" ]; then
+            echo "::error::base and head are the same commit; the drill needs two versions"
+            exit 1
+          fi
+          echo "drill versions: N=${base_sha} N+1=${head_sha}"
+          {
+            echo "DRILL_BASE_SHA=${base_sha}"
+            echo "DRILL_HEAD_SHA=${head_sha}"
+          } >> "$GITHUB_ENV"
+
+      - name: Dependency drift guard (AC 1 — injected dependency drift fails closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code "$DRILL_BASE_SHA" "$DRILL_HEAD_SHA" -- \
+            package.json pnpm-lock.yaml pnpm-workspace.yaml \
+            poc/dsh-child/package.json poc/dsh-child/pnpm-lock.yaml; then
+            echo "::error::dependency manifests drifted between N and N+1; a release with dependency drift requires the acknowledged release-manifest update and a reviewed drill"
+            exit 1
+          fi
+          echo "dependency manifests are identical between N and N+1"
+
+      - name: State-schema drift assessment (non-reversible migration risk)
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only "$DRILL_BASE_SHA" "$DRILL_HEAD_SHA" -- prisma/schema.prisma lib/server/snapshot || true)"
+          if [ -n "${changed}" ]; then
+            echo "${changed}"
+            echo "STATE_SCHEMA_CHANGED=true" >> "$GITHUB_ENV"
+            echo "::warning::state-schema surface changed between N and N+1 — rollback-to-N compatibility must be reviewed before release"
+          else
+            echo "STATE_SCHEMA_CHANGED=false" >> "$GITHUB_ENV"
+            echo "state-schema surface unchanged between N and N+1"
+          fi
+
+      - name: Frozen-lockfile install (on the checked-out N+1 tree)
+        run: pnpm install --frozen-lockfile
+
+      - name: 'Phase N — empty-host deploy of the base version'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git switch --detach "$DRILL_BASE_SHA"
+          pnpm install --frozen-lockfile
+          pnpm run build
+          drill_dir="${RUNNER_TEMP}/lumithink-drill"
+          rm -rf "${drill_dir}"
+          mkdir -p "${drill_dir}"
+          {
+            echo "SNAPSHOT_PATH=${drill_dir}/snapshot.bin"
+            echo "SNAPSHOT_KEY=$(openssl rand -hex 32)"
+          } > "${RUNNER_TEMP}/drill.env"
+          set -a; source "${RUNNER_TEMP}/drill.env"; set +a
+          export PORT=3123
+          node --experimental-strip-types scripts/check-startup-env.ts
+          node_modules/.bin/next start -H 127.0.0.1 -p 3123 > drill-phase-n.log 2>&1 &
+          server_pid=$!
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3123/api/health 2>/dev/null | grep -q '"status":"ok"'; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3123/api/health | grep -q '"status":"ok"' || {
+            echo "::error::phase N: server did not become healthy"; tail -30 drill-phase-n.log; exit 1;
+          }
+          token="$(curl -fsS -X POST http://127.0.0.1:3123/api/v1/guardian/session \
+            -H 'content-type: application/json' \
+            -d '{"protocolVersion":"1.0","accessCode":"lumithink-guardian-demo"}' \
+            | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).sessionToken))')"
+          status="$(curl -fsS http://127.0.0.1:3123/api/v1/guardian/authorizations -H "authorization: Bearer ${token}")"
+          echo "${status}"
+          echo "${status}" | grep -q '"switchId":"conversation_recording","enabled":false' || {
+            echo "::error::phase N: the empty host must start from the demo default state"; exit 1;
+          }
+          curl -fsS -X POST http://127.0.0.1:3123/api/v1/guardian/authorizations \
+            -H "authorization: Bearer ${token}" -H 'content-type: application/json' \
+            -d '{"protocolVersion":"1.0","action":"set_feature_switch","switchId":"conversation_recording","enabled":true}' \
+            | grep -q '"outcome":"applied"' || { echo "::error::phase N: mutation rejected"; exit 1; }
+          test -s "${SNAPSHOT_PATH}" || { echo "::error::phase N: snapshot not written"; exit 1; }
+          echo "phase N snapshot digest: $(sha256sum "${SNAPSHOT_PATH}" | awk '{print $1}')"
+          kill -TERM "${server_pid}"
+          for _ in $(seq 1 20); do kill -0 "${server_pid}" 2>/dev/null || break; sleep 1; done
+          echo "phase N (empty-host deploy) OK"
+
+      - name: 'Phase N+1 — upgrade to the head version on the same state'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git switch --detach "$DRILL_HEAD_SHA"
+          pnpm install --frozen-lockfile
+          pnpm run build
+          set -a; source "${RUNNER_TEMP}/drill.env"; set +a
+          export PORT=3123
+          node --experimental-strip-types scripts/check-startup-env.ts
+          node_modules/.bin/next start -H 127.0.0.1 -p 3123 > drill-phase-n1.log 2>&1 &
+          server_pid=$!
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3123/api/health 2>/dev/null | grep -q '"status":"ok"'; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3123/api/health | grep -q '"status":"ok"' || {
+            echo "::error::phase N+1: server did not become healthy (upgrade could not read the N-era snapshot)"; tail -30 drill-phase-n1.log; exit 1;
+          }
+          token="$(curl -fsS -X POST http://127.0.0.1:3123/api/v1/guardian/session \
+            -H 'content-type: application/json' \
+            -d '{"protocolVersion":"1.0","accessCode":"lumithink-guardian-demo"}' \
+            | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).sessionToken))')"
+          status="$(curl -fsS http://127.0.0.1:3123/api/v1/guardian/authorizations -H "authorization: Bearer ${token}")"
+          echo "${status}"
+          echo "${status}" | grep -q '"switchId":"conversation_recording","enabled":true' || {
+            echo "::error::phase N+1: the N-era state did not survive the upgrade"; exit 1;
+          }
+          audit="$(curl -fsS http://127.0.0.1:3123/api/v1/guardian/audit -H "authorization: Bearer ${token}")"
+          echo "${audit}" | grep -q '"kind":"snapshot_restored"' || {
+            echo "::error::phase N+1: snapshot restore not disclosed in the audit ring"; exit 1;
+          }
+          curl -fsS -X POST http://127.0.0.1:3123/api/v1/guardian/authorizations \
+            -H "authorization: Bearer ${token}" -H 'content-type: application/json' \
+            -d '{"protocolVersion":"1.0","action":"set_feature_switch","switchId":"conversation_recording","enabled":false}' \
+            | grep -q '"outcome":"applied"' || { echo "::error::phase N+1: mutation rejected"; exit 1; }
+          kill -TERM "${server_pid}"
+          for _ in $(seq 1 20); do kill -0 "${server_pid}" 2>/dev/null || break; sleep 1; done
+          echo "phase N+1 (upgrade preserves state) OK"
+
+      - name: 'Phase N rollback — base version reads the N+1 state'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git switch --detach "$DRILL_BASE_SHA"
+          pnpm install --frozen-lockfile
+          pnpm run build
+          set -a; source "${RUNNER_TEMP}/drill.env"; set +a
+          export PORT=3123
+          node --experimental-strip-types scripts/check-startup-env.ts
+          node_modules/.bin/next start -H 127.0.0.1 -p 3123 > drill-phase-rollback.log 2>&1 &
+          server_pid=$!
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3123/api/health 2>/dev/null | grep -q '"status":"ok"'; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3123/api/health | grep -q '"status":"ok"' || {
+            echo "::error::rollback: version N could not boot on the N+1-era snapshot (non-reversible migration!)"; tail -30 drill-phase-rollback.log; exit 1;
+          }
+          token="$(curl -fsS -X POST http://127.0.0.1:3123/api/v1/guardian/session \
+            -H 'content-type: application/json' \
+            -d '{"protocolVersion":"1.0","accessCode":"lumithink-guardian-demo"}' \
+            | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).sessionToken))')"
+          status="$(curl -fsS http://127.0.0.1:3123/api/v1/guardian/authorizations -H "authorization: Bearer ${token}")"
+          echo "${status}"
+          # The N+1-era confirmed change must be exactly what N reads back:
+          # no resurrection, no silent loss, no format wall.
+          echo "${status}" | grep -q '"switchId":"conversation_recording","enabled":false' || {
+            echo "::error::rollback: version N did not read back the N+1-era state"; exit 1;
+          }
+          audit="$(curl -fsS http://127.0.0.1:3123/api/v1/guardian/audit -H "authorization: Bearer ${token}")"
+          echo "${audit}" | grep -q '"kind":"snapshot_restored"' || {
+            echo "::error::rollback: snapshot restore not disclosed in the audit ring"; exit 1;
+          }
+          kill -TERM "${server_pid}"
+          for _ in $(seq 1 20); do kill -0 "${server_pid}" 2>/dev/null || break; sleep 1; done
+          echo "phase N rollback (state readable by N, no resurrection) OK"
+
+      - name: Write the drill report with the migration-risk assessment
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          state_changed="${STATE_SCHEMA_CHANGED:-unknown}"
+          {
+            echo '{'
+            echo '  "drill": "r1-upgrade-rollback-synthetic",'
+            echo '  "issue": "https://github.com/lybym/LumiThink/issues/22",'
+            echo "  \"baseSha\": \"${DRILL_BASE_SHA}\","
+            echo "  \"headSha\": \"${DRILL_HEAD_SHA}\","
+            echo '  "phases": ['
+            echo '    { "phase": "N", "action": "empty-host deploy of the base version", "assertions": ["health ok", "demo default state", "mutation applied", "snapshot written"] },'
+            echo '    { "phase": "N+1", "action": "upgrade on the same encrypted snapshot", "assertions": ["health ok", "N-era state survived", "snapshot_restored audited", "N+1-era mutation applied"] },'
+            echo '    { "phase": "N-rollback", "action": "roll back to the base version", "assertions": ["health ok", "N+1-era state read back by N", "snapshot_restored audited"] }'
+            echo '  ],'
+            echo "  \"dependencyDriftBetweenNAndHead\": false,"
+            echo "  \"stateSchemaChanged\": ${state_changed},"
+            echo '  "nonReversibleMigrationRisks": ['
+            echo '    "Snapshot format is lumithink.runtime-snapshot/v1; this drill PROVES version N still reads the N+1-era snapshot. A future snapshot-format bump must keep the previous version able to read the old state (or explicitly declare rollback unsupported in docs/RELEASE_GATE.md §5) — the drill fails the moment N can no longer read the N+1 state.",'
+            echo '    "Confirmed-change → snapshot write has a millisecond-level atomic-write window: a crash exactly inside it reverts that one change (disclosed in deploy/runbook.md §5). Not a data migration, but a rollback-semantics boundary.",'
+            echo '    "Tombstone replay on restore (deploy/restore.sh marker) is intentionally irreversible — a restore re-applies deletions and never resurrects erased data (ADR-0005).",'
+            echo '    "prisma/schema.prisma stays frozen (digest locked in release/release-manifest.json); SQLite persistence is deferred (TECH_STACK §3). Any schema change is a new data-modeling decision requiring migrations + migration tests before it can ship.",'
+            if [ "${state_changed}" = "true" ]; then
+              echo '    "THIS RUN: the state-schema surface (prisma schema or lib/server/snapshot) changed between N and N+1 — rollback compatibility observed by this drill must be re-reviewed in the PR."'
+            else
+              echo '    "THIS RUN: state-schema surface unchanged between N and N+1; rollback risk assessed low."'
+            fi
+            echo '  ]'
+            echo '}'
+          } > "${RUNNER_TEMP}/r1-drill-report.json"
+          # The report is a release artifact: it must be valid JSON.
+          node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')); console.log('drill report JSON OK')" "${RUNNER_TEMP}/r1-drill-report.json"
+          cat "${RUNNER_TEMP}/r1-drill-report.json"
+
+      - name: Scan the drill report for credential/child-data leaks
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types scripts/release-gate/cli.ts scan-leaks \
+            --file "${RUNNER_TEMP}/r1-drill-report.json"
+
+      - name: Upload the drill report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r1-upgrade-rollback-drill-report
+          if-no-files-found: warn
+          retention-days: 14
+          path: ${{ runner.temp }}/r1-drill-report.json
