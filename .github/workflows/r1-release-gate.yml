@@ -11,7 +11,9 @@ name: R1 release gate
 #      (version/schema/dependency/deploy-artifact drift auto-blocks), and the
 #      credential/child-data leak scan over the gate artifacts;
 #   2. web-mock-e2e — the Web UI contract over real HTTP with the mock
-#      provider (zero egress, no real child data, no provider credentials);
+#      provider (loopback-only: live zero-egress sampling across the whole
+#      traffic window with a self-test-pinned detector, no real child data,
+#      no provider credentials);
 #   3. upgrade-rollback-drill — the synthetic drill AC 2 demands: deploy
 #      version N on an empty host, upgrade to N+1, roll back to N, all
 #      sharing one encrypted snapshot, with a dependency-drift fail-closed
@@ -30,6 +32,7 @@ on:
       - 'deploy/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
+      - 'tests/release/**'
       - '.github/workflows/r1-release-gate.yml'
   push:
     branches: [main]
@@ -43,6 +46,7 @@ on:
       - 'deploy/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
+      - 'tests/release/**'
       - '.github/workflows/r1-release-gate.yml'
   workflow_dispatch:
 
@@ -223,10 +227,11 @@ jobs:
           tail -50 server.log
           exit 1
 
-      - name: Web mock E2E round-trip over real HTTP
+      - name: Web mock E2E round-trip over real HTTP + live zero-egress observation
         shell: bash
         run: |
           set -euo pipefail
+          server_pid="$(cat server.pid)"
           cat > /tmp/r1-web-e2e.mjs <<'E2E'
           const base = "http://127.0.0.1:3123";
           const fail = (message) => {
@@ -314,12 +319,20 @@ jobs:
             fail("the forged identity was echoed back");
           }
 
-          // 4. The cancel route answers with a structured terminal status.
+          // 4a. Mid-flight cancel pins the POSITIVE case (round 1 review
+          // P2-3): the turn is cancelled WITHOUT consuming its stream, so
+          // the request lands while the server still streams. The mock
+          // provider's gate-approved text is emitted as 12-code-point
+          // fragments with a 30 ms inter-frame delay (interaction-service
+          // presentation pacing), so the turn stays in the "running" state
+          // for hundreds of ms while a localhost cancel round-trip takes
+          // ~1 ms — the "cancelled" outcome is deterministic, not a race.
+          // (The abort paths themselves are additionally proven by
+          // tests/server/interaction-endpoint.spec.ts.)
           const second = await post(body("req_e2e00000003", "[synthetic] 给我讲一个长一点的小故事吧"));
           if (second.status !== 200) fail("second submit did not return 200");
           const ack2 = await second.json();
-          await fetch(base + ack2.streamUrl).then((response) => response.text());
-          const cancelRes = await fetch(base + ack2.cancelUrl, {
+          const cancelRunningRes = await fetch(base + ack2.cancelUrl, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
@@ -329,26 +342,43 @@ jobs:
               reason: "user_stop",
             }),
           });
-          if (cancelRes.status !== 200) fail("cancel did not return 200");
-          const cancelBody = await cancelRes.json();
-          // The cancel route must answer 200 with a STRUCTURED terminal
-          // result echoing the request identity. WHICH terminal status is
-          // timing-dependent over HTTP: with the recording switch OFF (the
-          // demo default), an ENDED turn is purged from the turn index
-          // (interaction-service endStream), so a cancel racing a completed
-          // turn honestly reports the indistinguishable "unknown_turn",
-          // while a mid-flight stop reports "cancelled" (the mid-flight
-          // abort paths are proven by tests/server/interaction-endpoint.spec.ts).
-          // This assertion pins the CONTRACT, not the race.
-          if (
-            cancelBody.status !== "cancelled" &&
-            cancelBody.status !== "already_final" &&
-            cancelBody.status !== "unknown_turn"
-          ) {
-            fail("cancel status unexpected: " + cancelBody.status);
+          if (cancelRunningRes.status !== 200) fail("mid-flight cancel did not return 200");
+          const cancelRunningBody = await cancelRunningRes.json();
+          if (cancelRunningBody.status !== "cancelled") {
+            fail("mid-flight cancel did not report 'cancelled': " + cancelRunningBody.status);
           }
-          if (cancelBody.protocolVersion !== "1.0" || cancelBody.turnId !== ack2.turnId || cancelBody.conversationId !== ack2.conversationId) {
-            fail("cancel result does not echo the request identity");
+          if (cancelRunningBody.protocolVersion !== "1.0" || cancelRunningBody.turnId !== ack2.turnId || cancelRunningBody.conversationId !== ack2.conversationId) {
+            fail("mid-flight cancel result does not echo the request identity");
+          }
+
+          // 4b. Cancelling an ALREADY-ENDED turn answers 200 with a
+          // structured terminal result echoing the request identity — the
+          // safe no-op CONTRACT. With the recording switch OFF (the demo
+          // default) an ended turn is purged from the turn index
+          // (interaction-service endStream), so this honestly reports the
+          // indistinguishable "unknown_turn" ("already_final" if the turn
+          // is still indexed); which one appears is demo-mode-dependent
+          // and this assertion pins the contract, not that race.
+          const cancelEndedRes = await fetch(base + ack2.cancelUrl, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              protocolVersion: "1.0",
+              turnId: ack2.turnId,
+              conversationId: ack2.conversationId,
+              reason: "user_stop",
+            }),
+          });
+          if (cancelEndedRes.status !== 200) fail("ended-turn cancel did not return 200");
+          const cancelEndedBody = await cancelEndedRes.json();
+          if (
+            cancelEndedBody.status !== "already_final" &&
+            cancelEndedBody.status !== "unknown_turn"
+          ) {
+            fail("ended-turn cancel status unexpected: " + cancelEndedBody.status);
+          }
+          if (cancelEndedBody.protocolVersion !== "1.0" || cancelEndedBody.turnId !== ack2.turnId || cancelEndedBody.conversationId !== ack2.conversationId) {
+            fail("ended-turn cancel result does not echo the request identity");
           }
 
           // 5. Idempotent replay returns the duplicate ack.
@@ -361,29 +391,152 @@ jobs:
           if (replayBody.turnId !== ack.turnId) fail("replay turn id mismatch");
 
           console.log(
-            "web mock E2E OK: health, ack, coherent SSE round-trip, forged-actor 403, cancel, idempotent replay",
+            "web mock E2E OK: health, ack, coherent SSE round-trip, forged-actor 403, mid-flight cancel (cancelled), ended-turn cancel, idempotent replay",
           );
           E2E
-          node /tmp/r1-web-e2e.mjs
+          # ----------------------------------------------------------------
+          # Zero-egress evidence (round 1 review P1-1 root-cause fix). The
+          # previous pattern `pid=(${server_pid},${child_pids}),` was ONE
+          # POSIX-ERE group — it could never match ss's one-pid-per-line
+          # output, so the old check was vacuously true (always "zero
+          # egress confirmed"). The rework below:
+          #   1. matches pids EXACTLY: every pid=<n> occurrence in a line
+          #      must be one of the app process-tree pids (a set lookup —
+          #      no regex group/alternation semantics involved);
+          #   2. treats loopback as 127.0.0.0/8 OR ::1 OR IPv4-mapped
+          #      ::ffff:127.0.0.0/8 (the old filter only knew 127.0.0.1);
+          #   3. samples `ss -tnpH` DURING the whole E2E traffic window at
+          #      10 Hz plus one final post-traffic sweep — transient
+          #      connections are now observable, not just an after-the-fact
+          #      single sample;
+          #   4. embeds a self-test that feeds fixed synthetic ss lines
+          #      through the SAME detector: the two tree-owned REAL-egress
+          #      lines MUST be caught (exactly the case the vacuous pattern
+          #      missed, empirically shown by the round 1 review) while the
+          #      loopback v4/v6/mapped and foreign-pid lines MUST stay
+          #      clean — the detector cannot silently regress without
+          #      failing this step.
+          # Chosen mechanism (disclosed): observation, NOT an nftables/
+          # iptables OUTPUT block — the hosted runner agent shares the job
+          # user, so a uid-scoped OUTPUT block would sever the runner's own
+          # control/artifact channel, and per-process network rules are not
+          # reliably available on hosted runners. Residual gap (disclosed):
+          # a connection opened AND closed entirely between two 10 Hz
+          # samples, or by a tree pid that exited before the post-traffic
+          # collection, is not observable. The mock provider is
+          # local_no_egress by construction; this step is the runner-level
+          # observation evidence on top of that design guarantee.
+          # ----------------------------------------------------------------
+          cat > /tmp/r1-egress-detector.mjs <<'DETECTOR'
+          // Zero-egress detector for `ss -tnpH` output (P1-1 root-cause fix).
+          // Usage: node r1-egress-detector.mjs <comma-separated tree pids> < samples.txt
+          // Prints every violating line (empty output = zero egress observed).
+          import { createInterface } from "node:readline";
+          const treePids = new Set(
+            (process.argv[2] ?? "")
+              .split(",")
+              .map((pid) => pid.trim())
+              .filter((pid) => pid !== ""),
+          );
+          if (treePids.size === 0) {
+            console.error("::error::egress detector called with an empty pid set");
+            process.exit(1);
+          }
+          const isLoopback = (address) =>
+            address.startsWith("127.") ||
+            address.startsWith("[::1]") ||
+            address.startsWith("[::ffff:127.");
+          const rl = createInterface({ input: process.stdin });
+          for await (const line of rl) {
+            const fields = line.trim().split(/\s+/);
+            if (fields.length < 5) continue;
+            const state = fields[0];
+            const local = fields[3];
+            const peer = fields[4];
+            if (state !== "ESTAB" && state !== "SYN-SENT") continue;
+            const owned = [...line.matchAll(/pid=(\d+)/g)].some((match) => treePids.has(match[1]));
+            if (!owned) continue;
+            if (isLoopback(local) && isLoopback(peer)) continue;
+            console.log(line);
+          }
+          DETECTOR
 
-      - name: Prove zero egress beyond loopback while the server runs
-        shell: bash
-        run: |
-          set -euo pipefail
-          server_pid="$(cat server.pid)"
-          # The server may own child sockets (next-server); include them.
-          child_pids="$(pgrep -P "${server_pid}" 2>/dev/null | tr '\n' ',' || true)"
-          pid_pattern="pid=(${server_pid},${child_pids}),"
-          # Every TCP connection owned by the app process tree must be
-          # loopback-only. (The model provider is the in-process mock:
-          # local_no_egress by construction; this is runner-level evidence.)
-          violations="$(ss -tnp 2>/dev/null | grep 'ESTAB' | grep -Ev '127\.0\.0\.1' | grep -E "${pid_pattern}" || true)"
-          if [ -n "${violations}" ]; then
-            echo "${violations}"
-            echo "::error::the app process tree opened a non-loopback connection"
+          # Embedded self-test: fixed synthetic samples, tree pids 1000+2000.
+          cat > /tmp/r1-egress-selftest-samples.txt <<'SAMPLES'
+          ESTAB      0      0 127.0.0.1:3123 127.0.0.1:55556 users:(("next-server (v15.4.2)",pid=1000,fd=28))
+          ESTAB      0      0 [::1]:3123 [::1]:55557 users:(("next-server (v15.4.2)",pid=1000,fd=29))
+          ESTAB      0      0 [::ffff:127.0.0.1]:3123 [::ffff:127.0.0.1]:55558 users:(("next-server (v15.4.2)",pid=1000,fd=31))
+          ESTAB      0      0 192.0.2.10:45678 93.184.216.34:443 users:(("next-server (v15.4.2)",pid=2000,fd=45))
+          ESTAB      0      0 10.1.2.3:45679 198.51.100.7:443 users:(("node",pid=1000,fd=12))
+          ESTAB      0      0 192.0.2.10:45680 203.0.113.9:443 users:(("curl",pid=99999,fd=7))
+          SAMPLES
+          node /tmp/r1-egress-detector.mjs "1000,2000" < /tmp/r1-egress-selftest-samples.txt > /tmp/r1-egress-selftest-caught.txt
+          caught_count="$(grep -c . /tmp/r1-egress-selftest-caught.txt || true)"
+          if [ "${caught_count}" != "2" ]; then
+            echo "::error::egress detector self-test failed: expected exactly 2 synthetic violations, caught ${caught_count}"
+            cat /tmp/r1-egress-selftest-caught.txt
             exit 1
           fi
-          echo "zero egress confirmed (mock provider, loopback-only)"
+          grep -q 'pid=2000,' /tmp/r1-egress-selftest-caught.txt || {
+            echo "::error::self-test: child-pid egress line not caught (the P1-1 vacuous-pattern regression)"
+            exit 1
+          }
+          grep -q 'pid=1000,fd=12' /tmp/r1-egress-selftest-caught.txt || {
+            echo "::error::self-test: server-pid egress line not caught"
+            exit 1
+          }
+          if grep -Eq '127\.0\.0\.1:3123|::1|99999' /tmp/r1-egress-selftest-caught.txt; then
+            echo "::error::self-test: loopback (v4/v6/mapped) or foreign-pid line wrongly flagged"
+            cat /tmp/r1-egress-selftest-caught.txt
+            exit 1
+          fi
+          echo "egress detector self-test OK: both tree-owned egress lines caught; loopback v4/v6/mapped and foreign-pid lines clean"
+
+          # Sample `ss` DURING the whole E2E traffic window (10 Hz) and take
+          # one final post-traffic sweep before judging every accumulated
+          # sample with the detector above.
+          samples="${RUNNER_TEMP}/r1-egress-samples.txt"
+          : > "${samples}"
+          (
+            while :; do
+              ss -tnpH 2>/dev/null >> "${samples}" || true
+              sleep 0.1
+            done
+          ) &
+          sampler_pid=$!
+          e2e_failed=0
+          node /tmp/r1-web-e2e.mjs || e2e_failed=1
+          ss -tnpH 2>/dev/null >> "${samples}" || true
+          kill "${sampler_pid}" 2>/dev/null || true
+          wait "${sampler_pid}" 2>/dev/null || true
+
+          # Collect the app process tree (server + ALL descendants) AFTER the
+          # traffic — the most complete pid set — then judge every sample.
+          tree_pids="${server_pid}"
+          frontier="${server_pid}"
+          while [ -n "${frontier}" ]; do
+            next_frontier=""
+            for p in ${frontier}; do
+              for c in $(pgrep -P "${p}" 2>/dev/null || true); do
+                case ",${tree_pids}," in
+                  *",${c},"*) : ;;
+                  *) tree_pids="${tree_pids},${c}"; next_frontier="${next_frontier} ${c}" ;;
+                esac
+              done
+            done
+            frontier="${next_frontier}"
+          done
+          violations="$(node /tmp/r1-egress-detector.mjs "${tree_pids}" < "${samples}")"
+          if [ -n "${violations}" ]; then
+            printf '%s\n' "${violations}"
+            echo "::error::the app process tree opened a non-loopback connection during the E2E traffic window"
+            exit 1
+          fi
+          echo "zero egress confirmed: $(wc -l < "${samples}") sampled socket lines across the whole E2E traffic window + final sweep (tree pids: ${tree_pids}; detector self-test pinned)"
+          if [ "${e2e_failed}" = "1" ]; then
+            echo "::error::web mock E2E failed"
+            exit 1
+          fi
 
       - name: Stop the web server
         if: always()
@@ -498,8 +651,11 @@ jobs:
           # The report and its leak scan run BEFORE the phases: they only
           # depend on the resolved SHAs + the assessment, and the scan needs
           # scripts/release-gate/ which exists on the N+1 tree but NOT on the
-          # version-N tree the later phases check out. The execution status
-          # of the phases is carried by the workflow run, not this artifact.
+          # version-N tree the later phases check out. This file is the PLAN
+          # + risk register; the ACTUAL per-phase execution outcomes are
+          # appended by each phase step (one content-free JSON line each)
+          # and merged into the final, self-contained report by the last
+          # job step (round 1 review P2-1).
           # tri-state: the report must stay VALID JSON even when an earlier
           # step failed and the assessment never ran (null = not assessed).
           case "${STATE_SCHEMA_CHANGED:-unknown}" in
@@ -591,10 +747,13 @@ jobs:
             -d '{"protocolVersion":"1.0","action":"set_feature_switch","switchId":"conversation_recording","enabled":true}' \
             | grep -q '"outcome":"applied"' || { echo "::error::phase N: mutation rejected"; exit 1; }
           test -s "${LUMITHINK_SNAPSHOT_PATH}" || { echo "::error::phase N: snapshot not written"; exit 1; }
-          echo "phase N snapshot digest: $(sha256sum "${LUMITHINK_SNAPSHOT_PATH}" | awk '{print $1}')"
+          phase_n_digest="$(sha256sum "${LUMITHINK_SNAPSHOT_PATH}" | awk '{print $1}')"
+          echo "phase N snapshot digest: ${phase_n_digest}"
           kill -TERM "${server_pid}"
           for _ in $(seq 1 20); do kill -0 "${server_pid}" 2>/dev/null || break; sleep 1; done
           echo "phase N (empty-host deploy) OK"
+          # Executed-outcome line (content-free), merged into the final report.
+          printf '%s\n' "{\"phase\":\"N\",\"action\":\"empty-host deploy of the base version\",\"outcome\":\"pass\",\"snapshotDigest\":\"${phase_n_digest}\"}" >> "${RUNNER_TEMP}/r1-drill-phase-outcomes.jsonl"
 
       - name: 'Phase N+1 — upgrade to the head version on the same state'
         shell: bash
@@ -634,9 +793,12 @@ jobs:
             -H "authorization: Bearer ${token}" -H 'content-type: application/json' \
             -d '{"protocolVersion":"1.0","action":"set_feature_switch","switchId":"conversation_recording","enabled":false}' \
             | grep -q '"outcome":"applied"' || { echo "::error::phase N+1: mutation rejected"; exit 1; }
+          phase_n1_digest="$(sha256sum "${LUMITHINK_SNAPSHOT_PATH}" | awk '{print $1}')"
+          echo "phase N+1 snapshot digest: ${phase_n1_digest}"
           kill -TERM "${server_pid}"
           for _ in $(seq 1 20); do kill -0 "${server_pid}" 2>/dev/null || break; sleep 1; done
           echo "phase N+1 (upgrade preserves state) OK"
+          printf '%s\n' "{\"phase\":\"N+1\",\"action\":\"upgrade on the same encrypted snapshot\",\"outcome\":\"pass\",\"snapshotDigest\":\"${phase_n1_digest}\"}" >> "${RUNNER_TEMP}/r1-drill-phase-outcomes.jsonl"
 
       - name: 'Phase N rollback — base version reads the N+1 state'
         shell: bash
@@ -674,7 +836,112 @@ jobs:
           echo "${audit}" | grep -q '"kind":"snapshot_restored"' || {
             echo "::error::rollback: snapshot restore not disclosed in the audit ring"; exit 1;
           }
+          phase_rollback_digest="$(sha256sum "${LUMITHINK_SNAPSHOT_PATH}" | awk '{print $1}')"
+          echo "phase N rollback snapshot digest: ${phase_rollback_digest}"
           kill -TERM "${server_pid}"
           for _ in $(seq 1 20); do kill -0 "${server_pid}" 2>/dev/null || break; sleep 1; done
           echo "phase N rollback (state readable by N, no resurrection) OK"
+          printf '%s\n' "{\"phase\":\"N-rollback\",\"action\":\"roll back to the base version\",\"outcome\":\"pass\",\"snapshotDigest\":\"${phase_rollback_digest}\"}" >> "${RUNNER_TEMP}/r1-drill-phase-outcomes.jsonl"
+
+      - name: Compose the final drill report with the executed phase outcomes
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Round 1 review P2-1: the drill artifact must be SELF-CONTAINED
+          # evidence. This step merges the executed per-phase outcomes into
+          # the final report. Each phase appends its outcome line ONLY
+          # after all its assertions passed; a missing line therefore means
+          # that phase did not complete — visible in the artifact, never
+          # hidden. The composer tolerates a missing outcomes file (the job
+          # failed before any phase recorded an outcome) but not a
+          # malformed line, and re-validates the composed JSON fail-closed.
+          git switch --detach "$DRILL_HEAD_SHA"
+          cat > /tmp/compose-drill-final.mjs <<'COMPOSER'
+          import { readFileSync, writeFileSync } from "node:fs";
+          const [baseFile, outcomesFile, outFile] = process.argv.slice(2, 5);
+          const fail = (message) => {
+            console.error("::error::" + message);
+            process.exit(1);
+          };
+          if (baseFile === undefined || outcomesFile === undefined || outFile === undefined) {
+            fail("composer requires the base report, outcomes file and output paths");
+          }
+          let base;
+          try {
+            base = JSON.parse(readFileSync(baseFile, "utf8"));
+          } catch {
+            fail("base drill report is missing or not valid JSON");
+          }
+          if (base === null || typeof base !== "object" || Array.isArray(base)) {
+            fail("base drill report is not an object");
+          }
+          let raw = null;
+          try {
+            raw = readFileSync(outcomesFile, "utf8");
+          } catch (error) {
+            if (error.code !== "ENOENT") fail("phase outcomes file is unreadable");
+          }
+          const outcomes =
+            raw === null
+              ? []
+              : raw
+                  .split("\n")
+                  .filter((line) => line.trim() !== "")
+                  .map((line, index) => {
+                    let value;
+                    try {
+                      value = JSON.parse(line);
+                    } catch {
+                      fail("phase outcome line " + (index + 1) + " is not valid JSON");
+                    }
+                    if (
+                      value === null || typeof value !== "object" || Array.isArray(value) ||
+                      typeof value.phase !== "string" || value.phase.length === 0 ||
+                      value.outcome !== "pass" ||
+                      (value.snapshotDigest !== undefined &&
+                        !/^[0-9a-f]{64}$/.test(value.snapshotDigest))
+                    ) {
+                      fail("phase outcome line " + (index + 1) + " has an unexpected shape");
+                    }
+                    return value;
+                  });
+          const expectedPhases = ["N", "N+1", "N-rollback"];
+          const final = {
+            ...base,
+            phaseOutcomes: outcomes,
+            allPhasesPassed: expectedPhases.every((phase) =>
+              outcomes.some((entry) => entry.phase === phase && entry.outcome === "pass"),
+            ),
+          };
+          writeFileSync(outFile, JSON.stringify(final, null, 2) + "\n");
+          JSON.parse(readFileSync(outFile, "utf8"));
+          console.log(
+            "final drill report composed: phaseOutcomes=" +
+              outcomes.length +
+              " allPhasesPassed=" +
+              final.allPhasesPassed,
+          );
+          COMPOSER
+          if ! node /tmp/compose-drill-final.mjs \
+            "${RUNNER_TEMP}/r1-drill-report.json" \
+            "${RUNNER_TEMP}/r1-drill-phase-outcomes.jsonl" \
+            "${RUNNER_TEMP}/r1-drill-report-final.json"; then
+            echo "::error::final drill report composition failed"
+            exit 1
+          fi
+          # The final report is a release artifact like the base report:
+          # it must pass the same leak scan (needs scripts/release-gate/,
+          # which is why the tree is switched back to the N+1 HEAD above).
+          node --experimental-strip-types scripts/release-gate/cli.ts scan-leaks \
+            --file "${RUNNER_TEMP}/r1-drill-report-final.json"
+
+      - name: Upload the final drill report (self-contained phase outcomes)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r1-upgrade-rollback-drill-report-final
+          if-no-files-found: warn
+          retention-days: 14
+          path: ${{ runner.temp }}/r1-drill-report-final.json
 

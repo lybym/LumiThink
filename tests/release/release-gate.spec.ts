@@ -329,3 +329,58 @@ test("leak scan: credentials and non-synthetic child refs are found, demo refs a
   assert.ok(!JSON.stringify(findings).includes("sk-abc123"));
   assert.ok(!JSON.stringify(findings).includes("chd_student_009"));
 });
+
+test("leak scan: every credential rule fires on its own synthetic shape (round 1 review P2-4)", () => {
+  // The three rules the first leak test did not cover individually, each
+  // proven to fire on its own synthetic fixture AND to stay silent on the
+  // boundary near-miss. Fixtures are assembled at RUNTIME so no full token
+  // shape ever exists in the repository source; every value is dead,
+  // obviously-synthetic padding.
+  const positiveCases: readonly (readonly [rule: string, fixture: string])[] = [
+    ["github_pat_shape", `github_pat_${"SYNTHETIC0".repeat(3)}`], // ≥20 of [A-Za-z0-9_]
+    ["aws_access_key_shape", `AKIA${"0".repeat(16)}`], // AKIA + exactly 16 of [0-9A-Z]
+    ["slack_token_shape", `xoxb-${"synthetic"}-${"0".repeat(12)}`], // xox[baprs]- + ≥10 of [A-Za-z0-9-]
+  ];
+  for (const [rule, fixture] of positiveCases) {
+    const findings = scanForLeaks([{ name: "fixture.json", content: JSON.stringify({ t: fixture }) }]);
+    assert.deepEqual(
+      findings.map((finding) => finding.rule),
+      [rule],
+      `rule ${rule} fires on its own synthetic shape`,
+    );
+    // The no-echo rule holds for these findings too.
+    assert.ok(!JSON.stringify(findings).includes(fixture), `rule ${rule} never echoes content`);
+  }
+
+  // Boundary near-misses must NOT fire (the rules are shape-exact).
+  const nearMisses = [
+    `github_pat_${"x".repeat(19)}`, // one character too short
+    `AKIA${"0".repeat(15)}`, // one character too short
+    `xoxz-${"0".repeat(12)}`, // 'z' is outside the [baprs] token-type set
+    `AKIA${"a".repeat(16)}`, // lowercase is not an AWS access-key shape
+  ];
+  for (const nearMiss of nearMisses) {
+    assert.deepEqual(
+      scanForLeaks([{ name: "near.json", content: JSON.stringify({ t: nearMiss }) }]),
+      [],
+      `near-miss shape stays clean: ${nearMiss.slice(0, 12)}…`,
+    );
+  }
+
+  // One artifact carrying all three synthetic shapes reports all three
+  // rules in rule order (each credential family is caught independently).
+  const all = scanForLeaks([
+    {
+      name: "all.json",
+      content: JSON.stringify({
+        a: positiveCases[0][1],
+        b: positiveCases[1][1],
+        c: positiveCases[2][1],
+      }),
+    },
+  ]);
+  assert.deepEqual(
+    all.map((finding) => finding.rule),
+    ["github_pat_shape", "aws_access_key_shape", "slack_token_shape"],
+  );
+});

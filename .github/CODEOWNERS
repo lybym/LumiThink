@@ -1,0 +1,15 @@
+# Structural path protection for the R1 release gate (round 1 review P2-2).
+#
+# `release/release-manifest.json` is the reviewed version-traceability
+# baseline: regeneration → review diff → commit IS the release-approval
+# acknowledgment (docs/RELEASE_GATE.md §2). This file names the maintainer
+# as the code owner of that baseline so the "re-approval" requirement can
+# become STRUCTURAL, not merely procedural.
+#
+# NOTE: a CODEOWNERS file alone does not enforce review. It takes effect
+# when branch protection enables "Require review from Code Owners" — a
+# repository-settings action that cannot be set from a PR (documented as a
+# follow-up in the PR description and docs/RELEASE_GATE.md §2).
+# GitHub discovers this file at the repository root, .github/ or docs/;
+# .github/CODEOWNERS is the conventional location.
+/release/release-manifest.json @lybym

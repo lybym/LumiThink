@@ -26,11 +26,11 @@
 - 持久化事实：`prisma/schema.prisma` SHA-256（冻结）+ 运行时快照格式（`lumithink.runtime-snapshot/v1`）；
 - 部署物摘要：`deploy/` 六个制品的 SHA-256。
 
-**漂移 = 阻断（AC：版本/Schema 漂移、依赖版本变化自动 BLOCK）**：CI 用同一构建器从代码重建 live manifest，与基线逐键深比较；任何差异（含未知键/键缺失）`fail-closed`。**确认漂移的唯一方式**是再生成清单 → 人工评审 diff → 提交：这是发布审批的显式确认动作，不是可以绕过的绊脚石。每次运行的 per-run 记录（含 commit SHA）只进 CI artifact，绝不提交（commit 字段不可能稳定）。本仓库无 git tag，版本追溯 = manifest 基线 + per-run 记录中的精确 commit SHA + 各 gate 的 run URL。
+**漂移 = 阻断（AC：版本/Schema 漂移、依赖版本变化自动 BLOCK）**：CI 用同一构建器从代码重建 live manifest，与基线逐键深比较；任何差异（含未知键/键缺失）`fail-closed`。**确认漂移的唯一方式**是再生成清单 → 人工评审 diff → 提交：这是发布审批的显式确认动作，不是可以绕过的绊脚石。每次运行的 per-run 记录（含 commit SHA）只进 CI artifact，绝不提交（commit 字段不可能稳定）。本仓库无 git tag，版本追溯 = manifest 基线 + per-run 记录中的精确 commit SHA + 各 gate 的 run URL。结构性保护（Round 1 评审 P2-2）：`.github/CODEOWNERS` 已将 `release/release-manifest.json` 指认给维护者（@lybym）；其强制生效需仓库设置开启 "Require review from Code Owners"（分支保护设置无法由 PR 设置），当前为记录在案的推荐项。
 
 ## 3. 手工门禁：staging → 审批 → 发布 → 回退
 
-**Gate 1 — staging（准入）**：发布候选 = 一个 PR HEAD SHA。进入 staging 当且仅当：四个 R1/R0 workflow 在该 SHA（或其 PR merge commit）全绿；`r1-upgrade-rollback-drill-report` artifact 已生成且 `stateSchemaChanged` 与风险条目被读过；评测 artifact（内容无关报告 + per-run manifest）已归档。staging 环境部署按 `deploy/runbook.md` §2 在**合成数据**上执行（不对真实儿童开放）。
+**Gate 1 — staging（准入）**：发布候选 = 一个 PR HEAD SHA。进入 staging 当且仅当：四个 R1/R0 workflow 在该 SHA（或其 PR merge commit）全绿；`r1-upgrade-rollback-drill-report-final` artifact（自含逐阶段执行结果 `phaseOutcomes`）已生成且 `allPhasesPassed`、`stateSchemaChanged` 与风险条目被读过；评测 artifact（内容无关报告 + per-run manifest）已归档。staging 环境部署按 `deploy/runbook.md` §2 在**合成数据**上执行（不对真实儿童开放）。
 
 **Gate 2 — 审批（人工）**：具备 `approve` 权限的评审人对 PR 完成独立 review（本工作流中由独立 REVIEW_AGENT + 人工复核执行）。审批必须显式覆盖：manifest diff（若有漂移）、状态 schema 变化（若有）、评测报告中的 `pendingHumanReview` 清单（人类评审项只记录、不打分、不阻断——由人判断是否可发布）、安全/隐私回归。审批动作 = PR approve；无 approve 的发布是违规操作。
 
@@ -46,7 +46,7 @@
 2. **Phase N — 空主机部署基版本**：`git switch --detach` 到 N（PR 场景 = main 基点），frozen install、build、以全新快照目录 + 随机快照密钥 boot，健康检查通过，监护人登录（公开合成演示码），断言演示默认态后确认 `conversation_recording=true`，快照落盘并输出摘要；
 3. **Phase N+1 — 同状态升级**：切到 N+1，重建、以**同一**快照路径/密钥 boot，断言 N 时代状态存活、审计环含 `snapshot_restored`，再确认 `conversation_recording=false`；
 4. **Phase N — 回滚**：切回 N，重建、同快照 boot，断言 N 能读回 N+1 时代的最终状态（双向兼容、无复活、无静默丢失、无格式墙），审计环含 `snapshot_restored`；
-5. **风险报告**：drill report JSON 记录三个阶段、两个 SHA、依赖/状态 schema 漂移评估与不可回退迁移风险条目；泄漏扫描后上传 artifact。
+5. **风险报告**：drill report JSON 记录三个阶段、两个 SHA、依赖/状态 schema 漂移评估与不可回退迁移风险条目；泄漏扫描后上传 artifact。每个阶段完成后向最终报告（`r1-upgrade-rollback-drill-report-final`）追加**实际执行结果**（`phaseOutcomes`：逐阶段 outcome + 快照 digest，内容无关）——artifact 自含过程证据，缺失的 outcome 行即代表该阶段未完成（Round 1 评审 P2-1）。
 
 诚实边界：演练证明的是**单机快照状态面**的升级/回滚兼容行为；真实主机运维（公网暴露、离机备份、systemd 内核差异）仍按 runbook §9 由运维执行，CI 无法证明。
 
@@ -62,7 +62,8 @@
 
 ## 6. 泄漏告警与权限越权（自动 BLOCK）
 
-- **泄漏扫描**（`scripts/release-gate/` `scanForLeaks`）：对评测报告、manifest、drill report 扫描 Provider 凭据形状（`sk-…`/`gh*_…`/`github_pat_…`/`AKIA…`/`xox…`）、私钥块与一切非 `chd_demo_` 语法子域的儿童引用；命中即阻断发布。深度防御：报告本身内容无关（fail-closed 解析器拒绝任何载荷字段），扫描覆盖的是清单与其余 artifact 类别；匹配内容永不回显（no-echo）。CI 环境守卫断言 `DATABASE_URL` 与全部 Provider key 未设置——日志与 CI 里不存在真实儿童记录/密钥/原始音频。
+- **泄漏扫描**（`scripts/release-gate/` `scanForLeaks`）：对评测报告、manifest、drill report 及其最终版扫描 Provider 凭据形状（`sk-…`/`gh*_…`/`github_pat_…`/`AKIA…`/`xox…`，逐规则单测钉住）、私钥块与一切非 `chd_demo_` 语法子域的儿童引用；命中即阻断发布。深度防御：报告本身内容无关（fail-closed 解析器拒绝任何载荷字段），扫描覆盖的是清单与其余 artifact 类别；匹配内容永不回显（no-echo）。CI 环境守卫断言 `DATABASE_URL` 与全部 Provider key 未设置——日志与 CI 里不存在真实儿童记录/密钥/原始音频。**范围边界（显式披露）**：扫描对象是 gate 产物文件，不含 CI/步骤日志（日志只承载值无关的状态行与失败摘要；报告内容无关构造 + 环境守卫使日志天然不携带扫描对象内容）。
+- **零出网观测（Web Mock E2E）**：E2E 步骤以 10 Hz 对 `ss -tnpH` 全程采样（覆盖整个流量窗口 + 结束后补扫），检测器按**精确 pid 集合**匹配应用进程树（服务端 + 全部后代），回环集合 = `127.0.0.0/8` + `::1` + IPv4-mapped `::ffff:127.0.0.0/8`；检测器内嵌自测把固定违规样本钉进 CI（树内真实出网线必须被抓到、回环/外来 pid 线必须保持干净）。机制为**观测**而非 runner 级 nftables/iptables 阻断（hosted runner 的 agent 与 job 同 uid，uid 级 OUTPUT 阻断会切断 runner 自身控制/制品通道）；残余盲区：两个采样点之间打开并关闭的连接、或结束后才收集前退出的树内 pid——Mock Provider 本身 `local_no_egress` by construction，本步为其上的 runner 级观测证据（Round 1 评审 P1-1 修复）。
 - **权限越权**：评测套件含未注册工具、注册工具越界、隐私越权导出与 Prompt 注入场景（`safety_failure`/`unreviewed_evidence`/关键 SKIP 触发器直接套件 FAIL）；域边界测试（`tests/domain/boundary.spec.ts`、legacy guard）与 Web E2E 的伪造身份 403 断言在 CI 中逐层自动阻断。安全高危失败没有人工放行通道。
 
 ## 7. CI 无法证明的部分（诚实披露）
