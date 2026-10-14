@@ -62,11 +62,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          systemd-analyze verify deploy/lumithink.service 2>&1 | tee /tmp/unit-verify.log
-          # systemd-analyze verify warns about missing local users/files (they
-          # exist only on the deploy host); FAIL only on real syntax errors.
-          if grep -qE 'Error|error|Failed to parse' /tmp/unit-verify.log; then
+          # `|| true` is required: systemd-analyze verify exits non-zero for
+          # deploy-host facts (missing ExecStart binary / service user), and
+          # pipefail would abort this step before the real arbiter below.
+          # The grep — not the exit code — decides: only "Failed to parse /
+          # Failed to load" lines are real unit/repo errors.
+          systemd-analyze verify deploy/lumithink.service 2>&1 | tee /tmp/unit-verify.log || true
+          # "Failed to parse …" lines are real unit syntax errors; a
+          # "Failed to load" line means the unit file itself is missing from
+          # the repo. The missing ExecStart binary / service user are
+          # DEPLOY-HOST facts (they exist only after the runbook install
+          # steps) and must not fail the runner-side syntax check.
+          if grep -qE 'Failed to parse|Failed to load' /tmp/unit-verify.log; then
             echo "::error::systemd unit has parse errors"
+            grep -E 'Failed to parse|Failed to load' /tmp/unit-verify.log
             exit 1
           fi
           echo "unit syntax OK"

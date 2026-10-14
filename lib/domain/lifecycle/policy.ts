@@ -64,6 +64,7 @@ export type LifecycleProtocolVersion = (typeof LIFECYCLE_PROTOCOL_VERSIONS)[numb
 /** Where a data kind physically lives in the current deployment. */
 export const DATA_STORAGE_LOCATIONS = Object.freeze([
   "process_memory", // in-memory, process-local (the entire current web MVP)
+  "host_filesystem", // local single-host file (R1-08 encrypted snapshot; never public)
   "vendor_side", // outside this system (third-party provider, when enabled)
   "none", // no storage path exists at all today (audio)
 ] as const);
@@ -164,6 +165,22 @@ export const DATA_KIND_POLICIES: readonly Readonly<DataKindPolicy>[] = Object.fr
     storedIn: "process_memory",
     retention: "有界台账 500 条；键 (verifiedActor, requestId) → 结构化 ack 引用 + 载荷 64-bit FNV-1a 摘要（无正文）",
     deletedBy: "随进程生命周期（内容无关：仅 id 与摘要，同 runtime_trace）",
+  }),
+  Object.freeze({
+    // R1-08 (issue #20): the encrypted runtime snapshot is the FIRST
+    // host-filesystem data kind. It embeds the retained child text of the
+    // kinds above (only when the recording switch is on), so
+    // carriesChildText is honestly TRUE and its delete contract is the
+    // erase-then-rewrite rule: the erase's confirmed-mutation hook
+    // immediately rewrites the snapshot WITHOUT the deleted content, an
+    // older-archive restore is forced through the deletion replay
+    // (replay_child_deletions — ADR-0005 §2.3), and destroying archived
+    // copies is the operator's physical-delete step (deploy/runbook.md §5).
+    dataKind: "runtime_snapshot_file",
+    carriesChildText: true,
+    storedIn: "host_filesystem",
+    retention: "AES-256-GCM 整档加密单文件（0600，非公网）；每次确认型变更/周期/停机整体覆盖；归档副本窗口由运维轮转策略界定（deploy/runbook.md §5）",
+    deletedBy: "erase 后立即重写快照（新档不再含被删正文）+ 旧档恢复强制删除重放（replay_child_deletions）+ 归档文件物理删除",
   }),
   Object.freeze({
     dataKind: "audio",

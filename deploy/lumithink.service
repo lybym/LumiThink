@@ -35,7 +35,7 @@ RestartSec=5
 ProtectSystem=strict
 # State: the encrypted snapshot + build output only.
 ReadWritePaths=/var/lib/lumithink
-ProtectHome=read-paths
+ProtectHome=read-only
 ReadOnlyPaths=/opt/lumithink
 NoExecPaths=/var/lib/lumithink
 ExecPaths=/usr /bin /opt/lumithink/node_modules

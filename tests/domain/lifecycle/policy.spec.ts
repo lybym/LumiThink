@@ -78,6 +78,10 @@ const EXPECTED_DATA_KIND_ROWS = Object.freeze([
   "gateway_audit",
   "deletion_ledger",
   "idempotency_ledger",
+  // R1-08 (issue #20): the encrypted runtime snapshot — the first
+  // host-filesystem data kind, registered with its erase-then-rewrite +
+  // restore-replay delete contract.
+  "runtime_snapshot_file",
   "audio",
   "vendor_side",
 ]);
@@ -88,6 +92,20 @@ test("the retention matrix pins its exact data-kind row set (admission speed bum
     [...EXPECTED_DATA_KIND_ROWS],
     "a new data kind must consciously extend this pin + both doc mirrors (issue #21 AC 3, review P2-2)",
   );
+});
+
+test("the R1-08 encrypted snapshot row is registered honestly (text-carrying, encrypted, replay-backed)", () => {
+  const snapshotRow = DATA_KIND_POLICIES.find((policy) => policy.dataKind === "runtime_snapshot_file");
+  assert.ok(snapshotRow !== undefined, "the runtime snapshot must be enumerated in the matrix");
+  assert.equal(
+    snapshotRow.carriesChildText,
+    true,
+    "the snapshot embeds retained child text (recording on) — the honest answer",
+  );
+  assert.equal(snapshotRow.storedIn, "host_filesystem");
+  assert.ok(snapshotRow.retention.includes("AES-256-GCM"), "encryption at rest is mandatory and pinned");
+  assert.ok(snapshotRow.deletedBy.includes("replay_child_deletions"), "the restore-replay delete contract is pinned");
+  assert.ok(DATA_STORAGE_LOCATIONS.includes("host_filesystem"));
 });
 
 test("the idempotency ledger row is registered content-free (review R1 P0-1)", () => {
