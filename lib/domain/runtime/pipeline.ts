@@ -918,6 +918,29 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
       }
 
       // ---- 7. Output layer (real safety pipeline, fail-closed wrapper) --------
+      // R1-08 (issue #20 交付范围 4): the successful model call lands as an
+      // auditable structural fact carrying the request id and the turn's
+      // token cost — value-free, ids grammar-checked (mask otherwise).
+      if (completed !== null) {
+        trace.push({
+          type: "model.completed",
+          component: "model_gateway",
+          atMs: clock(),
+          traceId: traceIds.traceId,
+          turnId: traceIds.turnId,
+          sessionId: traceIds.sessionId,
+          requestId: isValidContractId("requestId", event.requestId)
+            ? (event.requestId as string)
+            : "[unverified]",
+          modelId: completed.modelId,
+          providerId: completed.providerId,
+          attempts: completed.attempts,
+          inputTokens: completed.usage.inputTokens,
+          outputTokens: completed.usage.outputTokens,
+          costMicroUsd: completed.costMicroUsd,
+          durationMs: clock() - startedAtMs,
+        });
+      }
       const draft = completed?.fullText ?? "";
       const draftCodePoints = [...draft].length;
       if (draftCodePoints > RUNTIME_MAX_OUTPUT_CODE_POINTS) {

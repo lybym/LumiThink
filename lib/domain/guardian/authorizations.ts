@@ -767,6 +767,10 @@ export const GUARDIAN_AUDIT_KINDS = Object.freeze([
   "data_export",
   "data_erase",
   "data_erase_replay",
+  // R1-08 (issue #20) encrypted runtime snapshot: the boot-time restore
+  // discloses its structural result (source + bounded counts; never any
+  // snapshot content or key material).
+  "snapshot_restored",
 ] as const);
 
 export type GuardianAuditKind = (typeof GUARDIAN_AUDIT_KINDS)[number];

@@ -381,3 +381,136 @@ export function isActorRole(value: unknown): value is ActorRole {
 export function admitMemoryEntry(entry: MemoryEntry): Readonly<MemoryEntry> {
   return ingestDomainFact(entry) as Readonly<MemoryEntry>;
 }
+
+const MEMORY_ENTRY_FIELDS = Object.freeze([
+  // Candidate half (validated through parseMemoryCandidateInput).
+  "schemaVersion",
+  "subjectRef",
+  "type",
+  "claim",
+  "source",
+  "observedAt",
+  "expiresAt",
+  "reviewAt",
+  "sensitivity",
+  // Entry-only fields.
+  "memoryId",
+  "supersedes",
+  "status",
+  "proposedByRole",
+  "createdAt",
+  "confirmedAt",
+  "confirmedByRole",
+  "supersededAt",
+  "revision",
+]);
+
+/**
+ * R1-08 (issue #20): parse + re-validate one FULL stored memory entry for
+ * the encrypted-snapshot restore path. Fail-closed: unknown fields,
+ * unregistered enums, malformed ids/timestamps and status-inconsistent
+ * confirmation facts are all rejected. This is the restore-side twin of the
+ * service's own construction paths — a snapshot cannot inject an entry
+ * shape the live service could never have produced.
+ */
+export function parseMemoryEntry(value: unknown): Readonly<MemoryEntry> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new ContractValidationError([
+      problem("CONTRACT_FIELD_INVALID", "entry", "memory entry must be an object."),
+    ]);
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!MEMORY_ENTRY_FIELDS.includes(key)) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_INVALID", `entry.${key}`, "memory entry carries an unknown field."),
+      ]);
+    }
+  }
+  for (const field of ["schemaVersion", "subjectRef", "type", "claim", "source", "observedAt", "expiresAt", "reviewAt", "sensitivity"]) {
+    if (!(field in record)) {
+      throw new ContractValidationError([
+        problem("CONTRACT_FIELD_MISSING", `entry.${field}`, "memory entry is missing a required candidate field."),
+      ]);
+    }
+  }
+  // The candidate half is validated by the exact intake parser (bounded
+  // claim, registered type/source/sensitivity, timestamp grammars).
+  parseMemoryCandidateInput({
+    schemaVersion: record.schemaVersion,
+    subjectRef: record.subjectRef,
+    type: record.type,
+    claim: record.claim,
+    source: record.source,
+    observedAt: record.observedAt,
+    expiresAt: record.expiresAt,
+    reviewAt: record.reviewAt,
+    sensitivity: record.sensitivity,
+  });
+
+  const problems: ContractProblem[] = [];
+  if (typeof record.memoryId !== "string" || !MEMORY_ID_PATTERN.test(record.memoryId)) {
+    problems.push(problem("CONTRACT_FIELD_INVALID", "entry.memoryId", "memoryId must match the memory id grammar."));
+  }
+  if (record.supersedes !== null && (typeof record.supersedes !== "string" || !MEMORY_ID_PATTERN.test(record.supersedes))) {
+    problems.push(problem("CONTRACT_FIELD_INVALID", "entry.supersedes", "supersedes must be null or a memory id."));
+  }
+  if (!isOneOf(record.status, MEMORY_STATUSES)) {
+    problems.push(
+      problem("CONTRACT_FIELD_INVALID", "entry.status", `status must be one of: ${MEMORY_STATUSES.join(" | ")}.`),
+    );
+  }
+  if (!isActorRole(record.proposedByRole)) {
+    problems.push(problem("CONTRACT_FIELD_INVALID", "entry.proposedByRole", "proposedByRole must be a registered actor role."));
+  }
+  validateTimestamp(record.createdAt, "entry.createdAt", problems);
+  if (record.confirmedAt !== null && record.confirmedAt !== undefined) {
+    validateTimestamp(record.confirmedAt, "entry.confirmedAt", problems);
+  }
+  if (record.confirmedByRole !== null && record.confirmedByRole !== undefined && !isActorRole(record.confirmedByRole)) {
+    problems.push(problem("CONTRACT_FIELD_INVALID", "entry.confirmedByRole", "confirmedByRole must be null or a registered actor role."));
+  }
+  if (record.supersededAt !== null && record.supersededAt !== undefined) {
+    validateTimestamp(record.supersededAt, "entry.supersededAt", problems);
+  }
+  if (record.revision !== 1) {
+    problems.push(problem("CONTRACT_FIELD_INVALID", "entry.revision", "revision must be 1."));
+  }
+  // Status consistency (the shapes the service itself can produce).
+  if (record.status === "confirmed" || record.status === "superseded") {
+    if (record.confirmedAt === null || record.confirmedAt === undefined || record.confirmedByRole === null || record.confirmedByRole === undefined) {
+      problems.push(problem("CONTRACT_FIELD_INVALID", "entry.confirmedAt", "a confirmed/superseded entry must carry its confirmation facts."));
+    }
+  }
+  if (record.status === "candidate" || record.status === "expired") {
+    if (record.confirmedAt !== null && record.confirmedAt !== undefined) {
+      problems.push(problem("CONTRACT_FIELD_INVALID", "entry.confirmedAt", "a candidate/expired entry must not carry confirmation facts."));
+    }
+  }
+  if (record.status === "superseded" && (record.supersededAt === null || record.supersededAt === undefined)) {
+    problems.push(problem("CONTRACT_FIELD_INVALID", "entry.supersededAt", "a superseded entry must carry supersededAt."));
+  }
+  if (problems.length > 0) {
+    throw new ContractValidationError(problems);
+  }
+  return ingestDomainFact({
+    schemaVersion: record.schemaVersion,
+    subjectRef: record.subjectRef,
+    type: record.type,
+    claim: record.claim,
+    source: record.source,
+    observedAt: record.observedAt,
+    expiresAt: record.expiresAt ?? null,
+    reviewAt: record.reviewAt ?? null,
+    sensitivity: record.sensitivity,
+    memoryId: record.memoryId,
+    supersedes: record.supersedes ?? null,
+    status: record.status,
+    proposedByRole: record.proposedByRole,
+    createdAt: record.createdAt,
+    confirmedAt: record.confirmedAt ?? null,
+    confirmedByRole: record.confirmedByRole ?? null,
+    supersededAt: record.supersededAt ?? null,
+    revision: 1,
+  }) as Readonly<MemoryEntry>;
+}

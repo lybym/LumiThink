@@ -189,3 +189,14 @@ ID 由服务端生成；错误回显只允许通过同一语法**再验证**的 
 - **审计**（交付范围 4）：`data_view / data_export / data_erase / data_erase_replay` 进监护人审计环（target=childRef，detail=有界计数）；删除台账为独立结构。**审计与台账结构上没有承载被删除正文的字段**（emit 校验拒绝未知字段，测试强制）；`memory.expire_cleanup` 的未授权拒绝从静默变为可观测 rejected 审计事实（承 #26 P2-4）。
 - **诚实边界**：删除台账与全部状态为进程内存（跨进程恢复台账不随行——持久化台账属 TECH_STACK §3 待定项；当前部署无离线备份，故该边界暂无实际暴露面）；供应商侧删除不可由本系统担保，撤销授权后仅保证不再发起新请求（§12.3 门禁不变）。
 - **范围注记维持**：§12.3 的"带会话的监护人取消入口属 R1-09+"**未被 #21 吸收**（issue #21 交付范围无取消项），注记保持原样留给后续 Issue。
+
+### 12.7 部署硬化（R1-08）
+
+> 对应：[Issue #20](https://github.com/lybym/LumiThink/issues/20) ｜ [Roadmap R1-08](./ROADMAP.md) ｜ [ADR-0006](./adr/0006-deployment-secrets-backup-v0.md) ｜ [deploy/runbook.md](../deploy/runbook.md)
+
+**无新增端点、无合同版本变更**。R1-08 的 API 面变化：
+
+- **登录凭据**：`POST /api/v1/guardian/session` 的验证材料改为可注入——配置 `LUMITHINK_GUARDIAN_ACCESS_CODE` / `LUMITHINK_ADMIN_ACCESS_CODE`（成对，服务端仅持 SHA-256 摘要）时验真实码、公开演示码被拒；未配置保持披露的演示模式。拒绝语义不变（统一 `CONTRACT_UNTRUSTED_IDENTITY`，锁定仍为全局 15 分钟统一拒绝——按账户锁定留作显式后续，ADR-0006 §2.2）。`seed` 审计新增 `credential_mode` 条目披露本进程模式。
+- **审计 kind**：追加 `snapshot_restored`（启动恢复披露：来源 + 有界计数；`actorRole: null`）。
+- **安全头**：全路由追加每请求 nonce CSP（`script-src 'nonce-…' 'strict-dynamic'`；残余披露见 ADR-0006 §2.3）；既有 nosniff / DENY framing / referrer-policy 不变；HSTS 属 TLS 代理层。
+- **快照恢复**：纯部署层（`LUMITHINK_SNAPSHOT_*` + deploy/ 脚本），无 API 面；恢复后活跃会话不随行（fail-closed 重登录），删除台账重放语义见 §12.6 与 MEMORY_POLICY 备份边界（R1-08 更新）。
