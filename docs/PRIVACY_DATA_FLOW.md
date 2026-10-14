@@ -12,7 +12,7 @@
    ▼
 交互服务 (lib/server/interaction-service)
    ├─ 合同解析 → 授权门禁（家庭 consent，撤销即拒，含重放）
-   ├─ 幂等台账 (verifiedActor, requestId)        [进程内存，仅结构]
+   ├─ 幂等台账 (verifiedActor, requestId)        [进程内存，仅结构：入账的是载荷 64-bit FNV-1a 摘要，不含正文（#21 评审 P0-1 修复）]
    ├─ 会话记录 conversation record                [进程内存：id 映射；正文仅记录开关开启时保留]
    │
    ▼
@@ -36,18 +36,19 @@ SSE 事件缓冲（临时工件）→ 输出 Gate 批准后的短句片段 → �
 
 | 数据种类 | 采集点 | 存储位置 | 键控 | 保留 | 删除路径 | 审计 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 会话历史正文 | 儿童文本轮次 | 进程内存 | conversationId | 仅记录开关开启；每会话 40 条上限 | 主体级 erase | data_erase 计数 |
-| 轮次事件缓冲（临时工件） | 每轮输出 | 进程内存 | traceId | 关闭时终态即清；开启时进程生命周期 | 主体级 erase（先取消在途） | data_erase 计数 |
-| 会话/轮次 id 映射 | 服务分配 | 进程内存 | actorId/conversationId/sessionId | 进程生命周期 | 主体级 erase | — |
-| DSH 会话映射 | 管线会话绑定 | 进程内存 | lumiSessionId | 会话生命周期 | 主体级 erase（关闭映射） | — |
-| 领域记忆条目 | 儿童陈述/监护人输入/agent 提议（候选） | 进程内存 | subjectRef + memoryId | 记忆域规则 | 逐条 deleteMemory（谱系）+ 主体级 erase | memory.* + data_erase |
-| 监护人审计环 | 安全相关事件 | 进程内存 | seq | 500 条有界 | 随进程生命周期 | 自身即审计 |
-| 记忆审计环 | 记忆操作 | 进程内存 | seq | 256 条有界 | purgeAudit | 自身即审计 |
-| 运行时 Trace | 每轮 | 进程内存 | traceId | 进程生命周期（value-free） | 随进程生命周期 | — |
-| 网关审计 | 每次模型调用 | 进程内存 | requestId | 进程生命周期（value-free） | 随进程生命周期 | — |
-| 删除台账 | erase/replay | 进程内存 | recordId | 100 条有界 | 随进程生命周期 | data_erase_replay |
-| 音频 | — | **无采集路径** | — | 不采集不存储 | 不适用 | — |
-| 供应商侧数据 | 第三方外发开启时 | 供应商侧 | 供应商控制 | 供应商评审结论（待核实） | **不可由本系统担保** | 传输前门禁计数 |
+| 会话历史正文 (`conversation_history`) | 儿童文本轮次 | 进程内存 | conversationId | 仅记录开关开启；每会话 40 条上限 | 主体级 erase | data_erase 计数 |
+| 轮次事件缓冲（临时工件） (`turn_stream_events`) | 每轮输出 | 进程内存 | traceId | 关闭时终态即清；开启时进程生命周期 | 主体级 erase（先取消在途） | data_erase 计数 |
+| 会话/轮次 id 映射（`conversation_history`、`turn_stream_events` 的索引字段） | 服务分配 | 进程内存 | actorId/conversationId/sessionId | 进程生命周期 | 主体级 erase | — |
+| DSH 会话映射 (`dsh_session_mapping`) | 管线会话绑定 | 进程内存 | lumiSessionId | 会话生命周期 | 主体级 erase（关闭映射） | — |
+| 领域记忆条目 (`memory_entries`) | 儿童陈述/监护人输入/agent 提议（候选） | 进程内存 | subjectRef + memoryId | 记忆域规则 | 逐条 deleteMemory（谱系）+ 主体级 erase | memory.* + data_erase |
+| 监护人审计环 (`guardian_audit`) | 安全相关事件 | 进程内存 | seq | 500 条有界 | 随进程生命周期 | 自身即审计 |
+| 记忆审计环 (`memory_audit`) | 记忆操作 | 进程内存 | seq | 256 条有界 | purgeAudit | 自身即审计 |
+| 运行时 Trace (`runtime_trace`) | 每轮 | 进程内存 | traceId | 进程生命周期（value-free） | 随进程生命周期 | — |
+| 网关审计 (`gateway_audit`) | 每次模型调用 | 进程内存 | requestId | 进程生命周期（value-free） | 随进程生命周期 | — |
+| 删除台账 (`deletion_ledger`) | erase/replay | 进程内存 | recordId | 100 条有界 | 随进程生命周期 | data_erase_replay |
+| 幂等台账 (`idempotency_ledger`) | 每次被接受的提交（含被安全门拦截的输入） | 进程内存 | (verifiedActor, requestId) | 500 条有界；仅结构化 ack 引用 + 载荷 64-bit FNV-1a 摘要（无正文） | 随进程生命周期（内容无关，同 runtime_trace） | — |
+| 音频 (`audio`) | — | **无采集路径** | — | 不采集不存储 | 不适用 | — |
+| 供应商侧数据 (`vendor_side`) | 第三方外发开启时 | 供应商侧 | 供应商控制 | 供应商评审结论（待核实） | **不可由本系统担保** | 传输前门禁计数 |
 
 ## 3. 角色可见性矩阵（actor-scoping）
 
@@ -74,7 +75,7 @@ SSE 事件缓冲（临时工件）→ 输出 Gate 批准后的短句片段 → �
 5. 关闭被删会话的 DSH 会话映射（被删会话无法恢复进入旧 DSH 会话）；
 6. 写入结构化 tombstone（删除台账），供恢复后重放删除。
 
-value-free 结构（Trace / 网关审计 / 各审计环）不携带正文，因此不属于"清除后可恢复儿童正文"的暴露面；它们的清理边界各自独立（MEMORY_POLICY §2）。
+value-free 结构（Trace / 网关审计 / 各审计环 / 幂等台账——入账载荷仅 id 与 64-bit 摘要，#21 评审 P0-1 修复后不含正文）不携带正文，因此不属于"清除后可恢复儿童正文"的暴露面；它们的清理边界各自独立（MEMORY_POLICY §2）。
 
 ## 5. 变更审查规则（AC 3）
 

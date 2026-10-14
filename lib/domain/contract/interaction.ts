@@ -562,12 +562,44 @@ export function parseInteractionEvent(value: unknown): Readonly<InteractionEvent
   return Object.freeze(record as unknown as InteractionEvent);
 }
 
-/** Fingerprint of a request's semantic payload for idempotency decisions. */
+/**
+ * Content-free 64-bit FNV-1a digest of the canonical semantic payload
+ * (issue #21 review round 1 P0-1): the fingerprint is STORED in the
+ * server-side idempotency ledger, so it must never embed the child's
+ * verbatim text — the ledger stores only this bounded digest plus ids.
+ * FNV-1a is pure JS (the domain layer imports no node builtins; same
+ * algorithm family as lib/domain/safety/trace.ts) and deterministic, so
+ * the #13 idempotency semantics are unchanged: both sides of the
+ * replay-vs-409 comparison are computed by this same function. The
+ * digest is a client-bug guard (request-id reuse), not a security
+ * control; a 64-bit collision would only make one actor's own
+ * different-payload retry replay its own earlier ack.
+ */
+function fnv1a64Hex(value: string): string {
+  let hash = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  const mask = 0xffffffffffffffffn;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= BigInt(value.charCodeAt(index));
+    hash = (hash * prime) & mask;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+/**
+ * Fingerprint of a request's semantic payload for idempotency decisions:
+ * the 64-bit FNV-1a digest (16 lowercase hex chars) of the canonical JSON
+ * of {protocolVersion, kind, conversationId, text{content, format}} —
+ * content-free by construction (no verbatim text survives anywhere it is
+ * stored).
+ */
 export function fingerprintInteractionRequest(request: Readonly<InteractionRequest>): string {
-  return canonicalJson({
-    protocolVersion: request.protocolVersion,
-    kind: request.interaction.kind,
-    conversationId: request.interaction.conversationId ?? null,
-    text: { content: request.interaction.text.content, format: request.interaction.text.format },
-  });
+  return fnv1a64Hex(
+    canonicalJson({
+      protocolVersion: request.protocolVersion,
+      kind: request.interaction.kind,
+      conversationId: request.interaction.conversationId ?? null,
+      text: { content: request.interaction.text.content, format: request.interaction.text.format },
+    }),
+  );
 }

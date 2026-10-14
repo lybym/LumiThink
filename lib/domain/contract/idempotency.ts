@@ -38,7 +38,11 @@ export interface StoredInteraction {
   readonly turnId: string;
   readonly traceId: string;
   readonly acceptedAt: string;
-  /** canonicalJson fingerprint of the accepted semantic payload. */
+  /**
+   * Content-free digest (64-bit FNV-1a, 16 hex chars) of the accepted
+   * semantic payload's canonical JSON — never the payload text itself
+   * (issue #21 review round 1 P0-1: the ledger must not store child text).
+   */
   readonly fingerprint: string;
 }
 

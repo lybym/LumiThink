@@ -26,6 +26,7 @@ import {
   GUARDIAN_FAMILY_CHILD_REF,
 } from "../../lib/domain/guardian/authorizations.ts";
 import {
+  createGuardianService,
   ADMIN_DEMO_ACCESS_CODE,
   GUARDIAN_DEMO_ACCESS_CODE,
 } from "../../lib/server/guardian-service.ts";
@@ -214,6 +215,16 @@ test("erase: cross-session retrieval becomes 0 and no store keeps recoverable ch
     JSON.stringify(runtime.lifecycle.deletionRecords()),
   ].join("\n");
   assert.ok(!surfaces.includes(claim), "deleted content must not survive in any audit/ledger surface");
+  // Review R1 P0-1 regression: the idempotency ledger is serialized too —
+  // it must not carry the verbatim submitted text (it stores the payload
+  // digest only), so erase-completeness claims stay true.
+  const ledgerEntries = runtime.service.idempotencySnapshot(childActor().actorId);
+  assert.ok(ledgerEntries.length >= 2, "precondition: accepted submissions are ledgered");
+  const ledgerJson = JSON.stringify(ledgerEntries);
+  assert.ok(!ledgerJson.includes(claim), "the idempotency ledger must not carry child text");
+  for (const entry of ledgerEntries) {
+    assert.match(entry.fingerprint, /^[0-9a-f]{16}$/, "the stored fingerprint is a content-free digest");
+  }
   // The memory audit ring records the hard-delete facts without the claim.
   assert.ok(runtime.memory.auditSnapshot().some((entry) => entry.action === "memory.delete" && entry.outcome === "purged"));
   // The guardian audit has the structured erase fact.
@@ -239,6 +250,18 @@ test("recording defaults to OFF: no conversation text is retained and ended buff
   assert.equal(snapshot.turnStreams.total, 0);
   const lateStream = runtime.service.openEventStream({ actor: childActor(), traceId: ack.traceId });
   assert.equal(lateStream.kind, "error", "ended turn buffers do not outlive their consumers");
+
+  // Review R1 P0-1 default-state assertion: with recording OFF the ledger
+  // still records the accepted request, but only as ids + a payload digest —
+  // the verbatim text never enters it (默认最小化采集 holds for EVERY store).
+  const ledgerEntries = runtime.service.idempotencySnapshot(childActor().actorId);
+  assert.equal(ledgerEntries.length, 1);
+  const serializedLedger = JSON.stringify(ledgerEntries);
+  assert.ok(
+    !serializedLedger.includes("喜欢太空主题的故事"),
+    "the idempotency ledger is content-free even in the default (recording OFF) state",
+  );
+  assert.match(ledgerEntries[0]?.fingerprint ?? "", /^[0-9a-f]{16}$/, "the ledgered fingerprint is a digest, not text");
 
   // Export with recording off carries no conversation text.
   const auth = loginAs(runtime, GUARDIAN_DEMO_ACCESS_CODE);
@@ -505,4 +528,206 @@ test("an unauthorized expire-cleanup attempt is now observable in the memory aud
   assert.ok(last !== undefined);
   assert.equal(last.outcome, "rejected");
   assert.deepEqual([...last.ruleIds], ["memory.unauthorized"]);
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1 P2-1: erase vs a submit racing inside the settle window
+// ---------------------------------------------------------------------------
+
+test("a submit racing inside the erase settle window is aborted and nothing of it survives", async () => {
+  const runtime = createWebMvpRuntime();
+  const auth = loginAs(runtime, GUARDIAN_DEMO_ACCESS_CODE);
+
+  // S1: submitted, NOT drained — still running (paced fragments) when the
+  // erase lands, so the erase enters its bounded settle.
+  const s1 = await runtime.service.submitInteraction({ body: submitBody(), actor: childActor() });
+  assert.equal(s1.kind, "ack");
+  if (s1.kind !== "ack") {
+    throw new Error("unreachable");
+  }
+  const ack1 = s1.body;
+
+  // Start the erase WITHOUT awaiting: it snapshots the streams, aborts S1
+  // and then settles — yielding the event loop (the race window).
+  const erasePromise = runtime.guardian.eraseChildData({
+    authorization: auth,
+    body: { protocolVersion: "1.0", action: "erase_child_data" },
+  });
+
+  // S2 lands INSIDE the window, after the erase's snapshot: pre-fix its
+  // stream was registered too late to be aborted or deleted.
+  const s2 = await runtime.service.submitInteraction({ body: submitBody(), actor: childActor() });
+  assert.equal(s2.kind, "ack");
+  if (s2.kind !== "ack") {
+    throw new Error("unreachable");
+  }
+  const ack2 = s2.body;
+  const s2SessionId = runtime.service
+    .childDataSnapshot(childActor().actorId)
+    .conversations.find((c) => c.conversationId === ack2.conversationId)?.sessionId;
+  assert.ok(s2SessionId !== undefined, "precondition: the window conversation exists before the final pass");
+
+  // The child connects to S2's stream before the erase finishes it.
+  const s2Stream = runtime.service.openEventStream({ actor: childActor(), traceId: ack2.traceId });
+  assert.equal(s2Stream.kind, "stream");
+
+  const erase = await erasePromise;
+  assert.equal(erase.kind, "ok");
+  const eraseBody = (erase.kind === "ok" ? erase.body : null) as {
+    purged: { conversations: number; turnStreams: number; dshSessions: number };
+  } | null;
+  assert.ok(eraseBody !== null);
+  assert.ok(eraseBody.purged.turnStreams >= 2, "BOTH turns are accounted as revoked (snapshot + window)");
+  assert.ok(eraseBody.purged.conversations >= 2);
+
+  // Nothing of the window-submitted turn survives: no conversation, no
+  // stream buffers, no turn-index entries (cancel falls back to the
+  // existence-hiding unknown_turn no-op).
+  const snapshot = runtime.service.childDataSnapshot(childActor().actorId);
+  assert.equal(snapshot.conversations.length, 0);
+  assert.equal(snapshot.turnStreams.total, 0);
+  assert.equal(runtime.service.openEventStream({ actor: childActor(), traceId: ack1.traceId }).kind, "error");
+  assert.equal(runtime.service.openEventStream({ actor: childActor(), traceId: ack2.traceId }).kind, "error");
+  for (const ack of [ack1, ack2]) {
+    const cancel = await runtime.service.cancelTurn({
+      actor: childActor(),
+      urlTurnId: ack.turnId,
+      body: { protocolVersion: "1.0", turnId: ack.turnId, conversationId: ack.conversationId, reason: "user_stop" },
+    });
+    assert.equal(cancel.kind, "result");
+    if (cancel.kind === "result") {
+      assert.equal(
+        (cancel.body as { status: string }).status,
+        "unknown_turn",
+        "the erased turn index no longer resolves (no orphaned buffer)",
+      );
+    }
+  }
+
+  // The DSH mapping of the window-created session is closed too (the erase
+  // reports the erased sessions; the lifecycle closes their mappings).
+  const descriptor = runtime.pipeline.sessionMapper.describe(s2SessionId);
+  assert.ok(descriptor !== null, "the window session's mapping still exists as a terminal record");
+  assert.equal(descriptor.state, "closed");
+  assert.equal(runtime.lifecycle.inventory().dshSessions.mapped, 0);
+
+  // The connected child receives the revoked stream: a system-cancel frame
+  // and an end — never completed output content.
+  assert.ok(s2Stream.kind === "stream");
+  if (s2Stream.kind !== "stream") {
+    throw new Error("unreachable");
+  }
+  const frames: StreamEvent[] = [];
+  for await (const frame of s2Stream.events) {
+    const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
+    assert.ok(dataLine !== undefined);
+    frames.push(parseStreamEvent(JSON.parse(dataLine.slice("data: ".length)) as unknown));
+  }
+  assert.ok(
+    frames.some((frame) => frame.kind === "turn.cancelled" && (frame.payload as { by?: string }).by === "system"),
+    "the window turn was revoked by the erase (cancelledBy=system)",
+  );
+  assert.ok(
+    frames.every((frame) => frame.kind !== "agent.completed"),
+    "no completed output frame reaches the child from the revoked turn",
+  );
+  assert.ok(
+    !frames.map((frame) => JSON.stringify(frame)).join("\n").includes("[Mock 演示]"),
+    "no gate-approved output text reaches the child from the revoked turn",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1 test gaps: bounded ledgers + unwired lifecycle provider
+// ---------------------------------------------------------------------------
+
+test("the idempotency ledger is bounded at 500 and evicts the oldest entry (replay window)", async () => {
+  const runtime = createWebMvpRuntime();
+  // R1 opens the conversation; its ledger entry is the insertion-order head.
+  const firstBody = submitBody();
+  const first = await runtime.service.submitInteraction({ body: firstBody, actor: childActor() });
+  assert.equal(first.kind, "ack");
+  if (first.kind !== "ack") {
+    throw new Error("unreachable");
+  }
+  const conversationId = first.body.conversationId;
+  // 500 further submissions (distinct requestIds) push the first entry out
+  // of the bounded 500-entry ledger.
+  for (let index = 0; index < 500; index += 1) {
+    const result = await runtime.service.submitInteraction({
+      body: submitBody(conversationId),
+      actor: childActor(),
+    });
+    assert.equal(result.kind, "ack");
+    if (result.kind !== "ack") {
+      throw new Error("unreachable");
+    }
+  }
+  // A RECENT entry still replays (idempotent retry intact)…
+  const recentBody = submitBody(conversationId);
+  const recent = await runtime.service.submitInteraction({ body: recentBody, actor: childActor() });
+  assert.equal(recent.kind, "ack");
+  if (recent.kind !== "ack") {
+    throw new Error("unreachable");
+  }
+  const recentReplay = await runtime.service.submitInteraction({ body: recentBody, actor: childActor() });
+  assert.equal(recentReplay.kind, "ack");
+  if (recentReplay.kind !== "ack") {
+    throw new Error("unreachable");
+  }
+  assert.equal(recentReplay.body.status, "duplicate");
+  assert.equal(recentReplay.body.turnId, recent.body.turnId);
+  // …while the EVICTED first request replays as a FRESH acceptance (its
+  // ledger entry is gone) — the eviction path is observable behavior.
+  const evictedReplay = await runtime.service.submitInteraction({ body: firstBody, actor: childActor() });
+  assert.equal(evictedReplay.kind, "ack");
+  if (evictedReplay.kind !== "ack") {
+    throw new Error("unreachable");
+  }
+  assert.equal(evictedReplay.body.status, "accepted", "the evicted head entry no longer replays");
+  assert.notEqual(evictedReplay.body.turnId, first.body.turnId, "the evicted request re-executes as a new turn");
+});
+
+test("the deletion ledger is bounded at 100 and evicts the oldest tombstone", async () => {
+  const runtime = createWebMvpRuntime();
+  const auth = loginAs(runtime, GUARDIAN_DEMO_ACCESS_CODE);
+  for (let index = 0; index < 101; index += 1) {
+    const erase = await runtime.guardian.eraseChildData({
+      authorization: auth,
+      body: { protocolVersion: "1.0", action: "erase_child_data" },
+    });
+    assert.equal(erase.kind, "ok");
+  }
+  const records = runtime.lifecycle.deletionRecords();
+  assert.equal(records.length, 100, "the tombstone ledger stays bounded at 100");
+  assert.equal(records[0]?.seq, 2, "the oldest tombstone (seq 1) was evicted");
+  assert.equal(records[records.length - 1]?.seq, 101);
+});
+
+test("an unwired lifecycle provider fails closed with CONTRACT_INTERNAL on every data surface", async () => {
+  const guardian = createGuardianService();
+  const login = guardian.sessionLogin({ body: { protocolVersion: "1.0", accessCode: GUARDIAN_DEMO_ACCESS_CODE } });
+  assert.equal(login.kind, "ok");
+  if (login.kind !== "ok") {
+    throw new Error("unreachable");
+  }
+  const token = `Bearer ${(login.body as { sessionToken: string }).sessionToken}`;
+  const inventory = guardian.getChildDataInventory({ authorization: token });
+  assert.equal(inventory.kind, "error");
+  if (inventory.kind === "error") {
+    assert.equal(inventory.envelope.error.code, "CONTRACT_INTERNAL");
+  }
+  const exportResult = guardian.exportChildData({ authorization: token });
+  assert.equal(exportResult.kind, "error");
+  if (exportResult.kind === "error") {
+    assert.equal(exportResult.envelope.error.code, "CONTRACT_INTERNAL");
+  }
+  const erase = await guardian.eraseChildData({
+    authorization: token,
+    body: { protocolVersion: "1.0", action: "erase_child_data" },
+  });
+  assert.equal(erase.kind, "error");
+  if (erase.kind === "error") {
+    assert.equal(erase.envelope.error.code, "CONTRACT_INTERNAL");
+  }
 });

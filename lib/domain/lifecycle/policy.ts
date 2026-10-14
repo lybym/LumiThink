@@ -9,8 +9,10 @@
  * every data kind the web MVP keeps is enumerated here with WHERE it lives,
  * whether it can carry child text, and WHICH lifecycle operation deletes it.
  * The lifecycle spec tests assert matrix integrity (every text-bearing kind
- * has a hard-delete path); docs mirror this table and any NEW data kind must
- * add a row here + a row in docs/PRIVACY_DATA_FLOW.md + review.
+ * has a hard-delete path) AND pin the exact row set AND mirror the rows
+ * into docs/MEMORY_POLICY.md §2 + docs/PRIVACY_DATA_FLOW.md §2 mechanically
+ * (review round 1 P2-2) — any NEW data kind must add a row here + a row in
+ * BOTH doc matrices + review.
  *
  * Deletion semantics (issue #21 交付范围 3):
  * - erase is a subject-wide HARD delete across 领域记忆 (memory entries),
@@ -149,6 +151,19 @@ export const DATA_KIND_POLICIES: readonly Readonly<DataKindPolicy>[] = Object.fr
     storedIn: "process_memory",
     retention: "有界台账 100 条 tombstone；仅 id 与计数，无正文",
     deletedBy: "随进程生命周期（用于恢复后重删；跨进程恢复需持久化台账——TECH_STACK §3 待定项）",
+  }),
+  Object.freeze({
+    // Review round 1 P0-1: the idempotency ledger is enumerated explicitly.
+    // Since the fingerprint fix it stores ONLY the 64-bit FNV-1a digest of
+    // the semantic payload (lib/domain/contract/interaction.ts) plus ack
+    // ids — no verbatim text — so it is content-free like runtime_trace and
+    // needs no erase path; tests/domain/lifecycle/policy.spec.ts pins this
+    // row set and mirrors it into both doc matrices mechanically.
+    dataKind: "idempotency_ledger",
+    carriesChildText: false,
+    storedIn: "process_memory",
+    retention: "有界台账 500 条；键 (verifiedActor, requestId) → 结构化 ack 引用 + 载荷 64-bit FNV-1a 摘要（无正文）",
+    deletedBy: "随进程生命周期（内容无关：仅 id 与摘要，同 runtime_trace）",
   }),
   Object.freeze({
     dataKind: "audio",

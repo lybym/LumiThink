@@ -71,6 +71,8 @@ export interface LifecycleInteractionPort {
     readonly conversations: number;
     readonly historyEntries: number;
     readonly turnStreams: number;
+    /** SessionIds of the erased conversations (incl. settle-window ones). */
+    readonly sessions: readonly string[];
   }>;
 }
 
@@ -152,9 +154,15 @@ export function createDataLifecycleService(
     // mappings can be closed afterwards (the snapshot is the only place the
     // sessionId ↔ conversationId pairing is still observable).
     const snapshot = interaction.childDataSnapshot(childActorId);
-    const sessionIds = [...new Set(snapshot.conversations.map((c) => c.sessionId))];
+    const sessionIds = new Set(snapshot.conversations.map((c) => c.sessionId));
 
     const interactionResult = await interaction.eraseChildData(childActorId);
+    // Review round 1 P2-1: conversations created while the erase was
+    // settling are reported by the erase itself (their pairing is gone from
+    // the snapshot) — their DSH mappings must close too.
+    for (const sessionId of interactionResult.sessions) {
+      sessionIds.add(sessionId);
+    }
 
     // 领域记忆: per-entry hard delete through the memory domain's own
     // authorized path (each delete purges the full supersedes lineage).

@@ -64,7 +64,7 @@ ID 由服务端生成；错误回显只允许通过同一语法**再验证**的 
 
 - 同 `clientRequestId` + 同语义 fingerprint → **replay**：返回原 turn/trace 的 ack（`status:"duplicate"`），不重复执行。
 - 同 `clientRequestId` + 不同 fingerprint（含改内容或指向其他会话）→ `CONTRACT_DUPLICATE_REQUEST`（409）。
-- fingerprint 用 canonical JSON 计算，**排除** `clientContext`（客户端升级后重试语义不变）。
+- fingerprint 为 canonical JSON 语义载荷的 64-bit FNV-1a **摘要**（16 位十六进制，不嵌正文——幂等台账因此 content-free，#21 评审 P0-1 修复），**排除** `clientContext`（客户端升级后重试语义不变）。
 
 响应（ack，Schema：`urn:…:interaction-ack`）：`{ protocolVersion, requestId, conversationId, turnId, traceId, status: "accepted" | "duplicate", streamUrl, cancelUrl, acceptedAt }`。
 

@@ -214,13 +214,32 @@ export interface InteractionService {
    * R1-09 server-internal lifecycle surface: subject-wide hard delete of
    * every conversation record, retained history entry and turn stream
    * (running turns are aborted first) of one actor. Returns structural
-   * counts only — the deleted content is never returned.
+   * counts only — the deleted content is never returned. `sessions` lists
+   * the erased conversations' sessionIds (including conversations created
+   * while the erase was settling — review round 1 P2-1) so the lifecycle
+   * service can close their DSH mappings after the records are gone.
    */
   eraseChildData(actorId: unknown): Promise<{
     readonly conversations: number;
     readonly historyEntries: number;
     readonly turnStreams: number;
+    readonly sessions: readonly string[];
   }>;
+  /**
+   * R1-09 review round 1 (P0-1) internal observability surface: the
+   * idempotency-ledger entries of one actor. Content-free by construction
+   * (requestId + ack ids + the 64-bit payload digest — never the submitted
+   * text). Never exposed over HTTP as-is; used by lifecycle tests to prove
+   * the ledger carries no child content.
+   */
+  idempotencySnapshot(actorId: unknown): readonly {
+    readonly requestId: string;
+    readonly conversationId: string;
+    readonly turnId: string;
+    readonly traceId: string;
+    readonly acceptedAt: string;
+    readonly fingerprint: string;
+  }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +408,14 @@ const MAX_HISTORY_ENTRIES = 40;
 const DEFAULT_FRAGMENT_CODE_POINTS = 12;
 const DEFAULT_INTER_FRAME_DELAY_MS = 30;
 const DEFAULT_CANCEL_SETTLE_MS = 5_000;
+/**
+ * Bounded re-scan rounds of the erase settle loop (review round 1 P2-1):
+ * each round aborts streams that surfaced while the previous settle was
+ * yielding. Three rounds bound the erase even under a pathological submit
+ * storm; anything still running after the last round stays consumption-
+ * revoked and is deleted by the final synchronous pass.
+ */
+const MAX_ERASE_SETTLE_ROUNDS = 3;
 
 /**
  * The cancel event's `by` role. Text interactions and cancels only admit
@@ -1087,29 +1114,66 @@ export function createInteractionService(options: InteractionServiceOptions): In
       readonly conversations: number;
       readonly historyEntries: number;
       readonly turnStreams: number;
+      readonly sessions: readonly string[];
     }> {
       if (typeof actorId !== "string") {
-        return { conversations: 0, historyEntries: 0, turnStreams: 0 };
+        return { conversations: 0, historyEntries: 0, turnStreams: 0, sessions: [] };
       }
+      /** Distinct owned streams this erase revoked or deleted (accounting). */
+      const revokedStreams = new Set<string>();
+      /** Bounded settle: the streams' terminal ticks or 1s, whichever first. */
+      const settleStreams = async (streams: readonly TurnStream[]): Promise<void> => {
+        await Promise.race([
+          Promise.all(streams.map((stream) => stream.ended)),
+          delayAbortable(1_000, new AbortController().signal),
+        ]);
+      };
+      const abortRunning = (streams: readonly TurnStream[]): void => {
+        for (const stream of streams) {
+          if (stream.status === "running") {
+            // Honest attribution: the abort is performed by the SERVER
+            // lifecycle operation (cancelledBy=system, content-free frame);
+            // the guardian's operator identity lives in the data_erase
+            // audit entry of the guardian service.
+            stream.cancelledBy = "system";
+            stream.controller.abort();
+          }
+        }
+      };
       // 1. Abort every running turn of this actor first (data erase wins over
-      // in-flight work; cancelled output never reaches the child). Honest
-      // attribution: the abort is performed by the SERVER lifecycle
-      // operation — the guardian's operator identity lives in the
-      // data_erase audit entry of the guardian service.
+      // in-flight work; cancelled output never reaches the child).
       const ownedStreams = [...turnStreams.values()].filter((stream) => stream.actorId === actorId);
       for (const stream of ownedStreams) {
-        if (stream.status === "running") {
-          stream.cancelledBy = "system";
-          stream.controller.abort();
-        }
+        revokedStreams.add(stream.traceId);
       }
+      abortRunning(ownedStreams);
       // 2. Give the runners their terminal tick (bounded; a runner that has
       // not settled by then still had its consumption revoked via abort).
-      await Promise.race([
-        Promise.all(ownedStreams.map((stream) => stream.ended)),
-        delayAbortable(1_000, new AbortController().signal),
-      ]);
-      // 3. Hard-delete every owned conversation record (ids + history text).
+      await settleStreams(ownedStreams);
+      // 2b. Review round 1 P2-1: the settle above YIELDS the event loop, so
+      // a submit interleaving inside the window registers NEW streams after
+      // the snapshot in step 1. Re-scan until quiescent (bounded rounds) and
+      // abort every late stream the same way — its output must never reach
+      // the child either. A pathological submit storm cannot spin the erase
+      // forever: after the last round any straggler stays consumption-
+      // revoked and the final pass below still deletes it.
+      for (let round = 0; round < MAX_ERASE_SETTLE_ROUNDS; round += 1) {
+        const lateStreams = [...turnStreams.values()].filter(
+          (stream) => stream.actorId === actorId && stream.status === "running",
+        );
+        if (lateStreams.length === 0) {
+          break;
+        }
+        for (const stream of lateStreams) {
+          revokedStreams.add(stream.traceId);
+        }
+        abortRunning(lateStreams);
+        await settleStreams(lateStreams);
+      }
+      // 3./4. FINAL SYNCHRONOUS PASS — no await between this enumeration and
+      // the deletions, so no submit can interleave anymore (single-threaded
+      // event loop): the erase cannot return while a window-submitted turn's
+      // buffer or index entry survives.
       let historyEntries = 0;
       const erasedConversations = new Set<string>();
       const erasedSessions = new Set<string>();
@@ -1123,17 +1187,58 @@ export function createInteractionService(options: InteractionServiceOptions): In
       for (const conversationId of erasedConversations) {
         conversations.delete(conversationId);
       }
-      // 4. Hard-delete every owned turn stream + its turn index entry (the
+      // Hard-delete every owned turn stream + its turn index entry (the
       // event buffers carry child text: 临时工件 must not survive the erase).
-      for (const stream of ownedStreams) {
-        turnStreams.delete(stream.traceId);
-        turnIndex.delete(stream.turnId);
+      // Streams that already ended were self-purged when recording is OFF
+      // (endStream) — they are accounted via revokedStreams either way.
+      for (const stream of turnStreams.values()) {
+        if (stream.actorId === actorId) {
+          revokedStreams.add(stream.traceId);
+          turnStreams.delete(stream.traceId);
+          turnIndex.delete(stream.turnId);
+        }
       }
       return {
         conversations: erasedConversations.size,
         historyEntries,
-        turnStreams: ownedStreams.length,
+        turnStreams: revokedStreams.size,
+        sessions: [...erasedSessions],
       };
+    },
+
+    idempotencySnapshot(actorId: unknown): readonly {
+      readonly requestId: string;
+      readonly conversationId: string;
+      readonly turnId: string;
+      readonly traceId: string;
+      readonly acceptedAt: string;
+      readonly fingerprint: string;
+    }[] {
+      if (typeof actorId !== "string") {
+        return Object.freeze([]);
+      }
+      const prefix = `${actorId}\u0000`;
+      const entries: {
+        requestId: string;
+        conversationId: string;
+        turnId: string;
+        traceId: string;
+        acceptedAt: string;
+        fingerprint: string;
+      }[] = [];
+      for (const [key, stored] of idempotencyLedger) {
+        if (key.startsWith(prefix)) {
+          entries.push({
+            requestId: stored.requestId,
+            conversationId: stored.conversationId,
+            turnId: stored.turnId,
+            traceId: stored.traceId,
+            acceptedAt: stored.acceptedAt,
+            fingerprint: stored.fingerprint,
+          });
+        }
+      }
+      return Object.freeze(entries);
     },
   });
 }

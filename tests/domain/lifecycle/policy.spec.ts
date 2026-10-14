@@ -5,6 +5,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { ContractValidationError } from "../../../lib/domain/contract/core.ts";
@@ -56,6 +57,131 @@ test("the deletion ledger is bounded and the pinned subject is the family child"
   assert.ok(Number.isInteger(MAX_DELETION_LEDGER_RECORDS) && MAX_DELETION_LEDGER_RECORDS > 0);
   assert.equal(LIFECYCLE_FAMILY_CHILD_REF, "chd_demo_001");
   assert.equal(lifecycleOperatorRole("guardian"), "guardian");
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1 (P2-2): the admission gate is MECHANICAL — the exact row
+// set is pinned and both doc matrices are mirrored by machine, so an
+// unregistered store can no longer ship with a green suite (P0-1 was the
+// live demonstration of that hole).
+// ---------------------------------------------------------------------------
+
+/** The exact row set of the retention matrix, in order (speed bump). */
+const EXPECTED_DATA_KIND_ROWS = Object.freeze([
+  "conversation_history",
+  "turn_stream_events",
+  "dsh_session_mapping",
+  "memory_entries",
+  "memory_audit",
+  "guardian_audit",
+  "runtime_trace",
+  "gateway_audit",
+  "deletion_ledger",
+  "idempotency_ledger",
+  "audio",
+  "vendor_side",
+]);
+
+test("the retention matrix pins its exact data-kind row set (admission speed bump)", () => {
+  assert.deepEqual(
+    DATA_KIND_POLICIES.map((policy) => policy.dataKind),
+    [...EXPECTED_DATA_KIND_ROWS],
+    "a new data kind must consciously extend this pin + both doc mirrors (issue #21 AC 3, review P2-2)",
+  );
+});
+
+test("the idempotency ledger row is registered content-free (review R1 P0-1)", () => {
+  const ledger = DATA_KIND_POLICIES.find((policy) => policy.dataKind === "idempotency_ledger");
+  assert.ok(ledger !== undefined, "the idempotency ledger must be enumerated in the matrix");
+  assert.equal(
+    ledger.carriesChildText,
+    false,
+    "the ledger stores only the 64-bit payload digest + ids (P0-1 fix) — never child text",
+  );
+  assert.equal(ledger.storedIn, "process_memory");
+  assert.ok(ledger.retention.includes("500"), "the bounded 500-entry ledger is disclosed");
+  assert.ok(ledger.retention.includes("摘要"), "the content-free digest storage is disclosed");
+});
+
+/** Read a repo doc relative to this spec (robust against the cwd). */
+function readRepoDoc(relativePath: string): string {
+  return readFileSync(new URL(relativePath, import.meta.url), "utf-8");
+}
+
+/** Parse the pipe table of one markdown section into cell rows (raw). */
+function parseMarkdownTableRows(markdown: string, sectionHeadingPrefix: string): string[][] {
+  const lines = markdown.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.startsWith(sectionHeadingPrefix));
+  assert.ok(start >= 0, `doc section ${sectionHeadingPrefix} not found`);
+  const rows: string[][] = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.startsWith("## ")) {
+      break;
+    }
+    if (!line.startsWith("|")) {
+      continue;
+    }
+    const cells = line
+      .split("|")
+      .slice(1, -1)
+      .map((cell) => cell.trim());
+    if (cells.length > 0 && cells.every((cell) => /^-+$/.test(cell))) {
+      continue; // separator row
+    }
+    rows.push(cells);
+  }
+  return rows;
+}
+
+test("MEMORY_POLICY §2 mirrors DATA_KIND_POLICIES row-for-row, including the carries-text column", () => {
+  const markdown = readRepoDoc("../../../docs/MEMORY_POLICY.md");
+  const rows = parseMarkdownTableRows(markdown, "## 2.").slice(1); // drop header
+  assert.ok(rows.length >= EXPECTED_DATA_KIND_ROWS.length, "the mirror table must cover every row");
+  const docKinds: string[] = [];
+  for (const cells of rows) {
+    const kindCell = cells[0] ?? "";
+    const ids = [...kindCell.matchAll(/`([a-z_]+)`/g)].map((match) => match[1]);
+    assert.equal(ids.length, 1, `each MEMORY_POLICY §2 row pins exactly one data kind: ${kindCell}`);
+    const kind = ids[0];
+    docKinds.push(kind);
+    const policy = DATA_KIND_POLICIES.find((entry) => entry.dataKind === kind);
+    assert.ok(policy !== undefined, `MEMORY_POLICY §2 row ${kind} must exist in DATA_KIND_POLICIES`);
+    assert.equal(
+      cells[1],
+      policy.carriesChildText ? "是" : "否",
+      `the 可含儿童正文 column must mirror carriesChildText for ${kind}`,
+    );
+  }
+  assert.deepEqual(
+    docKinds,
+    [...EXPECTED_DATA_KIND_ROWS],
+    "MEMORY_POLICY §2 must mirror the matrix row-for-row (same order)",
+  );
+});
+
+test("PRIVACY_DATA_FLOW §2 mirrors the DATA_KIND_POLICIES kind set exactly", () => {
+  const markdown = readRepoDoc("../../../docs/PRIVACY_DATA_FLOW.md");
+  const rows = parseMarkdownTableRows(markdown, "## 2.").slice(1); // drop header
+  const docKinds = new Set<string>();
+  for (const cells of rows) {
+    const kindCell = cells[0] ?? "";
+    const ids = [...kindCell.matchAll(/`([a-z_]+)`/g)].map((match) => match[1]);
+    assert.ok(ids.length >= 1, `each PRIVACY_DATA_FLOW §2 row pins its data kind(s): ${kindCell}`);
+    for (const kind of ids) {
+      assert.ok(
+        DATA_KIND_POLICIES.some((entry) => entry.dataKind === kind),
+        `PRIVACY_DATA_FLOW §2 kind ${kind} must exist in DATA_KIND_POLICIES`,
+      );
+      docKinds.add(kind);
+    }
+  }
+  const policyKinds = new Set(DATA_KIND_POLICIES.map((policy) => policy.dataKind));
+  assert.deepEqual(
+    [...docKinds].sort(),
+    [...policyKinds].sort(),
+    "PRIVACY_DATA_FLOW §2 must mirror the matrix kind set exactly (both directions)",
+  );
 });
 
 // ---------------------------------------------------------------------------
