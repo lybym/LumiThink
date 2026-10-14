@@ -31,6 +31,7 @@ import {
   readFileSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeSync,
 } from "node:fs";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
@@ -174,14 +175,28 @@ export function writeSnapshotFileSync(path: string, plaintext: string, keyHex: s
   writeFrameAtomicSync(path, encryptSnapshotBuffer(plaintext, keyHex));
 }
 
-/** Sync stale temp cleanup after a crash between write and rename. */
+/**
+ * Sync stale temp cleanup before a new write (review P2-1 root-cause fix:
+ * an earlier version only DETECTED the debris and threw `stale_tmp`, which
+ * bricked EVERY later snapshot write after one torn write, with no
+ * self-healing).
+ *
+ * Safe precondition (single-writer invariant): `${path}.tmp` is created
+ * only by a writer that renames it into place immediately after the full
+ * frame is written, all writes in this process run fully synchronously on
+ * the main thread, and the deployment runs exactly ONE service instance
+ * per snapshot path (single systemd unit; runbook §1). A temp file found
+ * here therefore can only be debris of a previous interrupted writer
+ * (crash between write and rename) — it was never the published snapshot
+ * state (only the rename publishes) and the fresh write that follows this
+ * cleanup supersedes it. It is removed. Removal failures stay loud: the
+ * error propagates to the caller's stderr line and the write is skipped,
+ * so a permission problem is observable instead of silently swallowed.
+ */
 export function cleanupSnapshotTempSync(path: string): void {
   const tmpPath = `${path}.tmp`;
   if (existsSync(tmpPath)) {
-    throw new SnapshotStoreError(
-      "stale_tmp",
-      "a stale snapshot temp file exists; the previous write may have been interrupted.",
-    );
+    unlinkSync(tmpPath);
   }
 }
 

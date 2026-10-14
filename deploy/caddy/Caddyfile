@@ -34,8 +34,12 @@ lumithink.example.com {
 			roll_size 10MiB
 			roll_keep 10
 		}
-		# Never log query strings (they must never carry credentials or
-		# child content; the API contract rejects such payloads anyway).
+		# HONESTY NOTE: the JSON access log's `uri` field DOES include the
+		# query string (Caddy has no built-in query-only strip). It stays
+		# free of credentials and child content BY CONTRACT, not by config:
+		# credentials travel in the Authorization header, the API rejects
+		# query-string payloads, and no handler reads child-identifying
+		# query parameters (deploy/runbook.md §4 mirrors this wording).
 		format json
 	}
 }

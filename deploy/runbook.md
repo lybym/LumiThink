@@ -84,7 +84,7 @@ sudo cp deploy/caddy/Caddyfile /etc/caddy/Caddyfile   # 改为真实域名后 re
 
 - 应用进程写 stdout/stderr（Next.js + `lib/server` 的极少量结构化错误行）；systemd 收进 journald：
   `journalctl -u lumithink -f`；保留策略按主机 journald 配置（建议 `SystemMaxUse=500M`）。
-- 访问日志在 Caddy（JSON、不含 query string），`/var/log/caddy/` 滚动保留。
+- 访问日志在 Caddy（JSON 格式；`uri` 字段含 query string——凭据与儿童正文按 API 合同不出现于 query：凭据走 Authorization 头、API 拒绝 query 载荷），`/var/log/caddy/` 滚动保留。
 - **红线**：应用侧审计（监护人审计环、运行时 Trace、网关审计）全部为 value-free 结构事实——不含儿童原文、原始音频、凭据（ADR-0005 §2.5 纪律 + R1-08 脏标记测试）。禁止向 stdout 打印任何请求正文。
 
 ## 5. 加密备份 / 恢复演练（交付范围 5）
@@ -107,18 +107,18 @@ sudo LUMITHINK_APP_DIR=/opt/lumithink deploy/backup.sh --verify
 
 ```bash
 sudo systemctl stop lumithink
-sudo deploy/restore.sh /var/backups/lumithink/snapshot-<UTC>.bin   # 校验→原子落位→置 RESTORE_REPLAY=1
+sudo deploy/restore.sh /var/backups/lumithink/snapshot-<UTC>.bin   # 校验→原子落位→落一次性重放标记（restore-replay.pending）
 sudo systemctl start lumithink
 deploy/healthcheck.sh
 # 启动后运行时自动：恢复状态 → 一次性重放删除台账（旧档可能早于删除）→ 写新快照 → 审计 snapshot_restored
-# 演练完成后复位：sed -i 's/^LUMITHINK_SNAPSHOT_RESTORE_REPLAY=.*/LUMITHINK_SNAPSHOT_RESTORE_REPLAY=0/' /etc/lumithink/lumithink.env
+#   → 删除重放标记。此后每次普通重启不再重放：恢复后新建的数据照常保留，无需任何手动复位。
 ```
 
 **语义（AC 2）**：正常重启恢复**当前**快照文件——已确认事件不丢（删除先于快照时内容已清 + 墓碑已在）；恢复**旧档**时重放保证被删数据不复活（`replay_child_deletions`，ADR-0005 的设计对应物）。诚实边界：确认变更与快照写入之间存在毫秒级原子写窗口，崩溃恰好落在窗口内会回退该笔变更（SQLite/WAL 级持久化随数据建模决策收口）。
 
 ## 6. 安全头与受限域名（AC 1 / AC 4）
 
-应用层（全路由）：`Content-Security-Policy`（每请求 nonce + `strict-dynamic`，见 `lib/server/security-headers.ts` 与 ADR-0006 残余披露）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: strict-origin-when-cross-origin`。代理层（Caddyfile）：`Strict-Transport-Security`（仅 TLS 面）。受限域名：Caddy 站点块只绑定运营域名；其余 Host 一律 421/拒绝。
+应用层（全路由）：`Content-Security-Policy`（每请求 nonce + `strict-dynamic`，见 `lib/server/security-headers.ts` 与 ADR-0006 残余披露）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: strict-origin-when-cross-origin`。代理层（Caddyfile）：`Strict-Transport-Security`（仅 TLS 面）。受限域名：Caddy 站点块只绑定运营域名；未匹配的 SNI/Host 在 TLS 握手层即被拒绝（无默认站点兜底、无显式 421 语义），不存在到达应用的未知 Host 路由。
 
 CI 证据：`.github/workflows/r1-deployment-gate.yml` 在 ubuntu runner 上以合成数据启动、登录（演示模式）、变更开关、重启后断言开关状态恢复（Session 策略可恢复）、校验安全头与 127.0.0.1 绑定。
 
@@ -126,7 +126,7 @@ CI 证据：`.github/workflows/r1-deployment-gate.yml` 在 ubuntu runner 上以�
 
 1. **应用回滚**：release 目录按版本保留（`/opt/releases/<git-sha>`）；回滚 = 切回上一版目录（`systemctl stop` → 换软链/目录 → `systemctl start` → `deploy/healthcheck.sh`）。快照格式 v1 向后兼容仅由本版本引入——回滚到 R1-08 之前的版本前先停用快照变量（旧代码不读取快照文件，状态即进程内存默认态）。
 2. **配置回滚**：`/etc/lumithink/lumithink.env` 改动前 `cp` 留存（0600）；误配启动失败时恢复上一份 env 重启。
-3. **数据回滚**：恢复上一份快照归档（§5；若该档早于某次删除，保持 RESTORE_REPLAY=1）。
+3. **数据回滚**：恢复上一份快照归档（§5；若该档早于某次删除，restore.sh 已落一次性重放标记——恢复后首次启动自动重放并自清，无需手动复位，也不影响之后的普通重启）。
 4. **凭证泄露应急**：轮换两个访问码（§3）+ 快照密钥（rotate-key）+ 重启；审计环留存 `login_failed`/`snapshot_restored` 事实。
 
 ## 8. 故障模式（diagnostics / failure modes）
@@ -136,6 +136,7 @@ CI 证据：`.github/workflows/r1-deployment-gate.yml` 在 ubuntu runner 上以�
 | 启动即退出，`StartupEnvError`（仅变量名） | env 形状非法/半配对 | 修 env；校验器永不回显值 |
 | 启动即退出，`snapshot auth_failed` | 快照密钥不符或文件被改 | 核对密钥来源；确认无篡改后再放行（不可静默弃用快照） |
 | `[lumithink:snapshot] write failed`（stderr） | 磁盘/权限/原子写失败 | 检查 `/var/lib/lumithink` 权限与空间；确认变更未被持久化 |
+| 崩溃残留 `snapshot.bin.tmp`（撕裂写：写在 rename 前中断） | tmp 不是活动状态（rename 才发布快照） | 下一次快照写入自动清除残留 tmp（自愈，不再 brick 写入）；若持续出现删除/权限错误，检查 `/var/lib/lumithink` 属主与权限 |
 | `/api/health` 非 ok | 首启契约破坏或环境注入错误 | 对照 §2 首启约束（无密钥/无 DB 要求） |
 | 登录锁定（`login_locked_out`） | 15 分钟全局锁定（统一拒绝语义，防枚举） | 等待窗口或重启（计数器为进程态，有意 fail-closed） |
 

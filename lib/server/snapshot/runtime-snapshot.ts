@@ -30,11 +30,13 @@
  * - Boot-time restore from the CURRENT snapshot file preserves confirmed
  *   events (the snapshot is internally consistent: an erase before its
  *   capture is already reflected by purged content + its tombstone).
- * - Restoring an OLDER archive (the drill path) sets
- *   LUMITHINK_SNAPSHOT_RESTORE_REPLAY=1 (deploy/restore.sh does this): the
- *   runtime then replays the child-deletion ledger ONCE after the restore —
- *   ADR-0005's designed answer that a restore may never resurrect deleted
- *   data.
+ * - Restoring an OLDER archive (the drill path) requests the replay with a
+ *   SELF-CLEARING MARKER FILE (deploy/restore.sh touches
+ *   <snapshot-dir>/restore-replay.pending): the runtime replays the
+ *   child-deletion ledger ONCE after the restore and deletes the marker in
+ *   the same boot — ADR-0005's designed answer that a restore may never
+ *   resurrect deleted data, without a persistent env flag that would turn
+ *   every later restart into a purge of newly created data (review P1-1).
  *
  * This module stays framework-free (no next/react/prisma imports).
  */

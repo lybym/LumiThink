@@ -35,7 +35,11 @@ RestartSec=5
 ProtectSystem=strict
 # State: the encrypted snapshot + build output only.
 ReadWritePaths=/var/lib/lumithink
-ProtectHome=read-only
+# /home, /root, /run/user become an EMPTY private tmpfs — stricter than
+# read-only: the service has no business there and must not even read the
+# host layout (the runtime HOME is /var/lib/lumithink; the release lives in
+# /opt/lumithink; systemd >= 240, runbook §2 baseline is Ubuntu 22.04+).
+ProtectHome=tmpfs
 ReadOnlyPaths=/opt/lumithink
 NoExecPaths=/var/lib/lumithink
 ExecPaths=/usr /bin /opt/lumithink/node_modules
@@ -48,6 +52,10 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 LockPersonality=yes
+# MemoryDenyWriteExecute=no is DELIBERATE (ADR-0006): Node.js/V8 JIT (next
+# start) maps writable+executable memory for generated code — =yes would
+# crash-loop the server at startup. Compensating restrictions: no new
+# privileges, strict filesystem + syscall filter above.
 MemoryDenyWriteExecute=no
 PrivateUsers=no
 ProtectClock=yes

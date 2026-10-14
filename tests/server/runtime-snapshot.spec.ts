@@ -8,6 +8,10 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
 import test from "node:test";
 
 import { parseActorContext, type ActorContext } from "../../lib/domain/contract/actor.ts";
@@ -18,15 +22,20 @@ import {
 import type { InteractionAck } from "../../lib/domain/contract/idempotency.ts";
 import { parseStreamEvent, type StreamEvent } from "../../lib/domain/contract/response.ts";
 import { GUARDIAN_FAMILY_CHILD_REF } from "../../lib/domain/guardian/authorizations.ts";
-import { GUARDIAN_DEMO_ACCESS_CODE } from "../../lib/server/guardian-service.ts";
+import { ADMIN_DEMO_ACCESS_CODE, GUARDIAN_DEMO_ACCESS_CODE } from "../../lib/server/guardian-service.ts";
 import { resolveWebMvpActor, WEB_MVP_CHILD_REF } from "../../lib/server/interaction-service.ts";
-import { createWebMvpRuntime } from "../../lib/server/web-mvp-runtime.ts";
+import { createWebMvpRuntime, restoreReplayMarkerPathFor } from "../../lib/server/web-mvp-runtime.ts";
 import {
   RUNTIME_SNAPSHOT_FORMAT,
   captureRuntimeSnapshot,
   restoreRuntimeSnapshot,
   validateRuntimeSnapshot,
 } from "../../lib/server/snapshot/runtime-snapshot.ts";
+import {
+  readSnapshotFileSync,
+  snapshotFileExistsSync,
+  writeSnapshotFileSync,
+} from "../../lib/server/snapshot/snapshot-store.ts";
 import { WEB_MVP_ACTOR_ID } from "../../lib/server/interaction-service.ts";
 
 const NOW = "2026-10-14T08:00:00.000Z";
@@ -298,4 +307,190 @@ test("an invalid section aborts the restore with NO partial state (all-or-nothin
   const audit = restored.guardian.auditEntries();
   assert.ok(audit.every((entry) => entry.kind === "seed"));
   assert.equal(restored.service.childDataSnapshot(WEB_MVP_ACTOR_ID).conversations.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Composition-level per-boot semantics (review round-1 P1-1 regression). The
+// one-shot post-restore replay is requested with a SELF-CLEARING marker file
+// (`<snapshot-dir>/restore-replay.pending`, touched by deploy/restore.sh) —
+// never a persistent env flag — so a missed reset can never turn later
+// restarts into a purge of newly created confirmed data (AC 2 red line).
+// ---------------------------------------------------------------------------
+
+const BOOT_KEY = "3a".repeat(32);
+
+/** Let the boot restore microtask chain (restore → replay → post-write) flush. */
+async function settleBoot(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+function guardianDataActor(): Readonly<ActorContext> {
+  return parseActorContext({
+    role: "guardian",
+    actorId: "act_guardian_data_lifecycle",
+    childRef: GUARDIAN_FAMILY_CHILD_REF,
+    verifiedBy: "data-lifecycle-v1",
+    verifiedAt: NOW,
+  });
+}
+
+function setRecording(
+  runtime: ReturnType<typeof createWebMvpRuntime>,
+  enabled: boolean,
+): void {
+  const result = runtime.guardian.postAuthorizations({
+    authorization: loginAs(runtime),
+    body: { protocolVersion: "1.0", action: "set_feature_switch", switchId: "conversation_recording", enabled },
+  });
+  assert.equal(result.kind, "ok");
+}
+
+function replayCount(runtime: ReturnType<typeof createWebMvpRuntime>): number {
+  return runtime.lifecycle
+    .deletionRecords()
+    .filter((record) => record.action === "replay_child_deletions").length;
+}
+
+test("the restore-replay marker fires ONCE: the replaying boot consumes it and later restarts keep new data (P1-1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "lumithink-boot-"));
+  try {
+    const snapPath = join(dir, "state", "snapshot.bin");
+    const markerPath = restoreReplayMarkerPathFor(snapPath);
+    assert.ok(markerPath.endsWith("restore-replay.pending"));
+
+    // Boot 1 — confirmed content exists in the runtime; the T0 archive lands
+    // on disk (what deploy/restore.sh would place back).
+    const boot1 = createWebMvpRuntime({ snapshot: { path: snapPath, keyHex: BOOT_KEY } });
+    enableRecording(boot1);
+    await runRecordedTurn(boot1);
+    confirmSyntheticMemory(boot1, "[synthetic] P1-1 boot1 偏好");
+    writeSnapshotFileSync(snapPath, JSON.stringify(capture(boot1)), BOOT_KEY);
+    assert.equal(snapshotFileExistsSync(snapPath), true);
+
+    // deploy/restore.sh simulation: archive placed (already done) + marker.
+    writeFileSync(markerPath, "", { mode: 0o600 });
+
+    // Boot 2 — the REPLAYING boot: restore + subject-wide replay ONCE +
+    // consume the marker. The restored content is re-purged (ADR-0005).
+    const boot2 = createWebMvpRuntime({ snapshot: { path: snapPath, keyHex: BOOT_KEY } });
+    await settleBoot();
+    assert.equal(existsSync(markerPath), false, "the replaying boot must consume the marker");
+    const last = boot2.lifecycle.deletionRecords().at(-1);
+    assert.equal(last?.action, "replay_child_deletions");
+    // The replay actually purged RESTORED content (conversation + memory).
+    assert.equal(last?.purged.conversations, 1);
+    assert.equal(last?.purged.memories, 1);
+    assert.equal(boot2.service.childDataSnapshot(WEB_MVP_ACTOR_ID).conversations.length, 0);
+    assert.equal(replayCount(boot2), 1);
+
+    // New confirmed data created AFTER the replaying boot (a real guardian
+    // transition flushes it into the snapshot file).
+    const survivingMemoryId = confirmSyntheticMemory(boot2, "[synthetic] P1-1 boot2 幸存偏好");
+    setRecording(boot2, false);
+    setRecording(boot2, true);
+
+    // Boot 3 — a NORMAL restart (no marker): under the old persistent-flag
+    // design this boot would have replayed again and purged the new data.
+    const boot3 = createWebMvpRuntime({ snapshot: { path: snapPath, keyHex: BOOT_KEY } });
+    await settleBoot();
+    assert.equal(boot3.service.childDataSnapshot(WEB_MVP_ACTOR_ID).conversations.length, 0);
+    const entries3 = boot3.memory.listEntries(WEB_MVP_CHILD_REF, guardianDataActor());
+    assert.equal(
+      entries3.some((entry) => entry.memoryId === survivingMemoryId),
+      true,
+      "data created after the replaying boot must survive the normal restart",
+    );
+    assert.equal(replayCount(boot3), 1, "no second replay on the normal restart");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a stale restore-replay marker without a snapshot file is consumed and never fires a replay (P1-1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "lumithink-stale-"));
+  try {
+    const snapPath = join(dir, "state", "snapshot.bin");
+    const markerPath = restoreReplayMarkerPathFor(snapPath);
+    // Marker without a snapshot file: that restore never completed.
+    mkdirSync(dirname(snapPath), { recursive: true });
+    writeFileSync(markerPath, "", { mode: 0o600 });
+
+    const boot1 = createWebMvpRuntime({ snapshot: { path: snapPath, keyHex: BOOT_KEY } });
+    await settleBoot();
+    // The stale marker is consumed IMMEDIATELY (a replay without a restore
+    // is meaningless and must never fire against unrelated future content).
+    assert.equal(existsSync(markerPath), false);
+    assert.equal(replayCount(boot1), 0);
+
+    confirmSyntheticMemory(boot1, "[synthetic] P1-1 stale-marker 偏好");
+    writeSnapshotFileSync(snapPath, JSON.stringify(capture(boot1)), BOOT_KEY);
+
+    const boot2 = createWebMvpRuntime({ snapshot: { path: snapPath, keyHex: BOOT_KEY } });
+    await settleBoot();
+    const entries2 = boot2.memory.listEntries(WEB_MVP_CHILD_REF, guardianDataActor());
+    assert.equal(entries2.length, 1);
+    assert.ok(boot2.lifecycle.deletionRecords().every((record) => record.action !== "replay_child_deletions"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file-level round trip: erase rewrites the CURRENT file and restoring it keeps content empty with the tombstone (AC 2)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "lumithink-erase-"));
+  try {
+    const snapPath = join(dir, "state", "snapshot.bin");
+    const boot1 = createWebMvpRuntime({ snapshot: { path: snapPath, keyHex: BOOT_KEY } });
+    enableRecording(boot1);
+    await runRecordedTurn(boot1);
+    writeSnapshotFileSync(snapPath, JSON.stringify(capture(boot1)), BOOT_KEY);
+
+    // The erase is a confirmed mutation: its hook rewrites the file.
+    const erase = await boot1.guardian.eraseChildData({
+      authorization: loginAs(boot1),
+      body: { protocolVersion: "1.0", action: "erase_child_data" },
+    });
+    assert.equal(erase.kind, "ok");
+
+    // The CURRENT file now: purged content + the erase tombstone, encrypted.
+    const parsed = JSON.parse(readSnapshotFileSync(snapPath, BOOT_KEY)) as {
+      counts: { conversations: number; memories: number };
+      tombstones: { action: string }[];
+    };
+    assert.equal(parsed.counts.conversations, 0);
+    assert.equal(parsed.counts.memories, 0);
+    assert.ok(parsed.tombstones.some((tombstone) => tombstone.action === "erase_child_data"));
+
+    // Restoring the CURRENT file into a fresh composition: content stays
+    // empty, the tombstone persists, the restore is disclosed in the audit.
+    const boot2 = createWebMvpRuntime({ snapshot: { path: snapPath, keyHex: BOOT_KEY } });
+    await settleBoot();
+    assert.equal(boot2.service.childDataSnapshot(WEB_MVP_ACTOR_ID).conversations.length, 0);
+    assert.ok(
+      boot2.lifecycle.deletionRecords().some((record) => record.action === "erase_child_data"),
+    );
+    assert.ok(boot2.guardian.auditEntries().some((entry) => entry.kind === "snapshot_restored"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the snapshot JSON never carries raw access codes or the snapshot key (digest-only pin)", async () => {
+  // Composition takes DIGESTS only: even in real-credential mode the raw
+  // values are structurally absent from the runtime — and therefore from
+  // the snapshot.
+  const source = createWebMvpRuntime({
+    credentialDigests: {
+      guardian: createHash("sha256").update(GUARDIAN_DEMO_ACCESS_CODE, "utf8").digest("hex"),
+      admin: createHash("sha256").update(ADMIN_DEMO_ACCESS_CODE, "utf8").digest("hex"),
+    },
+  });
+  enableRecording(source);
+  await runRecordedTurn(source);
+  confirmSyntheticMemory(source, "[synthetic] secrets-pin 偏好");
+  const json = JSON.stringify(capture(source));
+  assert.equal(json.includes(GUARDIAN_DEMO_ACCESS_CODE), false, "guardian access code must not appear in the snapshot");
+  assert.equal(json.includes(ADMIN_DEMO_ACCESS_CODE), false, "admin access code must not appear in the snapshot");
+  assert.equal(json.includes(BOOT_KEY), false, "the snapshot key must not appear in the snapshot");
 });

@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   SNAPSHOT_FILE_MAGIC,
   SnapshotStoreError,
+  cleanupSnapshotTempSync,
   decryptSnapshotBuffer,
   encryptSnapshotBuffer,
   readSnapshotFile,
@@ -70,7 +71,7 @@ test("wrong keys, tampering and truncation fail closed without echoing plaintext
   });
 });
 
-test("atomic file writes round-trip and reject stale temp files", async () => {
+test("atomic file writes round-trip and leave no temp file behind", async () => {
   const dir = mkdtempSync(join(tmpdir(), "lumithink-snap-"));
   try {
     const path = join(dir, "nested", "snapshot.bin");
@@ -105,6 +106,40 @@ test("the key file must contain exactly the 64 hex chars", () => {
       assert.equal(error.reason, "bad_key_file");
       return true;
     });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a stale temp file from a torn write is REMOVED before the next write instead of bricking it (review P2-1)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "lumithink-tmp-"));
+  try {
+    const path = join(dir, "snapshot.bin");
+    writeSnapshotFileSync(path, PAYLOAD, KEY_A);
+    // Simulate the torn write: debris next to the live file.
+    writeFileSync(`${path}.tmp`, Buffer.from("torn frame"), { mode: 0o600 });
+    // Cleanup removes it (the old behavior threw `stale_tmp` here and
+    // bricked every later snapshot write until an operator deleted the
+    // file by hand).
+    cleanupSnapshotTempSync(path);
+    assert.equal(existsSync(`${path}.tmp`), false);
+    // The live file is untouched and the next write succeeds.
+    assert.equal(readSnapshotFileSync(path, KEY_A), PAYLOAD);
+    writeSnapshotFileSync(path, PAYLOAD, KEY_A);
+    assert.equal(readSnapshotFileSync(path, KEY_A), PAYLOAD);
+
+    // Same self-healing when the interrupted write was the FIRST one (no
+    // live file yet): the orphan temp is debris, not recoverable state.
+    rmSync(path);
+    writeFileSync(`${path}.tmp`, Buffer.from("orphan"), { mode: 0o600 });
+    cleanupSnapshotTempSync(path);
+    assert.equal(existsSync(`${path}.tmp`), false);
+    writeSnapshotFileSync(path, PAYLOAD, KEY_A);
+    assert.equal(readSnapshotFileSync(path, KEY_A), PAYLOAD);
+
+    // Absent temp: cleanup is a no-op.
+    cleanupSnapshotTempSync(path);
+    assert.equal(existsSync(`${path}.tmp`), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -31,9 +31,13 @@ NEXT_TELEMETRY_DISABLED=1
 # LUMITHINK_SNAPSHOT_PATH=/var/lib/lumithink/snapshot.bin
 # Snapshot cadence in ms (confirmed mutations always snapshot immediately).
 # LUMITHINK_SNAPSHOT_INTERVAL_MS=60000
-# Set to 1 ONLY when restoring an OLDER archive (deploy/restore.sh does this
-# automatically): after the boot restore the child-deletion ledger is replayed
-# once so a restore can never resurrect deleted data (ADR-0005).
+# Normally leave at 0/absent. The one-shot post-restore replay request is a
+# SELF-CLEARING marker file: deploy/restore.sh touches
+# <snapshot-dir>/restore-replay.pending and the runtime consumes (deletes)
+# it after the one replaying boot. This env var is an EXPLICIT per-boot
+# override ONLY: leaving it at 1 replays (purges everything created since
+# the previous restart) after EVERY restart. restore.sh neutralizes any
+# leftover =1 it finds.
 # LUMITHINK_SNAPSHOT_RESTORE_REPLAY=0
 
 # --- Explicitly NOT here ------------------------------------------------------

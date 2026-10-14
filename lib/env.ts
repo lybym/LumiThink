@@ -42,12 +42,17 @@ export interface StartupSnapshotConfig {
   /** Snapshot interval in ms (`LUMITHINK_SNAPSHOT_INTERVAL_MS`); null = default. */
   readonly intervalMs: number | null;
   /**
-   * Run the child-deletion replay ONCE after a boot-time snapshot restore
-   * (`LUMITHINK_SNAPSHOT_RESTORE_REPLAY`). Default false: the normal restart
-   * path must PRESERVE confirmed events (the current snapshot file is
-   * internally consistent). `deploy/restore.sh` sets this when it places an
-   * OLDER archive — the ADR-0005 rule that a restore may never resurrect
-   * deleted data (the replay re-purges the subject deterministically).
+   * EXPLICIT per-boot operator override for the child-deletion replay after
+   * a boot-time snapshot restore (`LUMITHINK_SNAPSHOT_RESTORE_REPLAY`).
+   * Default false: the normal restart path must PRESERVE confirmed events
+   * (the current snapshot file is internally consistent). The one-shot
+   * replay request used by `deploy/restore.sh` is the SELF-CLEARING marker
+   * file `<snapshot-dir>/restore-replay.pending` — the runtime consumes it
+   * after the one replaying boot — NEVER this env flag: a flag left at 1
+   * would replay (and purge everything created since the previous restart)
+   * after EVERY restart (review P1-1). Set it to 1 only deliberately, for
+   * a bounded diagnostic window, and unset it right after (ADR-0005: a
+   * restore may never resurrect deleted data).
    */
   readonly restoreReplay: boolean;
 }

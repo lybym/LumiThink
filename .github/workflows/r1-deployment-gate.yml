@@ -65,17 +65,29 @@ jobs:
           # `|| true` is required: systemd-analyze verify exits non-zero for
           # deploy-host facts (missing ExecStart binary / service user), and
           # pipefail would abort this step before the real arbiter below.
-          # The grep — not the exit code — decides: only "Failed to parse /
-          # Failed to load" lines are real unit/repo errors.
+          # The grep — not the exit code — decides. Denylist (review P1-2):
+          # - "Failed to parse" / "Failed to load": real unit syntax errors
+          #   / the unit file missing from the repo;
+          # - "Refusing": fatal unit-level errors such as a unit with no
+          #   ExecStart (an unrunnable unit must never pass the gate);
+          # - "Unknown key name": a mistyped hardening directive would
+          #   otherwise be silently IGNORED, weakening the sandbox while CI
+          #   stays green.
+          # The missing ExecStart binary / service user are DEPLOY-HOST facts
+          # (they exist only after the runbook install steps) and must not
+          # fail the runner-side syntax check; on the runner the verify log
+          # carries exactly the "Command … is not executable" host-fact line,
+          # which matches none of the denylist terms.
           systemd-analyze verify deploy/lumithink.service 2>&1 | tee /tmp/unit-verify.log || true
-          # "Failed to parse …" lines are real unit syntax errors; a
-          # "Failed to load" line means the unit file itself is missing from
-          # the repo. The missing ExecStart binary / service user are
-          # DEPLOY-HOST facts (they exist only after the runbook install
-          # steps) and must not fail the runner-side syntax check.
-          if grep -qE 'Failed to parse|Failed to load' /tmp/unit-verify.log; then
+          # An EMPTY log means verify never produced evidence (tool absent /
+          # invocation broken) — the gate must not pass on silence.
+          if [ ! -s /tmp/unit-verify.log ]; then
+            echo "::error::systemd-analyze verify produced no output; cannot arbitrate"
+            exit 1
+          fi
+          if grep -qE 'Failed to parse|Failed to load|Refusing|Unknown key name' /tmp/unit-verify.log; then
             echo "::error::systemd unit has parse errors"
-            grep -E 'Failed to parse|Failed to load' /tmp/unit-verify.log
+            grep -E 'Failed to parse|Failed to load|Refusing|Unknown key name' /tmp/unit-verify.log
             exit 1
           fi
           echo "unit syntax OK"

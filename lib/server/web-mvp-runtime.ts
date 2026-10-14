@@ -95,6 +95,8 @@ import {
   type SnapshotCapableRuntime,
 } from "./snapshot/runtime-snapshot.ts";
 import { createHash } from "node:crypto";
+import { existsSync, unlinkSync } from "node:fs";
+import { dirname } from "node:path";
 
 export const WEB_MVP_MODEL_ID = "lumithink-mock-1" as const;
 export const WEB_MVP_PROVIDER_ID = "mock-local" as const;
@@ -128,7 +130,16 @@ export interface WebMvpSnapshotConfig {
   readonly keyHex: string;
   /** Snapshot interval ms (default 60_000, minimum 1_000). */
   readonly intervalMs?: number;
-  /** Replay the child-deletion ledger once after a boot restore (AC 2). */
+  /**
+   * EXPLICIT per-boot operator override: replay the child-deletion ledger
+   * after EVERY boot restore, not once. The normal one-shot post-restore
+   * replay request is the SELF-CLEARING MARKER FILE
+   * `<snapshot-dir>/restore-replay.pending` created by deploy/restore.sh
+   * and consumed by the replaying boot itself. Only set this deliberately
+   * for a bounded diagnostic window and clear it right after: left on,
+   * every restart re-runs the subject-wide replay (a purge of everything
+   * created since the previous restart — review P1-1). Default false.
+   */
   readonly restoreReplay?: boolean;
 }
 
@@ -151,6 +162,38 @@ export const WEB_MVP_GATEWAY_BUDGET = Object.freeze({
   maxCostMicroUsdPerDay: 1_000_000,
   maxTotalTokensPerDay: 2_000_000,
 });
+
+/**
+ * R1-08 (review P1-1): the one-shot post-restore deletion replay is
+ * requested with this marker FILE next to the snapshot (deploy/restore.sh
+ * creates it) — NEVER with a persistent env flag. The runtime deletes the
+ * marker during the SAME boot that performed the replay, so a missed manual
+ * reset can never turn later restarts into a purge of newly created
+ * confirmed data (AC 2 red line: confirmed events must not be lost).
+ */
+export const RESTORE_REPLAY_MARKER_FILENAME = "restore-replay.pending" as const;
+
+/** Marker path for one snapshot file: `<snapshot-dir>/restore-replay.pending`. */
+export function restoreReplayMarkerPathFor(snapshotPath: string): string {
+  return `${dirname(snapshotPath)}/${RESTORE_REPLAY_MARKER_FILENAME}`;
+}
+
+/**
+ * Consume the pending replay marker. Deletion failures stay LOUD: a marker
+ * that cannot be removed keeps the replay-on-retry semantics alive (the
+ * next boot re-runs restore + replay — the ADR-0005 fail-safe direction is
+ * over-delete, never resurrect), but the operator must see why.
+ */
+function removeRestoreReplayMarker(markerPath: string): void {
+  try {
+    unlinkSync(markerPath);
+  } catch (error) {
+    console.error(
+      "[lumithink:snapshot] restore-replay marker could not be removed:",
+      error instanceof Error ? error.message : "unexpected error",
+    );
+  }
+}
 
 /**
  * Compose one complete web MVP runtime (fresh; tests may create several).
@@ -396,11 +439,32 @@ export function createWebMvpRuntime(options: WebMvpRuntimeOptions = {}): WebMvpR
   if (snapshotConfig !== undefined) {
     snapshotRuntime = runtime;
 
+    // R1-08 (review P1-1): the one-shot post-restore replay is requested
+    // with a PENDING MARKER FILE next to the snapshot (deploy/restore.sh
+    // creates it), never with a persistent env flag. The marker is
+    // consumed by the SAME boot that performed the replay, so a missed
+    // reset can never turn later restarts into a purge of newly created
+    // confirmed data. LUMITHINK_SNAPSHOT_RESTORE_REPLAY remains an
+    // EXPLICIT per-boot operator override (the unprivileged runtime cannot
+    // rewrite the root-owned env file; documented in the runbook).
+    const markerPath = restoreReplayMarkerPathFor(snapshotConfig.path);
+    const markerReplayRequested = existsSync(markerPath);
+    const envReplayRequested = snapshotConfig.restoreReplay === true;
+    const snapshotFilePresent = snapshotFileExistsSync(snapshotConfig.path);
+
+    if (markerReplayRequested && !snapshotFilePresent) {
+      // restore.sh places the archive BEFORE the marker; a marker without
+      // a snapshot file is stale (that restore never completed). Consume
+      // it now so it can never fire a replay against unrelated future
+      // content.
+      removeRestoreReplayMarker(markerPath);
+    }
+
     // 1. Boot-time restore: a snapshot file present at composition is the
     //    previous process's confirmed state. Undecryptable/corrupt files
     //    fail the composition (fail-closed boot refusal — the operator
     //    fixes the key or consciously removes the file; runbook documented).
-    if (snapshotFileExistsSync(snapshotConfig.path)) {
+    if (snapshotFilePresent) {
       const plaintext = readSnapshotFileSync(snapshotConfig.path, snapshotConfig.keyHex);
       let parsed: unknown;
       try {
@@ -413,12 +477,19 @@ export function createWebMvpRuntime(options: WebMvpRuntimeOptions = {}): WebMvpR
         parsed,
         {
           childActorId: WEB_MVP_ACTOR_ID,
-          replayAfterRestore: snapshotConfig.restoreReplay === true,
+          replayAfterRestore: markerReplayRequested || envReplayRequested,
         },
       ).then((result) => {
         // Persist the post-restore state (with the restore audit entry and
         // any replay tombstone) so the on-box file is self-consistent.
         performSnapshotWrite("boot-restore");
+        if (markerReplayRequested) {
+          // Consume the marker ONLY after restore + replay + persist
+          // succeeded; a failure above leaves it pending and the next boot
+          // retries the whole restore + replay (fail-safe: over-delete,
+          // never resurrect — ADR-0005).
+          removeRestoreReplayMarker(markerPath);
+        }
         return result;
       });
       // The restore itself is synchronous state installation; only the
