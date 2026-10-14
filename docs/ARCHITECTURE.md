@@ -71,7 +71,7 @@ Bridge 是已选择的架构路线，但仍需对**锁定版本和最终组合�
 ## 6. 阶段与验收
 
 - **R0**：保留 SDK 合成测试和权限基线，不修改上游内核。
-- **R1-V / 阶段 1**：Turn Orchestrator + Fencing；证明错误结果和记忆不会跨轮。
+- **R1-V / 阶段 1**：Turn Orchestrator + Fencing；证明错误结果和记忆不会跨轮。（issue #28 已交付合成 POC：`lib/domain/voice/` + SQLite 栅栏存储，详见 [VOICE_RUNTIME §11](./VOICE_RUNTIME.md)）
 - **R1-V / 阶段 2**：自定义 Cordis Bridge `prompt/cancel/stream/close`，验证真取消、实时 Delta 和单一所有权。
 - **R5 / 实机语音**：XVF3800 + ESP32-S3 小智固件、私有化服务端、真实网络中断/设备重连、延迟和长期稳定性联调。
 
