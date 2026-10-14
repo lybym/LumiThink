@@ -137,6 +137,18 @@ export interface CordisPipelineOptions {
   /** Synthetic v0 handlers for the whitelisted Cordis services. */
   readonly handlers?: Readonly<Record<string, CordisServiceHandler>>;
   /**
+   * R1-14 (issue #26) trusted child-memory context retrieval hook. When
+   * present, it is called ONCE per turn for actors bound to a child and
+   * must return memory refs (kind "memory", refId + version — IDS ONLY,
+   * never claim bodies; the caller re-validates every entry fail-closed).
+   * A provider throw or malformed entry degrades the turn to ZERO memory
+   * refs with an observable `memory.context` trace event
+   * (`memory_context_failed`) — reads degrade, they never abort a turn or
+   * invent data. Rejections inside the trusted service must surface as a
+   * throw so the degradation is visible.
+   */
+  readonly memoryContext?: MemoryContextProvider;
+  /**
    * R1-12 test seam (same DI style as `clock`/`handlers`): the homework
    * executor used for homework-routed turns. Defaults to the REAL
    * `executeHomeworkSkillTurn` (including its controlled-degradation wrap);
@@ -211,6 +223,26 @@ export interface CordisTurnResult {
 export type PipelineServiceCallResult =
   | { readonly status: "session_unavailable"; readonly state: string }
   | Readonly<CordisServiceExecution>;
+
+/** Trusted input of the R1-14 child-memory context retrieval hook. */
+export interface MemoryContextRequest {
+  /** Server-verified child reference of the turn's actor. */
+  readonly childRef: string;
+  readonly actorRole: ActorRole;
+  readonly sessionId: string;
+  readonly conversationId: string;
+  readonly turnId: string;
+}
+
+/**
+ * Returns memory context refs (kind "memory", refId + version) for the
+ * turn. IDS + VERSIONS only — memory claim bodies never cross this
+ * boundary (same refs-only discipline as the HarnessContext). Throw on
+ * service failure: the pipeline degrades to zero refs, observably.
+ */
+export type MemoryContextProvider = (
+  request: Readonly<MemoryContextRequest>,
+) => readonly unknown[];
 
 export interface CordisPipeline {
   /** Run one full text turn through the enforced pipeline. */
@@ -682,6 +714,75 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
         durationMs: 0,
         resultCode: routeResultCode,
       });
+
+      // ---- 4.5 Child Memory context retrieval (R1-14, issue #26) -----------
+      // Minimal-by-need: the trusted hook runs once per child-bound turn and
+      // contributes memory refs (ids + versions only). Failure degrades to
+      // zero refs with an observable trace event — a read failure never
+      // aborts a turn, and nothing here ever writes.
+      if (options.memoryContext !== undefined && actor.childRef !== null) {
+        const memoryStartedAtMs = clock();
+        const memoryRefs: { kind: "memory"; refId: string; version: string | null }[] = [];
+        let memoryResultCode: RuntimeResultCode = "ok";
+        try {
+          const provided = options.memoryContext({
+            childRef: actor.childRef,
+            actorRole: actor.role,
+            sessionId,
+            conversationId,
+            turnId: event.turnId,
+          });
+          if (!Array.isArray(provided)) {
+            throw new ContractValidationError([
+              problem("CONTRACT_FIELD_INVALID", "memoryContext", "memory context provider must return an array."),
+            ]);
+          }
+          for (const ref of provided) {
+            if (ref === null || typeof ref !== "object" || Array.isArray(ref)) {
+              throw new ContractValidationError([
+                problem("CONTRACT_FIELD_INVALID", "memoryContext[]", "memory ref must be an object."),
+              ]);
+            }
+            const record = ref as Record<string, unknown>;
+            if (
+              record.kind !== "memory" ||
+              typeof record.refId !== "string" ||
+              record.refId.length === 0 ||
+              record.refId.length > 80 ||
+              (record.version !== null && typeof record.version !== "string")
+            ) {
+              throw new ContractValidationError([
+                problem("CONTRACT_FIELD_INVALID", "memoryContext[]", "memory ref must carry kind/refId/version."),
+              ]);
+            }
+            memoryRefs.push({
+              kind: "memory",
+              refId: record.refId as string,
+              version: (record.version ?? null) as string | null,
+            });
+          }
+        } catch {
+          // Controlled degradation (same discipline as skill_unavailable):
+          // the turn continues WITHOUT memory refs, observably.
+          memoryRefs.length = 0;
+          memoryResultCode = "memory_context_failed";
+        }
+        for (const ref of memoryRefs) {
+          contextRefs.push(ref);
+          contextRefIds.push(ref.refId);
+        }
+        trace.push({
+          type: "memory.context",
+          component: "memory_context",
+          atMs: clock(),
+          traceId: traceIds.traceId,
+          turnId: traceIds.turnId,
+          sessionId: traceIds.sessionId,
+          memoryRefCount: memoryRefs.length,
+          durationMs: clock() - memoryStartedAtMs,
+          resultCode: memoryResultCode,
+        });
+      }
 
       // ---- 5. Context build ---------------------------------------------------
       const harnessContext = buildHarnessContext({

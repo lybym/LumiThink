@@ -43,6 +43,8 @@ export const RUNTIME_COMPONENTS = Object.freeze([
   "model_gateway",
   "output_gate",
   "session_map",
+  // R1-14 (issue #26): child-memory context retrieval observability.
+  "memory_context",
 ] as const);
 
 export type RuntimeComponent = (typeof RUNTIME_COMPONENTS)[number];
@@ -61,6 +63,8 @@ export const RUNTIME_RESULT_CODES = Object.freeze([
   "model_cancelled",
   "output_blocked",
   "output_oversized",
+  // R1-14 (issue #26): controlled degradation of the memory context hook.
+  "memory_context_failed",
 ] as const);
 
 export type RuntimeResultCode = (typeof RUNTIME_RESULT_CODES)[number];
@@ -132,6 +136,19 @@ export type RuntimeTraceEvent =
       readonly contextCharBudget: number;
       readonly contextCharsUsed: number;
       readonly personaVersion: string;
+      readonly durationMs: number;
+      readonly resultCode: RuntimeResultCode;
+    }
+  | {
+      /** R1-14 (issue #26): child-memory context retrieval per turn. */
+      readonly type: "memory.context";
+      readonly component: "memory_context";
+      readonly atMs: number;
+      readonly traceId: string;
+      readonly turnId: string;
+      readonly sessionId: string;
+      /** Number of memory refs contributed (ids only, never bodies). */
+      readonly memoryRefCount: number;
       readonly durationMs: number;
       readonly resultCode: RuntimeResultCode;
     }

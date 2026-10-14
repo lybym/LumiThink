@@ -26,12 +26,17 @@
  * - Guardian service (R1-06): login/session verification, disclosure
  *   acknowledgment, consent grant/revoke, feature switches, audit (see
  *   guardian-service.ts).
+ * - Child memory service (R1-14): the whitelisted `memory.propose` /
+ *   `memory.lookup` tools bind to the real candidate-only memory service,
+ *   and the pipeline's memory-context hook retrieves confirmed refs per
+ *   turn (ids + versions only). Agent proposals always concern the pinned
+ *   demo child; confirm/correct/delete stay explicit human operations.
  *
  * The container is a globalThis singleton so Next.js dev hot-reload cannot
  * fork a second pipeline/ledger while one process is serving. All state is
  * process-local memory (single-process MVP; no persisted schema — guardian
- * sessions and authorizations included; disclosed in docs/adr/
- * 0003-guardian-auth-v0.md).
+ * sessions, authorizations and child memories included; disclosed in
+ * docs/adr/0003-guardian-auth-v0.md and docs/adr/0004-child-memory-v0.md).
  *
  * This module stays framework-free (no next/react imports) so the composed
  * runtime is testable with node:test.
@@ -40,16 +45,21 @@
 import { createModelGateway, type ModelGateway } from "../domain/gateway/gateway.ts";
 import { createMockModelProvider } from "../domain/gateway/mock-provider.ts";
 import { parseModelGatewayConfig } from "../domain/gateway/config.ts";
+import { parseActorContext } from "../domain/contract/actor.ts";
 import { resolveActivePersona } from "../domain/persona/registry.ts";
+import { createMemoryService, type MemoryService } from "../domain/memory/index.ts";
 import { createCordisPipeline, type CordisPipeline } from "../domain/runtime/pipeline.ts";
 import { createDshSessionMapper } from "../domain/runtime/session-map.ts";
 import { createRuntimeTraceRecorder, type RuntimeTraceRecorder } from "../domain/runtime/trace.ts";
+import type { CordisServiceHandler } from "../domain/runtime/cordis.ts";
 
 import { createInProcessDshAdapter } from "./dsh-inprocess-adapter.ts";
 import {
   createInteractionService,
   WEB_MVP_ACTOR_ID,
+  WEB_MVP_CHILD_REF,
   WEB_MVP_DEMO_CHILD_AGE_YEARS,
+  WEB_MVP_VERIFIED_BY,
   type InteractionService,
 } from "./interaction-service.ts";
 import {
@@ -60,6 +70,12 @@ import { gateProviderEgress, buildProviderEgressStatus, type ProviderEgressRegis
 
 export const WEB_MVP_MODEL_ID = "lumithink-mock-1" as const;
 export const WEB_MVP_PROVIDER_ID = "mock-local" as const;
+/**
+ * Server-owned runtime principal for memory service calls (R1-14). Agent
+ * proposals through the `memory.propose` tool surface under this system
+ * identity; the SUBJECT is pinned separately to the demo child constant.
+ */
+export const WEB_MVP_RUNTIME_ACTOR_ID = "act_webmvp_runtime" as const;
 
 export interface WebMvpRuntime {
   readonly service: InteractionService;
@@ -68,6 +84,8 @@ export interface WebMvpRuntime {
   /** The composed model gateway (value-free audit trail; egress evidence). */
   readonly gateway: ModelGateway;
   readonly trace: RuntimeTraceRecorder;
+  /** R1-14 child memory service (own store + own audit ring). */
+  readonly memory: MemoryService;
 }
 
 /**
@@ -93,6 +111,57 @@ export const WEB_MVP_GATEWAY_BUDGET = Object.freeze({
 export function createWebMvpRuntime(): WebMvpRuntime {
   const trace = createRuntimeTraceRecorder();
   const guardian = createGuardianService();
+  const memory = createMemoryService();
+
+  /**
+   * Server-verified runtime principal for the memory tool path (R1-14).
+   * Built fresh per call; nothing client-side can influence any field.
+   */
+  const memoryRuntimeActor = () =>
+    parseActorContext({
+      role: "system",
+      actorId: WEB_MVP_RUNTIME_ACTOR_ID,
+      childRef: null,
+      verifiedBy: WEB_MVP_VERIFIED_BY,
+      verifiedAt: new Date().toISOString(),
+    });
+
+  /**
+   * `memory.propose` tool handler (candidate-only by registry contract):
+   * agent proposals become CANDIDATES in the memory service — never writes.
+   * The subject is pinned SERVER-SIDE to the demo child constant: a
+   * submitted subjectRef can never redirect a proposal at another child.
+   * Structured rejections (type/label screen/duplicate/…) live in the
+   * memory audit ring; the tool boundary only observes a failed call.
+   */
+  const memoryProposeHandler: CordisServiceHandler = async ({ call }) => {
+    const input =
+      call.input !== null && typeof call.input === "object" && !Array.isArray(call.input)
+        ? (call.input as Record<string, unknown>)
+        : {};
+    const result = memory.proposeCandidate({ ...input, subjectRef: WEB_MVP_CHILD_REF }, memoryRuntimeActor());
+    if (!result.ok) {
+      throw new Error("memory_proposal_rejected");
+    }
+    return {
+      ok: true,
+      refs: [{ kind: "memory", refId: result.entry.memoryId, version: String(result.entry.revision) }],
+      candidateOnly: true,
+    };
+  };
+
+  /** `memory.lookup` tool handler: read-only refs for the demo child. */
+  const memoryLookupHandler: CordisServiceHandler = async () => {
+    const result = memory.retrieveForContext({ subjectRef: WEB_MVP_CHILD_REF }, memoryRuntimeActor());
+    if (!result.ok) {
+      throw new Error("memory_lookup_unavailable");
+    }
+    return {
+      ok: true,
+      refs: result.refs.map((ref) => ({ kind: "memory", refId: ref.refId, version: ref.version })),
+      candidateOnly: false,
+    };
+  };
 
   const mockProvider = createMockModelProvider({
     providerId: WEB_MVP_PROVIDER_ID,
@@ -141,6 +210,22 @@ export function createWebMvpRuntime(): WebMvpRuntime {
     sessionMapper: createDshSessionMapper({ port: createInProcessDshAdapter() }),
     personaPolicy: resolveActivePersona(),
     trace,
+    // R1-14 (issue #26): the whitelisted memory tools are bound to the real
+    // candidate-only memory service (propose → candidate; lookup → refs).
+    handlers: {
+      "memory.propose": memoryProposeHandler,
+      "memory.lookup": memoryLookupHandler,
+    },
+    // R1-14: minimal-by-need memory context retrieval (ids + versions only).
+    // A service failure throws → the pipeline degrades observably to zero
+    // memory refs (memory.context trace, memory_context_failed).
+    memoryContext: ({ childRef }) => {
+      const result = memory.retrieveForContext({ subjectRef: childRef }, memoryRuntimeActor());
+      if (!result.ok) {
+        throw new Error("memory_context_unavailable");
+      }
+      return result.refs;
+    },
   });
 
   const service = createInteractionService({
@@ -173,7 +258,7 @@ export function createWebMvpRuntime(): WebMvpRuntime {
     conversationCount: service.conversationsOwnedBy(WEB_MVP_ACTOR_ID).length,
   }));
 
-  return { service, guardian, pipeline, gateway, trace };
+  return { service, guardian, pipeline, gateway, trace, memory };
 }
 
 const RUNTIME_GLOBAL_KEY = Symbol.for("lumithink.web-mvp.runtime");
