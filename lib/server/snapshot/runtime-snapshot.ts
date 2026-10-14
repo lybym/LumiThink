@@ -34,9 +34,13 @@
  *   SELF-CLEARING MARKER FILE (deploy/restore.sh touches
  *   <snapshot-dir>/restore-replay.pending): the runtime replays the
  *   child-deletion ledger ONCE after the restore and deletes the marker in
- *   the same boot — ADR-0005's designed answer that a restore may never
- *   resurrect deleted data, without a persistent env flag that would turn
- *   every later restart into a purge of newly created data (review P1-1).
+ *   the same boot — but ONLY after the post-restore persist succeeded; a
+ *   failed persist leaves the marker pending so the next boot retries the
+ *   whole restore + replay (review round-2 P1-1). This is ADR-0005's
+ *   designed answer that a restore may never resurrect deleted data
+ *   (fail-safe direction: over-delete, never resurrect), without a
+ *   persistent env flag that would turn every later restart into a purge
+ *   of newly created data (review P1-1 round 1).
  *
  * This module stays framework-free (no next/react/prisma imports).
  */
@@ -270,7 +274,11 @@ export interface RestoreRuntimeSnapshotResult {
  *
  * ALL-OR-NOTHING: every section is pre-validated (pure validators, no state
  * touched) before the first commit — an invalid section aborts the restore
- * with NO partial state installed, and the composition refuses to boot.
+ * with NO partial state installed. The composition root additionally
+ * validates the envelope SYNCHRONOUSLY before composing (review round-2
+ * P2-1): an undecryptable/non-JSON/envelope-invalid file refuses to boot
+ * outright, while an envelope-valid file with an invalid SECTION aborts
+ * this async restore (loud stderr line, no state installed).
  */
 export async function restoreRuntimeSnapshot(
   runtime: Readonly<SnapshotCapableRuntime>,

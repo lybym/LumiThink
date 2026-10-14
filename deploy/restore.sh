@@ -55,9 +55,11 @@ chmod 600 "${MARKER}"
 # 4. Legacy cleanup (review P1-1): neutralize any persistent env flag an
 #    OLDER restore.sh left behind — with the marker mechanism in place, a
 #    leftover =1 would replay (and purge newly created data) on EVERY
-#    restart.
+#    restart. The rewrite is ALWAYS echoed (review round-2 P2-2): a
+#    deliberate operator override must not be silently rewritten.
 if grep -q '^LUMITHINK_SNAPSHOT_RESTORE_REPLAY=' "${ENV_FILE}"; then
   sed -i 's/^LUMITHINK_SNAPSHOT_RESTORE_REPLAY=.*/LUMITHINK_SNAPSHOT_RESTORE_REPLAY=0/' "${ENV_FILE}"
+  echo "[lumithink:restore] Rewrote a LUMITHINK_SNAPSHOT_RESTORE_REPLAY override in ${ENV_FILE} to =0 (the replay request is now carried by the marker file). If you set =1 deliberately for a diagnostic window, re-apply it AFTER this run and clear it right after."
 fi
 
 echo "[lumithink:restore] archive placed; restart the service (systemctl restart lumithink)."

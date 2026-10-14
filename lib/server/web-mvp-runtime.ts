@@ -91,9 +91,11 @@ import {
 import {
   captureRuntimeSnapshot,
   restoreRuntimeSnapshot,
+  validateRuntimeSnapshot,
   type RuntimeSnapshotSource,
   type SnapshotCapableRuntime,
 } from "./snapshot/runtime-snapshot.ts";
+import { ContractValidationError } from "../domain/contract/core.ts";
 import { createHash } from "node:crypto";
 import { existsSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
@@ -167,9 +169,12 @@ export const WEB_MVP_GATEWAY_BUDGET = Object.freeze({
  * R1-08 (review P1-1): the one-shot post-restore deletion replay is
  * requested with this marker FILE next to the snapshot (deploy/restore.sh
  * creates it) — NEVER with a persistent env flag. The runtime deletes the
- * marker during the SAME boot that performed the replay, so a missed manual
- * reset can never turn later restarts into a purge of newly created
- * confirmed data (AC 2 red line: confirmed events must not be lost).
+ * marker during the SAME boot that performed the replay, and ONLY after
+ * that boot's post-restore persist succeeded (a persist failure leaves the
+ * marker pending; the next boot retries the whole restore + replay), so a
+ * missed manual reset can never turn later restarts into a purge of newly
+ * created confirmed data (AC 2 red line: confirmed events must not be lost;
+ * review round-2 P1-1).
  */
 export const RESTORE_REPLAY_MARKER_FILENAME = "restore-replay.pending" as const;
 
@@ -225,15 +230,20 @@ export function createWebMvpRuntime(options: WebMvpRuntimeOptions = {}): WebMvpR
     secrets.registerValue("snapshot_encryption_key", options.snapshot.keyHex);
   }
 
-  // R1-08 snapshot writer: sync capture + atomic encrypted write. Failures
-  // are observable (terse stderr line, no payload) but never break the
-  // guardian mutation that triggered them.
+  // R1-08 snapshot writer: sync capture + atomic encrypted write. Returns
+  // TRUE when the encrypted file was published and FALSE on any failure
+  // (or when the subsystem is not attached) — the caller decides what a
+  // failure means. Failures are observable (terse stderr line, no payload)
+  // but never break the guardian mutation that triggered them; the boot
+  // path is the one caller that MUST observe the success fact (review
+  // round-2 P1-1: the restore-replay marker may only be consumed after the
+  // post-restore persist genuinely succeeded).
   const snapshotConfig = options.snapshot;
   let snapshotRuntime: SnapshotCapableRuntime | null = null;
-  const performSnapshotWrite = (source: RuntimeSnapshotSource): void => {
+  const performSnapshotWrite = (source: RuntimeSnapshotSource): boolean => {
     const current = snapshotRuntime;
     if (current === null || snapshotConfig === undefined) {
-      return;
+      return false;
     }
     try {
       cleanupSnapshotTempSync(snapshotConfig.path);
@@ -242,11 +252,13 @@ export function createWebMvpRuntime(options: WebMvpRuntimeOptions = {}): WebMvpR
         childActorId: WEB_MVP_ACTOR_ID,
       });
       writeSnapshotFileSync(snapshotConfig.path, JSON.stringify(snapshot), snapshotConfig.keyHex);
+      return true;
     } catch (error) {
       console.error(
         "[lumithink:snapshot] write failed:",
         error instanceof SnapshotStoreError ? error.message : "unexpected error",
       );
+      return false;
     }
   };
 
@@ -461,9 +473,13 @@ export function createWebMvpRuntime(options: WebMvpRuntimeOptions = {}): WebMvpR
     }
 
     // 1. Boot-time restore: a snapshot file present at composition is the
-    //    previous process's confirmed state. Undecryptable/corrupt files
-    //    fail the composition (fail-closed boot refusal — the operator
-    //    fixes the key or consciously removes the file; runbook documented).
+    //    previous process's confirmed state. Undecryptable, non-JSON and
+    //    envelope-invalid files fail the composition (fail-closed boot
+    //    refusal — the operator fixes the key or consciously removes the
+    //    file; runbook documented). An envelope-valid file whose SECTIONS
+    //    fail the deep restore pre-validation aborts the async restore
+    //    with NO state installed (loud stderr line; disclosed residual —
+    //    review round-2 P2-1).
     if (snapshotFilePresent) {
       const plaintext = readSnapshotFileSync(snapshotConfig.path, snapshotConfig.keyHex);
       let parsed: unknown;
@@ -471,6 +487,24 @@ export function createWebMvpRuntime(options: WebMvpRuntimeOptions = {}): WebMvpR
         parsed = JSON.parse(plaintext) as unknown;
       } catch {
         throw new SnapshotStoreError("bad_json", "the snapshot file does not contain valid JSON.");
+      }
+      // Review round-2 P2-1: validate the envelope SYNCHRONOUSLY so a
+      // decryptable-but-envelope-invalid file refuses the composition just
+      // like the undecryptable/non-JSON legs. Left to the async restore,
+      // its rejection would only land in the .catch below and the process
+      // would serve a default-state runtime. Problem paths/codes are
+      // structural facts only (never payload content).
+      try {
+        validateRuntimeSnapshot(parsed);
+      } catch (error) {
+        if (!(error instanceof ContractValidationError)) {
+          throw error;
+        }
+        throw new SnapshotStoreError(
+          "bad_snapshot",
+          "the snapshot file envelope is invalid: " +
+            error.problems.map((entry) => `${entry.path} (${entry.code})`).join("; "),
+        );
       }
       const restorePromise = restoreRuntimeSnapshot(
         runtime,
@@ -482,13 +516,26 @@ export function createWebMvpRuntime(options: WebMvpRuntimeOptions = {}): WebMvpR
       ).then((result) => {
         // Persist the post-restore state (with the restore audit entry and
         // any replay tombstone) so the on-box file is self-consistent.
-        performSnapshotWrite("boot-restore");
+        const persisted = performSnapshotWrite("boot-restore");
         if (markerReplayRequested) {
-          // Consume the marker ONLY after restore + replay + persist
-          // succeeded; a failure above leaves it pending and the next boot
-          // retries the whole restore + replay (fail-safe: over-delete,
-          // never resurrect — ADR-0005).
-          removeRestoreReplayMarker(markerPath);
+          if (persisted) {
+            // Consume the marker ONLY after restore + replay + persist
+            // succeeded; a failure above leaves it pending and the next boot
+            // retries the whole restore + replay (fail-safe: over-delete,
+            // never resurrect — ADR-0005).
+            removeRestoreReplayMarker(markerPath);
+          } else {
+            // Review round-2 P1-1: performSnapshotWrite never throws, so
+            // the persist leg must be observed through its return value. A
+            // failed persist leaves the on-box file as the pre-replay
+            // archive — consuming the marker here would let the NEXT boot
+            // restore that archive WITHOUT the deletion replay (deleted
+            // child data resurrected, AC 2 red line). The marker stays
+            // pending: the next boot retries the whole restore + replay.
+            console.error(
+              "[lumithink:snapshot] boot-restore persist failed; restore-replay marker left pending — the next boot retries restore + replay.",
+            );
+          }
         }
         return result;
       });

@@ -35,6 +35,7 @@ import {
   readSnapshotFileSync,
   snapshotFileExistsSync,
   writeSnapshotFileSync,
+  SnapshotStoreError,
 } from "../../lib/server/snapshot/snapshot-store.ts";
 import { WEB_MVP_ACTOR_ID } from "../../lib/server/interaction-service.ts";
 
@@ -315,6 +316,8 @@ test("an invalid section aborts the restore with NO partial state (all-or-nothin
 // (`<snapshot-dir>/restore-replay.pending`, touched by deploy/restore.sh) —
 // never a persistent env flag — so a missed reset can never turn later
 // restarts into a purge of newly created confirmed data (AC 2 red line).
+// The marker is consumed by the replaying boot and ONLY after that boot's
+// post-restore persist succeeded (review round-2 P1-1).
 // ---------------------------------------------------------------------------
 
 const BOOT_KEY = "3a".repeat(32);
@@ -432,6 +435,95 @@ test("a stale restore-replay marker without a snapshot file is consumed and neve
     const entries2 = boot2.memory.listEntries(WEB_MVP_CHILD_REF, guardianDataActor());
     assert.equal(entries2.length, 1);
     assert.ok(boot2.lifecycle.deletionRecords().every((record) => record.action !== "replay_child_deletions"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed boot-restore persist keeps the marker pending and the next boot retries restore + replay (P1-1)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "lumithink-persistfail-"));
+  try {
+    const snapPath = join(dir, "state", "snapshot.bin");
+    const markerPath = restoreReplayMarkerPathFor(snapPath);
+
+    // Boot 1 — confirmed content exists; the T0 archive lands on disk.
+    const boot1 = createWebMvpRuntime({ snapshot: { path: snapPath, keyHex: BOOT_KEY } });
+    enableRecording(boot1);
+    await runRecordedTurn(boot1);
+    const memoryId = confirmSyntheticMemory(boot1, "[synthetic] P1-1 persist-fail boot1 偏好");
+    writeSnapshotFileSync(snapPath, JSON.stringify(capture(boot1)), BOOT_KEY);
+    const archivePlaintext = readSnapshotFileSync(snapPath, BOOT_KEY);
+
+    // deploy/restore.sh simulation: archive placed (already done) + marker.
+    writeFileSync(markerPath, "", { mode: 0o600 });
+
+    // Force the boot-restore PERSIST leg to fail while leaving the on-box
+    // archive intact (the exact on-disk state of a failed atomic write): a
+    // DIRECTORY at the atomic write's temp path makes the pre-write
+    // cleanup's unlinkSync fail on EVERY platform (EPERM on Windows, EISDIR
+    // on Linux), so the write never starts and the file stays untouched —
+    // the disk/permission failure shape of a post-incident restore drill.
+    mkdirSync(`${snapPath}.tmp`);
+
+    // Boot 2 — the replaying boot whose post-restore persist FAILS.
+    const boot2 = createWebMvpRuntime({ snapshot: { path: snapPath, keyHex: BOOT_KEY } });
+    await settleBoot();
+    // Restore + replay DID run (ADR-0005: the restored old-archive content
+    // is re-purged in memory) — but the marker MUST NOT be consumed: the
+    // on-box file is still the pre-replay archive, and consuming the marker
+    // here would let the NEXT boot restore that archive WITHOUT the replay
+    // (deleted child data resurrected — AC 2 red line).
+    assert.equal(existsSync(markerPath), true, "a failed boot-restore persist must leave the marker pending");
+    assert.equal(replayCount(boot2), 1);
+    assert.equal(boot2.service.childDataSnapshot(WEB_MVP_ACTOR_ID).conversations.length, 0);
+    // The on-box archive is untouched (the atomic write failed before its
+    // publish rename) — exactly what the next boot must re-restore WITH the
+    // pending marker.
+    assert.equal(readSnapshotFileSync(snapPath, BOOT_KEY), archivePlaintext);
+
+    // The write failure was transient (operator fixed the disk): reboot.
+    // The pending marker must make boot 3 re-run the WHOLE restore + replay.
+    rmSync(`${snapPath}.tmp`, { recursive: true, force: true });
+    const boot3 = createWebMvpRuntime({ snapshot: { path: snapPath, keyHex: BOOT_KEY } });
+    await settleBoot();
+    assert.equal(existsSync(markerPath), false, "the retrying boot consumes the marker after a successful persist");
+    // The retried restore re-purged the old-archive content (a boot WITHOUT
+    // the pending marker would have resurrected conversation + memory).
+    assert.equal(boot3.service.childDataSnapshot(WEB_MVP_ACTOR_ID).conversations.length, 0);
+    assert.equal(
+      boot3.memory.listEntries(WEB_MVP_CHILD_REF, guardianDataActor()).some((entry) => entry.memoryId === memoryId),
+      false,
+      "the retried replay must re-purge the old archive's memory",
+    );
+    const last3 = boot3.lifecycle.deletionRecords().at(-1);
+    assert.equal(last3?.action, "replay_child_deletions");
+    assert.equal(replayCount(boot3), 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a decryptable but envelope-invalid snapshot file refuses the composition (P2-1)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "lumithink-envelope-"));
+  try {
+    const snapPath = join(dir, "state", "snapshot.bin");
+    mkdirSync(dirname(snapPath), { recursive: true });
+    // Decryptable (right key) + valid JSON, but the envelope is invalid:
+    // exactly the class the sync decrypt/JSON legs do not cover.
+    const bad = JSON.parse(JSON.stringify(capture(createWebMvpRuntime()))) as Record<string, unknown>;
+    bad.source = "hacked";
+    writeSnapshotFileSync(snapPath, JSON.stringify(bad), BOOT_KEY);
+
+    assert.throws(
+      () => createWebMvpRuntime({ snapshot: { path: snapPath, keyHex: BOOT_KEY } }),
+      (error: unknown) =>
+        error instanceof SnapshotStoreError &&
+        error.reason === "bad_snapshot" &&
+        error.message.includes("snapshot.source"),
+      "an envelope-invalid snapshot file must refuse the composition (fail-closed boot refusal)",
+    );
+    // The refusing boot leaves the file in place for operator inspection.
+    assert.equal(snapshotFileExistsSync(snapPath), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

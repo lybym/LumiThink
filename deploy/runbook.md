@@ -111,7 +111,8 @@ sudo deploy/restore.sh /var/backups/lumithink/snapshot-<UTC>.bin   # 校验→�
 sudo systemctl start lumithink
 deploy/healthcheck.sh
 # 启动后运行时自动：恢复状态 → 一次性重放删除台账（旧档可能早于删除）→ 写新快照 → 审计 snapshot_restored
-#   → 删除重放标记。此后每次普通重启不再重放：恢复后新建的数据照常保留，无需任何手动复位。
+#   → 持久化成功后删除重放标记。持久化失败时盘上快照保持恢复前旧档、标记保留，下次启动整体重试恢复+重放（宁可过删、绝不复活；stderr 有一行响亮提示）。
+#   此后每次普通重启不再重放：恢复后新建的数据照常保留，无需任何手动复位。
 ```
 
 **语义（AC 2）**：正常重启恢复**当前**快照文件——已确认事件不丢（删除先于快照时内容已清 + 墓碑已在）；恢复**旧档**时重放保证被删数据不复活（`replay_child_deletions`，ADR-0005 的设计对应物）。诚实边界：确认变更与快照写入之间存在毫秒级原子写窗口，崩溃恰好落在窗口内会回退该笔变更（SQLite/WAL 级持久化随数据建模决策收口）。
@@ -126,7 +127,7 @@ CI 证据：`.github/workflows/r1-deployment-gate.yml` 在 ubuntu runner 上以�
 
 1. **应用回滚**：release 目录按版本保留（`/opt/releases/<git-sha>`）；回滚 = 切回上一版目录（`systemctl stop` → 换软链/目录 → `systemctl start` → `deploy/healthcheck.sh`）。快照格式 v1 向后兼容仅由本版本引入——回滚到 R1-08 之前的版本前先停用快照变量（旧代码不读取快照文件，状态即进程内存默认态）。
 2. **配置回滚**：`/etc/lumithink/lumithink.env` 改动前 `cp` 留存（0600）；误配启动失败时恢复上一份 env 重启。
-3. **数据回滚**：恢复上一份快照归档（§5；若该档早于某次删除，restore.sh 已落一次性重放标记——恢复后首次启动自动重放并自清，无需手动复位，也不影响之后的普通重启）。
+3. **数据回滚**：恢复上一份快照归档（§5；若该档早于某次删除，restore.sh 已落一次性重放标记——恢复后首次启动自动重放并在持久化成功后自清，无需手动复位，也不影响之后的普通重启）。
 4. **凭证泄露应急**：轮换两个访问码（§3）+ 快照密钥（rotate-key）+ 重启；审计环留存 `login_failed`/`snapshot_restored` 事实。
 
 ## 8. 故障模式（diagnostics / failure modes）
