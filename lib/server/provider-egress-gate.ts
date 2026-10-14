@@ -24,6 +24,7 @@
  */
 
 import type { ModelProvider } from "../domain/gateway/provider.ts";
+import type { GuardianEgressStatus } from "../domain/guardian/authorizations.ts";
 import type { ProviderEgressClass } from "../domain/guardian/permissions.ts";
 import { providerEgressAuthorized } from "../domain/guardian/permissions.ts";
 import type { ModelRequest, ProviderStreamEvent } from "../domain/gateway/types.ts";
@@ -67,4 +68,43 @@ export function gateProviderEgress(options: ProviderEgressGateOptions): EgressGa
     registrationView: () => inner.registrationView(),
     requestCount: () => requests,
   }) as EgressGatedProvider;
+}
+
+// ---------------------------------------------------------------------------
+// Egress status aggregation (guardian 状态核对 feed)
+// ---------------------------------------------------------------------------
+
+/** One egress-gated provider registration observed by the status feed. */
+export interface ProviderEgressRegistration {
+  readonly providerId: string;
+  readonly classification: ProviderEgressClass;
+  /** Live vendor request counter of the gated provider (read per call). */
+  readonly requestCount: () => number;
+}
+
+/**
+ * Aggregate the guardian egress status from the REAL registered gated
+ * providers: per-provider counts for every registration, and the
+ * third-party count as the sum over `third_party_api`-classified
+ * registrations only. The sum over an (currently empty) third-party set is
+ * 0 by AGGREGATION, never by constant — registering a third-party provider
+ * updates the status feed without touching the wiring. Counters are read
+ * dynamically, so every status snapshot reflects the live state.
+ */
+export function buildProviderEgressStatus(
+  registrations: readonly ProviderEgressRegistration[],
+): GuardianEgressStatus {
+  const providerRequestCounts: Record<string, number> = {};
+  let thirdPartyProviderRequestCount = 0;
+  for (const registration of registrations) {
+    const count = registration.requestCount();
+    providerRequestCounts[registration.providerId] = count;
+    if (registration.classification === "third_party_api") {
+      thirdPartyProviderRequestCount += count;
+    }
+  }
+  return Object.freeze({
+    providerRequestCounts: Object.freeze(providerRequestCounts),
+    thirdPartyProviderRequestCount,
+  });
 }

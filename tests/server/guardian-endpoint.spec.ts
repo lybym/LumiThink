@@ -209,6 +209,63 @@ test("logout revokes the session; the token is invalid for every surface afterwa
   assert.ok(rig.guardian.auditEntries().some((entry) => entry.kind === "logout"));
 });
 
+test("an 8h-old session is rejected as untrusted and its server entry is cleaned up", () => {
+  const rig = createRig();
+  const { token } = loginAs(rig, GUARDIAN_DEMO_ACCESS_CODE);
+  assert.equal(rig.guardian.getAuthorizations({ authorization: bearer(token) }).kind, "ok");
+
+  // Advance the injected clock past the absolute TTL (8h).
+  rig.nowMs(8 * 60 * 60 * 1000 + 1);
+  const expired = rig.guardian.getAuthorizations({ authorization: bearer(token) });
+  assert.equal(expired.kind, "error");
+  if (expired.kind === "error") {
+    assert.equal(expired.envelope.error.code, "CONTRACT_UNTRUSTED_IDENTITY");
+  }
+  assert.ok(
+    rig.guardian
+      .auditEntries()
+      .some((entry) => entry.kind === "access_denied" && entry.detail === "session_expired"),
+  );
+
+  // The expired session was DELETED, not merely rejected: after re-login the
+  // status snapshot reports exactly ONE active session.
+  const relogin = loginAs(rig, GUARDIAN_DEMO_ACCESS_CODE);
+  const status = rig.guardian.getAuthorizations({ authorization: bearer(relogin.token) });
+  assert.equal(status.kind, "ok");
+  const snapshot = (status.kind === "ok" ? status.body : null) as { activeSessions: number };
+  assert.equal(snapshot.activeSessions, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Seeded state disclosure (review P1-1)
+// ---------------------------------------------------------------------------
+
+test("a fresh service discloses its seeded state as `seed` audit entries", () => {
+  const rig = createRig();
+  const seeds = rig.guardian.auditEntries().filter((entry) => entry.kind === "seed");
+  // The three seeded elements: acked disclosure 1.0.0, the active base
+  // consent, and the disabled egress switch (initialGuardianAuthorizationState).
+  assert.deepEqual(
+    seeds.map((entry) => [entry.target, entry.detail]),
+    [
+      ["1.0.0", "acknowledged"],
+      ["child_model_interaction", "active"],
+      ["third_party_data_egress", "disabled"],
+    ],
+  );
+  for (const entry of seeds) {
+    assert.equal(entry.actorRole, null, "seeds are server state, not actor actions");
+    assert.equal(entry.actorId, null);
+    parseGuardianAuditEntry(entry); // re-validates fail-closed
+  }
+  // Seeds disclose provenance WITHOUT fabricating actor activity: a fresh
+  // service's audit carries no login/ack/grant/toggle/style mutation entries.
+  const kinds = rig.guardian.auditEntries().map((entry) => entry.kind);
+  for (const actorKind of ["login_success", "disclosure_ack", "consent_grant", "switch_change", "style_change"]) {
+    assert.ok(!kinds.some((kind) => kind === actorKind), `a fresh audit must not contain ${actorKind}`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Role matrix on routes
 // ---------------------------------------------------------------------------
@@ -375,6 +432,42 @@ test("style changes flow through the trusted guardian_config provenance with an 
     .find((entry) => entry.kind === "style_change");
   assert.ok(styleChange !== undefined);
   assert.equal(styleChange?.detail, "guardian_config");
+});
+
+test("an identical style re-submission reports unchanged without a duplicate audit entry", () => {
+  const rig = createRig();
+  const { token } = loginAs(rig, GUARDIAN_DEMO_ACCESS_CODE);
+  const auth = bearer(token);
+  const styleUpdate = (knobId: string, value: string) => ({
+    authorization: auth,
+    body: {
+      protocolVersion: "1.0",
+      action: "set_persona_style",
+      updates: [{ knobId, value }],
+    },
+  });
+  const outcomeOf = (result: { readonly kind: string; readonly body?: unknown }): string =>
+    result.kind === "ok" ? (result.body as { outcome: string }).outcome : "";
+
+  const first = rig.guardian.postAuthorizations(styleUpdate("language_level", "advanced"));
+  assert.equal(outcomeOf(first), "applied");
+  // Value-identical re-submission: `unchanged`, no duplicate style_change.
+  const second = rig.guardian.postAuthorizations(styleUpdate("language_level", "advanced"));
+  assert.equal(outcomeOf(second), "unchanged");
+  assert.equal(rig.guardian.auditEntries().filter((entry) => entry.kind === "style_change").length, 1);
+
+  // First-touch re-attribution is a REAL change even at an identical value
+  // (system_default → guardian_config): applied + audited exactly once, then
+  // a further identical submission is unchanged.
+  const reattribute = rig.guardian.postAuthorizations(styleUpdate("question_density", "medium"));
+  assert.equal(outcomeOf(reattribute), "applied");
+  assert.equal(
+    rig.guardian.currentFamilyStyle().provenance.find((entry) => entry.knobId === "question_density")?.source,
+    "guardian_config",
+  );
+  const reattributeAgain = rig.guardian.postAuthorizations(styleUpdate("question_density", "medium"));
+  assert.equal(outcomeOf(reattributeAgain), "unchanged");
+  assert.equal(rig.guardian.auditEntries().filter((entry) => entry.kind === "style_change").length, 2);
 });
 
 test("style updates with unregistered knobs/values are rejected without echo", () => {

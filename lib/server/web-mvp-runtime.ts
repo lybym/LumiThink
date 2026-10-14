@@ -56,7 +56,7 @@ import {
   createGuardianService,
   type GuardianService,
 } from "./guardian-service.ts";
-import { gateProviderEgress } from "./provider-egress-gate.ts";
+import { gateProviderEgress, buildProviderEgressStatus, type ProviderEgressRegistration } from "./provider-egress-gate.ts";
 
 export const WEB_MVP_MODEL_ID = "lumithink-mock-1" as const;
 export const WEB_MVP_PROVIDER_ID = "mock-local" as const;
@@ -154,17 +154,21 @@ export function createWebMvpRuntime(): WebMvpRuntime {
     resolvePersonaStyle: () => guardian.currentFamilyStyle(),
   });
 
-  // Guardian status feeds: real vendor request counters (third-party count
-  // aggregates over third-party-classified providers — none are wired in
-  // this composition, so the sum over the empty set is 0 by aggregation,
-  // not by constant) and the minimal usage summary (counts, no content).
-  const providerRequestCounts = (): Record<string, number> => ({
-    [WEB_MVP_PROVIDER_ID]: gatedProvider.requestCount(),
-  });
-  guardian.configureEgressStatus(() => ({
-    providerRequestCounts: providerRequestCounts(),
-    thirdPartyProviderRequestCount: 0,
-  }));
+  // Guardian status feeds: real vendor request counters (the egress status
+  // is AGGREGATED from the registered egress-gated providers via
+  // buildProviderEgressStatus — per-provider counts for every registration
+  // and the third-party count summed over third_party_api-classified
+  // registrations only). No third-party provider is wired in this
+  // composition, so that count is 0 by aggregation over an empty set, and
+  // a future third-party registration updates the feed without new wiring.
+  const egressRegistrations: ProviderEgressRegistration[] = [
+    {
+      providerId: WEB_MVP_PROVIDER_ID,
+      classification: "local_no_egress",
+      requestCount: () => gatedProvider.requestCount(),
+    },
+  ];
+  guardian.configureEgressStatus(() => buildProviderEgressStatus(egressRegistrations));
   guardian.configureUsageSummary(() => ({
     conversationCount: service.conversationsOwnedBy(WEB_MVP_ACTOR_ID).length,
   }));

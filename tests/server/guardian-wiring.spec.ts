@@ -31,6 +31,7 @@ import {
 } from "../../lib/domain/guardian/authorizations.ts";
 import { createInProcessDshAdapter } from "../../lib/server/dsh-inprocess-adapter.ts";
 import {
+  ADMIN_DEMO_ACCESS_CODE,
   GUARDIAN_DEMO_ACCESS_CODE,
   createGuardianService,
 } from "../../lib/server/guardian-service.ts";
@@ -41,7 +42,11 @@ import {
   type InteractionService,
 } from "../../lib/server/interaction-service.ts";
 import { WEB_MVP_PROVIDER_ID } from "../../lib/server/web-mvp-runtime.ts";
-import { gateProviderEgress } from "../../lib/server/provider-egress-gate.ts";
+import {
+  buildProviderEgressStatus,
+  gateProviderEgress,
+  type ProviderEgressRegistration,
+} from "../../lib/server/provider-egress-gate.ts";
 import { createWebMvpRuntime, WEB_MVP_MODEL_ID } from "../../lib/server/web-mvp-runtime.ts";
 
 const NOW = "2026-10-14T08:00:00.000Z";
@@ -162,6 +167,46 @@ test("revoked family consent rejects new family turns — including replays of p
   assert.equal(regrant.kind, "ok");
   const restored = await runtime.service.submitInteraction({ body: submitBody(), actor });
   assert.equal(restored.kind, "ack");
+});
+
+test("a request id rejected during revocation is not burned — after re-grant the SAME id executes fresh", async () => {
+  const runtime = createWebMvpRuntime();
+  const actor = childActor();
+  const login = runtime.guardian.sessionLogin({
+    body: { protocolVersion: "1.0", accessCode: GUARDIAN_DEMO_ACCESS_CODE },
+  });
+  assert.equal(login.kind, "ok");
+  const auth = `Bearer ${(login.kind === "ok" ? (login.body as { sessionToken: string }).sessionToken : "")}`;
+
+  // Revoke first: this request id is rejected by the consent gate BEFORE the
+  // idempotency ledger is consulted.
+  const revoke = runtime.guardian.postAuthorizations({
+    authorization: auth,
+    body: { protocolVersion: "1.0", action: "revoke_consent", consentId: "child_model_interaction" },
+  });
+  assert.equal(revoke.kind, "ok");
+  const rejectedId = nextId("requestId");
+  const rejected = await runtime.service.submitInteraction({ body: submitBody(undefined, rejectedId), actor });
+  assert.equal(rejected.kind, "error");
+  if (rejected.kind === "error") {
+    assert.equal(rejected.envelope.error.code, "CONTRACT_WRONG_ROLE");
+  }
+
+  // Re-grant: the SAME request id resolves as a FRESH accept and executes —
+  // the gate never consumed a ledger slot for it, so no duplicate-ack
+  // short-circuit can suppress the execution (pins the no-slot-burn
+  // ordering of the consent gate vs the ledger).
+  const regrant = runtime.guardian.postAuthorizations({
+    authorization: auth,
+    body: { protocolVersion: "1.0", action: "grant_consent", consentId: "child_model_interaction" },
+  });
+  assert.equal(regrant.kind, "ok");
+  const fresh = await runtime.service.submitInteraction({ body: submitBody(undefined, rejectedId), actor });
+  assert.equal(fresh.kind, "ack");
+  if (fresh.kind === "ack") {
+    const events = await drainEvents(runtime.service, fresh.body, actor);
+    assert.ok(events.some((event) => event.kind === "agent.completed"), "the turn must execute for real");
+  }
 });
 
 test("client-submitted identity fields stay rejected on the interaction path (no self-promotion path)", async () => {
@@ -286,6 +331,138 @@ test("disabled third-party egress: the gateway refuses the call BEFORE transport
   const completed = await gateway.complete(request);
   assert.equal(completed.providerId, "vendor-egress-x");
   assert.equal(gated.requestCount(), 1);
+});
+
+test("egress enabled + provider failure: the vendor attempt counts and degrades structurally", async () => {
+  const guardian = createGuardianService();
+  const login = guardian.sessionLogin({
+    body: { protocolVersion: "1.0", accessCode: GUARDIAN_DEMO_ACCESS_CODE },
+  });
+  assert.equal(login.kind, "ok");
+  const grant = guardian.postAuthorizations({
+    authorization: `Bearer ${(login.kind === "ok" ? (login.body as { sessionToken: string }).sessionToken : "")}`,
+    body: {
+      protocolVersion: "1.0",
+      action: "set_feature_switch",
+      switchId: "third_party_data_egress",
+      enabled: true,
+    },
+  });
+  assert.equal(grant.kind, "ok");
+
+  const failingVendor = createMockModelProvider({
+    providerId: "vendor-egress-fail",
+    script: {
+      reply: { prefix: "VENDOR", chunkCount: 2, delayMsPerChunk: 0 },
+      failure: { classification: "unavailable", times: "always" },
+    },
+  });
+  const gated = gateProviderEgress({
+    provider: failingVendor,
+    classification: "third_party_api",
+    isThirdPartyEgressEnabled: () => guardian.isThirdPartyEgressEnabled(),
+  });
+  const gateway = createModelGateway(
+    parseModelGatewayConfig({
+      gatewayVersion: "1.0",
+      models: [{ modelId: "vendor-model-1", providerId: "vendor-egress-fail", maxOutputTokens: 256, pricing: null }],
+      budget: { maxRequestsPerDay: 100, maxCostMicroUsdPerDay: 100_000, maxTotalTokensPerDay: 100_000 },
+      retry: { maxAttempts: 1, backoffBaseMs: 1 },
+      breaker: { failureThreshold: 5, cooldownMs: 1_000 },
+      requestTimeoutMs: 30_000,
+    }),
+    [gated],
+  );
+
+  // Switch ON + vendor unavailable → a CLASSIFIED gateway failure (structured
+  // degradation), not a raw transport throw, and the vendor attempt WAS
+  // transported: the counter reflects it.
+  let caught: GatewayError | null = null;
+  try {
+    await gateway.complete({
+      requestId: nextId("requestId"),
+      traceId: nextId("traceId"),
+      turnId: nextId("turnId"),
+      modelId: "vendor-model-1",
+      messages: [{ role: "user", content: "[synthetic] egress failure probe" }],
+    });
+  } catch (error) {
+    if (error instanceof GatewayError) {
+      caught = error;
+    } else {
+      throw error;
+    }
+  }
+  assert.ok(caught !== null, "the failure must surface as a GatewayError");
+  assert.equal(caught?.code, "GATEWAY_PROVIDER_UNAVAILABLE");
+  assert.equal(gated.requestCount(), 1, "the switched-on vendor attempt must be counted");
+  assert.ok(
+    gateway
+      .auditTrail()
+      .some((event) => event.type === "attempt.failed" && event.providerId === "vendor-egress-fail"),
+    "the provider failure must be observable in the value-free audit",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Egress status aggregation (review P2-2)
+// ---------------------------------------------------------------------------
+
+test("buildProviderEgressStatus aggregates counts by egress classification", () => {
+  const registrations: ProviderEgressRegistration[] = [
+    { providerId: "local-a", classification: "local_no_egress", requestCount: () => 5 },
+    { providerId: "vendor-a", classification: "third_party_api", requestCount: () => 3 },
+    { providerId: "vendor-b", classification: "third_party_api", requestCount: () => 4 },
+  ];
+  const status = buildProviderEgressStatus(registrations);
+  assert.deepEqual(status.providerRequestCounts, { "local-a": 5, "vendor-a": 3, "vendor-b": 4 });
+  assert.equal(status.thirdPartyProviderRequestCount, 7);
+  // Counters are read dynamically per call.
+  let live = 10;
+  const liveRegistration: ProviderEgressRegistration = {
+    providerId: "vendor-live",
+    classification: "third_party_api",
+    requestCount: () => live,
+  };
+  assert.equal(buildProviderEgressStatus([liveRegistration]).thirdPartyProviderRequestCount, 10);
+  live = 11;
+  assert.equal(buildProviderEgressStatus([liveRegistration]).thirdPartyProviderRequestCount, 11);
+  // Empty registration set: 0 by aggregation over the empty third-party set.
+  const empty = buildProviderEgressStatus([]);
+  assert.deepEqual(empty.providerRequestCounts, {});
+  assert.equal(empty.thirdPartyProviderRequestCount, 0);
+});
+
+test("the composed runtime's guardian status egress block is aggregated from real gated counters", async () => {
+  const runtime = createWebMvpRuntime();
+  const actor = childActor();
+  const result = await runtime.service.submitInteraction({ body: submitBody(), actor });
+  assert.equal(result.kind, "ack");
+  if (result.kind === "ack") {
+    await drainEvents(runtime.service, result.body, actor);
+  }
+
+  // Admin may read the status surface (role matrix): the local provider's
+  // REAL attempt count is reported…
+  const login = runtime.guardian.sessionLogin({
+    body: { protocolVersion: "1.0", accessCode: ADMIN_DEMO_ACCESS_CODE },
+  });
+  assert.equal(login.kind, "ok");
+  const status = runtime.guardian.getAuthorizations({
+    authorization: `Bearer ${(login.kind === "ok" ? (login.body as { sessionToken: string }).sessionToken : "")}`,
+  });
+  assert.equal(status.kind, "ok");
+  const snapshot = (status.kind === "ok" ? status.body : null) as {
+    egress: { providerRequestCounts: Record<string, number>; thirdPartyProviderRequestCount: number };
+  };
+  assert.ok(
+    (snapshot.egress.providerRequestCounts[WEB_MVP_PROVIDER_ID] ?? 0) >= 1,
+    "the local provider's real request count must reach the status feed",
+  );
+  // …while the third-party count is the aggregation over
+  // third_party_api-classified registrations only (none wired): 0 even
+  // though a local provider ran — computed, not a constant.
+  assert.equal(snapshot.egress.thirdPartyProviderRequestCount, 0);
 });
 
 // ---------------------------------------------------------------------------

@@ -32,10 +32,12 @@
  *   third-party-classified provider BEFORE transport (existing fail-closed
  *   `dataEgressAuthorized` gate), so vendor request count stays 0.
  * - AUDIT: an append-only bounded ring records every security-relevant
- *   event (login success/failure/lockout, logout, disclosure ack, consent
- *   grant/revoke, switch change, style change, denied access, guardian
- *   cancel). Entries are structural facts only — no access codes, no
- *   session tokens, no submitted text (tested).
+ *   event (seeded-state disclosure at construction, login success/failure/
+ *   lockout, logout, disclosure ack, consent grant/revoke, switch change,
+ *   style change, denied access, guardian cancel). Entries are structural
+ *   facts only — no access codes, no session tokens, no submitted text
+ *   (tested). Style changes are idempotent: an identical re-submission
+ *   reports `unchanged` without a duplicate audit entry.
  * - STYLE: the guardian sets persona style knobs through the trusted
  *   `guardian_config` provenance (lib/domain/persona/turn.ts
  *   applyPersonaStyleKnobs) with the {knobId, value, source} audit trail —
@@ -82,10 +84,15 @@ import {
 import {
   applyPersonaStyleKnobs,
   personaDefaultStyle,
+  type PersonaKnobProvenanceEntry,
   type PersonaKnobUpdate,
   type PersonaStyleWithProvenance,
 } from "../domain/persona/turn.ts";
-import type { PersonaPolicyV0 } from "../domain/persona/policy.ts";
+import {
+  PERSONA_STYLE_KNOBS,
+  type PersonaPolicyV0,
+  type PersonaStyleState,
+} from "../domain/persona/policy.ts";
 import { resolveActivePersona } from "../domain/persona/registry.ts";
 
 import { safeErrorResult } from "./interaction-service.ts";
@@ -181,6 +188,39 @@ function digestsEqual(a: string, b: string): boolean {
   return timingSafeEqual(da, db);
 }
 
+/**
+ * True when a style application result resolves EXACTLY the current state:
+ * every registered knob value AND the full provenance trail are identical
+ * (same order, same {knobId, value, source}). Used for style-mutation
+ * idempotency: an identical re-submission reports `unchanged` and produces
+ * no duplicate `style_change` audit entry.
+ */
+function styleResolutionEquals(
+  current: Readonly<PersonaStyleWithProvenance>,
+  next: {
+    readonly style: Readonly<PersonaStyleState>;
+    readonly provenance: readonly Readonly<PersonaKnobProvenanceEntry>[];
+  },
+): boolean {
+  for (const knob of PERSONA_STYLE_KNOBS) {
+    if (current.style[knob] !== next.style[knob]) {
+      return false;
+    }
+  }
+  if (current.provenance.length !== next.provenance.length) {
+    return false;
+  }
+  return current.provenance.every((entry, index) => {
+    const other = next.provenance[index];
+    return (
+      other !== undefined &&
+      entry.knobId === other.knobId &&
+      entry.value === other.value &&
+      entry.source === other.source
+    );
+  });
+}
+
 export function createGuardianService(options: GuardianServiceOptions = {}): GuardianService {
   const policy = options.personaPolicy ?? resolveActivePersona();
   const clock = options.clock ?? (() => Date.now());
@@ -225,6 +265,39 @@ export function createGuardianService(options: GuardianServiceOptions = {}): Gua
     if (audit.length > MAX_AUDIT_ENTRIES) {
       audit.shift();
     }
+  }
+
+  // Seeds are SERVER-preset state, not actor actions, so they are disclosed
+  // as `seed` audit entries with actorRole/actorId null (the
+  // GuardianAuditEntry type comment: "null for seeds") — one burst per
+  // service construction. Construction-scoping is the idempotency point:
+  // the serving path builds this service exactly ONCE per process (the
+  // getWebMvpRuntime globalThis singleton in web-mvp-runtime.ts), so the
+  // burst happens once per process; a fresh process re-discloses its own
+  // seeded state, which is precisely the provenance an auditor must be able
+  // to see (initialGuardianAuthorizationState doc comment; API_CONTRACT
+  // §12.4).
+  pushAudit("seed", {
+    actorRole: null,
+    actorId: null,
+    target: authorizations.disclosureAckVersion,
+    detail: "acknowledged",
+  });
+  for (const consent of Object.values(authorizations.consents)) {
+    pushAudit("seed", {
+      actorRole: null,
+      actorId: null,
+      target: consent.consentId,
+      detail: consent.active ? "active" : "inactive",
+    });
+  }
+  for (const featureSwitch of Object.values(authorizations.switches)) {
+    pushAudit("seed", {
+      actorRole: null,
+      actorId: null,
+      target: featureSwitch.switchId,
+      detail: featureSwitch.enabled ? "enabled" : "disabled",
+    });
   }
 
   function errorResult(error: unknown): GuardianCallResult {
@@ -489,6 +562,21 @@ export function createGuardianService(options: GuardianServiceOptions = {}): Gua
                 ),
               ]),
             );
+          }
+          // Idempotency, same discipline as the consent/switch/ack
+          // transitions (API_CONTRACT §12.2): a style POST whose RESOLVED
+          // outcome is identical to the current style AND provenance is
+          // `unchanged` — no state churn, no duplicate `style_change` audit.
+          // Re-setting a knob to its current value still re-attributes
+          // provenance on the first guardian touch
+          // (system_default → guardian_config), so that real re-attribution
+          // stays `applied` and audited.
+          if (styleResolutionEquals(style, applied)) {
+            return {
+              kind: "ok",
+              httpStatus: 200,
+              body: { protocolVersion: "1.0", outcome: "unchanged" },
+            };
           }
           style = Object.freeze({ style: applied.style, provenance: applied.provenance });
           pushAudit("style_change", {
