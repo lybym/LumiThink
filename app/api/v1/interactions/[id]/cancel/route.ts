@@ -19,6 +19,15 @@ export const runtime = "nodejs";
  * suppresses late results — cancelled output can never reach the child.
  * Unknown/foreign turns resolve to the safe no-op `unknown_turn`.
  *
+ * R1-06 scope note (review P2-3 disposition — keep + document, disclosed in
+ * the PR): the guardian FAMILY-cancel policy is wired at the service layer
+ * (`cancelPolicy` → `familyCancelPolicy`) and pinned by tests
+ * (tests/server/guardian-wiring.spec.ts), but THIS transport still resolves
+ * the server-injected demo child actor only — no guardian session is parsed
+ * on this route — so family cancel is NOT HTTP-reachable in R1-06. The
+ * guardian-session-aware cancel surface lands with the guardian console
+ * work (R1-09 or later); API_CONTRACT §12.3 carries the same note.
+ *
  * Next.js App Router constraint: sibling dynamic segments of one level must
  * share ONE slug name, so both /{traceId}/events and /{turnId}/cancel use
  * the filesystem segment `[id]` — the wire URLs are unchanged and each

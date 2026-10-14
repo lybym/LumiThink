@@ -1,6 +1,6 @@
 # LumiThink 2.0 统一交互 API 合同（Contract v1.0）
 
-> 版本：`1.0` ｜ 状态：**合同定义与契约测试随 R1-01 交付；端点层自 R1-05 起为 Web MVP 接线（进程内内存态、单进程拓扑，见下方交付说明）**
+> 版本：`1.0` ｜ 状态：**合同定义与契约测试随 R1-01 交付；端点层自 R1-05 起为 Web MVP 接线（进程内内存态、单进程拓扑，见下方交付说明）；R1-06 起新增 §12 监护人鉴权、授权与功能开关（解析级 fail-closed，Bearer 会话，无 Cookie）**
 > R1-05 交付说明（Issue #17）：§4/§5/§6 三条路由由 `app/api/v1/interactions/*`（薄传输层）+ `lib/server/interaction-service.ts`（服务语义）为 Web MVP 接线——服务端验证身份注入（R1-06 鉴权落地前为固定合成演示儿童，客户端无法影响任何身份字段）、幂等台账按 **(verifiedActor, requestId)** 隔离（评审硬前置：全局台账会让重放的 requestId 返回他人会话）、请求体字节上限（超限映射 `CONTRACT_TEXT_TOO_LONG` 413）、SSE 流把 **Gate 批准后的完整输出**按有界短片段节流发出（合同 §5 语义"短句片段，非原始模型 token"；未过 Output Gate 的模型增量永远不可达儿童）、取消 = 网关调用者取消 + 迟到结果抑制。会话/台账/在途轮次状态为进程内内存（单进程 MVP），持久化选型仍按 TECH_STACK §3 待定。
 > 对应：[Issue #13](https://github.com/lybym/LumiThink/issues/13) ｜ [PRD FR-001](./PRD.md) ｜ [Roadmap R1-01](./ROADMAP.md) ｜ [架构](./ARCHITECTURE.md)
 > 代码：`lib/domain/contract/`（类型 + 解析器 + JSON Schema + fixtures）｜ 测试：`tests/domain/contract/`
@@ -125,3 +125,47 @@ ID 由服务端生成；错误回显只允许通过同一语法**再验证**的 
 | 正反测试：字段缺失、未知版本、错误角色、重复 request_id、恶意长文本、跨会话关联 | `tests/domain/contract/interaction.spec.ts`、`actor.spec.ts`、`core.spec.ts`、`idempotency.spec.ts`、`schemas.spec.ts`、`response.spec.ts` |
 | 相同领域请求从 Web 与 Voice Adapter 产生一致标准事件 | `interaction.spec.ts`（normalize 一致性、ingress 由服务端决定、语义 fingerprint） |
 | 任何错误不得输出堆栈、凭据或原始私人上下文 | `errors.spec.ts`（dirty error → CONTRACT_INTERNAL、ID 回显再验证、fixture 无 stack 字段） |
+
+## 12. 监护人鉴权、授权与功能开关（R1-06）
+
+> 对应：[Issue #18](https://github.com/lybym/LumiThink/issues/18) ｜ [PRD FR-005 / UC-06](./PRD.md) ｜ [Roadmap R1-06](./ROADMAP.md) ｜ [ADR-0003](./adr/0003-guardian-auth-v0.md)
+> 代码：`lib/domain/guardian/`（授权语义 + 权限规则 + 会话载荷）、`lib/server/guardian-service.ts`（验证/会话/审计）、`lib/server/provider-egress-gate.ts`（供应商外发门）｜ 测试：`tests/domain/guardian/`、`tests/server/guardian-endpoint.spec.ts`、`tests/server/guardian-wiring.spec.ts`
+
+### 12.1 身份模型（首期单家庭）
+
+- 可信服务端身份关系由**家庭注册表**定义（服务端常量，合成演示值）：`chd_demo_001`（儿童，沿用 #17 服务端注入演示身份）、`act_guardian_demo01`（监护人）、`act_admin_demo01`（独立管理员，PRD"维护者"——以合同 `system` 角色验证，`childRef` 为 null）。
+- 登录 `POST /api/v1/guardian/session`：body `{ protocolVersion, accessCode }`；**请求 schema 拒绝一切身份字段**（role/actorId/child_id 提交即 `CONTRACT_FIELD_INVALID`），身份全部由服务端解析——伪造 child_id 与自报角色无入口。演示访问码为公开合成演示值（真实凭据管理属 R1-08）；比对使用 SHA-256 摘要 + 常数时间比较；连续 5 次失败全局锁定 15 分钟（审计可见，探测方只见统一拒绝文案）。
+- 会话：服务端铸造 256-bit 不透明令牌（base64url，43 字符），仅存服务端，绝对 TTL 8h，可显式撤销；客户端仅经 `Authorization: Bearer` 头携带。**不引入 Cookie**——无环境凭据即无 CSRF 面；同一权衡的互补残余如实记录：Bearer 令牌在活动会话期间可被 XSS 读取（内存持有仅缩小而非消除该面，CSP 属 R1-08——见 ADR-0003 决策 2/4）。响应：`{ protocolVersion, sessionToken, principal: "guardian"|"admin", role, actorId, childRef, expiresAt }`。
+- 鉴权失败（无/坏/过期/已撤销令牌）映射既有错误注册表的 `CONTRACT_UNTRUSTED_IDENTITY`（403）——本版本不新增 401 错误码，保持 9 码注册表稳定；已验证但角色越权 → `CONTRACT_WRONG_ROLE`（403）。
+
+### 12.2 路由与载荷（解析级校验；JSON Schema 发布物 v0 不含本节载荷，见 12.5）
+
+| 路由 | 方法 | 角色 | 语义 |
+| --- | --- | --- | --- |
+| `/api/v1/guardian/session` | POST | 匿名 | 登录（见 12.1） |
+| `/api/v1/guardian/session/logout` | POST | 已登录 | 撤销当前会话；此后该令牌对所有监护人面失效 |
+| `/api/v1/guardian/authorizations` | GET | guardian / admin | 状态核对快照：告知文档+确认态、授权态、开关态、供应商请求计数、最小使用计数（无聊天内容）、活跃会话数、审计尾部 |
+| `/api/v1/guardian/authorizations` | POST | **仅 guardian** | `{ action }`：`acknowledge_disclosure` / `grant_consent` / `revoke_consent` / `set_feature_switch` / `set_persona_style` |
+| `/api/v1/guardian/audit` | GET | guardian / admin | 安全变更审计（见 12.4） |
+
+- 授权注册表 v0：consent `child_model_interaction`；功能开关 `third_party_data_egress`（**默认关闭**）。
+- **告知先行**：`grant_consent` / `set_feature_switch(开启)` / `set_persona_style` 要求当前告知版本已被确认；`revoke_consent` 是 fail-safe 方向，**永远允许**。状态转移幂等：重复授权/撤销/同值开关返回 `unchanged` 且不产生重复审计；`set_persona_style` 同值重复提交（解析后风格与 provenance 均不变）同样返回 `unchanged` 且不产生重复审计——首次将默认值显式设为同值会重归属 provenance（`system_default` → `guardian_config`），仍按 `applied` 审计。
+- `set_persona_style` 经 persona 域唯一可信变更路径（`applyPersonaStyleKnobs`，source `guardian_config`）应用，携带 `{knobId, value, source}` 审计轨迹；未注册 knob/值 fail-closed 拒绝且不回显。
+
+### 12.3 强制点（撤销即生效）
+
+- **撤销后调用模型被拒绝**：交互服务新增 submit-time 授权钩子（`authorizeTurn`，位于合同解析之后、幂等台账之前）——家庭 consent 撤销期间，本家庭**新**文本轮次（含被撤销前 requestId 的重放）一律 `CONTRACT_WRONG_ROLE` 403；已开始轮次正常结束。
+- **禁用第三方外发 = 供应商请求数 0**：`third_party_data_egress` 关闭时，第三方类供应商的 `dataEgressAuthorized` 动态置 false，模型网关既有 fail-closed 门在**任何传输前**拒绝（`GATEWAY_NO_PROVIDER`）；供应商请求计数（provider `stream()` 调用数）暴露于状态快照供核对。
+- **家庭取消**：合同 §6 允许 `guardian` 以 `guardian_stop` 取消——R1-06 以家庭策略接通：验证监护人可取消**同 childRef**家庭成员的轮次（`turn.cancelled.by` 如实标注取消者角色）；异家庭一律 `unknown_turn`（无存在性泄露）。**R1-06 范围注记**：家庭取消策略已在服务层接通并有测试固定，但本版本 HTTP 取消路由（`POST /api/v1/interactions/{turnId}/cancel`）仅服务端注入演示儿童身份、不解析监护人会话——监护取消在本版本**不可经 HTTP 触发**（PR 如实披露；带会话的监护人取消入口属 R1-09+）。
+- **儿童不可自提权**：角色只来自服务端家庭注册表 + 登录验证；监护人路由全部拒绝 child/voice_device；无任何载荷可携带角色字段（解析器拒绝未知字段）。
+
+### 12.4 安全变更审计（实现范围 4）
+
+追加式有界环（500 条）：`seed / login_success / login_failed / login_locked_out / logout / disclosure_ack / consent_grant / consent_revoke / switch_change / style_change / access_denied / guardian_cancel`。`seed` 条目由服务构造时写入（服务路径每进程恰好一次，`getWebMvpRuntime` 单例），以 `actorRole: null` 披露预置状态：已确认的告知版本（`acknowledged`）、激活的 consent（`active`）、关闭的开关（`disabled`）。条目仅含结构化事实（seq/at/kind/actorRole/actorId/target/detail）——**访问码、会话令牌、提交文本永不进入审计**（测试强制）。部署模型审查（会话/Cookie/安全头/防重放/敏感配置）见 ADR-0003；`next.config.ts` 追加 nosniff / DENY framing / referrer-policy 安全头。
+
+### 12.5 非目标与诚实边界
+
+- 不构建多租户 IAM；不默认提供全量儿童原始聊天追踪——监护人状态面只有计数与注册表内容。
+- 状态为进程内内存（单进程 MVP，同 §3 交付说明）；监护人会话/授权/审计随进程重启复位——持久化选型仍按 TECH_STACK §3 待定。
+- 告知文档中供应商保留/地域与危机渠道（110/120/12355）为**待核实占位**（承 #27 评审 caveat），在 UI 以"待核实"标记呈现。
+- 本节载荷为解析级 fail-closed 校验（`lib/domain/guardian/`），JSON Schema 发布物（§8 的 16 份）v0 不扩展到监护人载荷——扩展留待监护人载荷进入正式合同时一并登记。

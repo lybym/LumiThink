@@ -50,7 +50,7 @@ Persona 是儿童每一轮对话所运行的**服务端拥有的规则资源**�
 
 - **身份披露 / 核心特质 / 关系边界 / 退出路径**只从 Policy 快照派生。解析 API 的任何参数都无法触及它们——用户提示（`user_prompt_text`）、记忆声明（`memory_claim`）与工具输出（`tool_output`）仅以 `untrustedInputs` 形式进入**覆盖企图检测**（可观测性），永远不会被应用，也永不回显（结果只含 `{provenance, reason}` 结构化事实）。
 - **覆盖企图检测**（`detectPersonaOverrideAttempts`）按四类稳定 reason id 记录：`identity_override`（让 AI 自称真人）、`secrecy_override`（索要保密承诺）、`dependency_override`（排他/依恋话术）、`rule_rewrite_override`（改写 persona 规则）。**这不是安全 Gate，也不产生 allow/block 决策**——文本拦截归 [Safety Gate](./SAFETY_POLICY.md) 所有（§7：不建平行安全词汇）；检测只保证"企图被看见、边界未改变"可被回归断言。
-- **风格旋钮**（`applyPersonaStyleKnobs`）是唯一可变面，且只能经**可信渠道**：`system_default` / `guardian_config` / `child_feedback`（结构化反馈通道，PRD §6 "儿童可反馈和修改"；原始提示词文本不是反馈通道）。`user_prompt_text`/`memory_claim`/`tool_output` 来源对**任何**旋钮变更 fail-closed 拒绝（`knob_source_untrusted`）；未知旋钮、未注册值、策略未声明可调的旋钮同样拒绝，且提交值不回显。每次变更记录 `{knobId, value, source}` 审计轨迹。
+- **风格旋钮**（`applyPersonaStyleKnobs`）是唯一可变面，且只能经**可信渠道**：`system_default` / `guardian_config` / `child_feedback`（结构化反馈通道，PRD §6 "儿童可反馈和修改"；原始提示词文本不是反馈通道）。`user_prompt_text`/`memory_claim`/`tool_output` 来源对**任何**旋钮变更 fail-closed 拒绝（`knob_source_untrusted`）；未知旋钮、未注册值、策略未声明可调的旋钮同样拒绝，且提交值不回显。每次变更记录 `{knobId, value, source}` 审计轨迹。**R1-06（issue #18）起 `guardian_config` 渠道有了真实供给方**：监护人控制台经 `POST /api/v1/guardian/authorizations`（action `set_persona_style`）以 `guardian_config` 来源应用旋钮，风格状态经交互服务的 `resolvePersonaStyle` 钩子进入每轮 persona 解析（pipeline 内再验证 fail-closed），变更进安全审计（`lib/server/guardian-service.ts`）。
 - **Actor 校验**：每轮经合同 `parseActorContext` 再验证（服务端已验证身份，客户端不可提交——API_CONTRACT §3）；persona 解析结果不含 `childRef`（不进入儿童可见面）。
 - **多轮稳定性**（`resolvePersonaTurns`）：一次会话共享一个可信风格状态；身份、特质、边界、退出路径跨轮结构恒等（同一 Policy 快照），风格变更只经可信路径流动——这是 AC 1 "多轮 Persona 稳定性" 的实现面。
 
