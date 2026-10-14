@@ -43,7 +43,7 @@
 | `app/` | Next.js 路由与 UI（旧原型外壳 + 新增 `app/api/health`） | 不直接依赖 DSH 内部类型；不得新增对冻结旧 server actions 的调用 |
 | `components/` | 旧原型 UI 组件（可复用，待 2.0 重验收） | 不承载业务事实；R4 Scene Engine 时再评估 |
 | `lib/domain/` | **2.0 新领域模型唯一入口** | 依赖冻结（测试强制）：禁 import `@prisma/client`、`react`、`next`、`lib/db`；一切进入领域的事实必须经 `ingestDomainFact` / 显式迁移 |
-| `lib/`（其余） | 冻结的旧支撑代码（`lib/db.ts`）+ 新增基础设施（`lib/env.ts`） | 旧 `lib/db.ts` 不被基线运行时引用；不得在新代码中扩散 |
+| `lib/`（其余） | 冻结的旧支撑代码（`lib/db.ts`）+ 新增基础设施（`lib/env.ts`、R1-05 起 `lib/server/` 服务端组合根与交互服务，框架无关） | 旧 `lib/db.ts` 不被基线运行时引用；不得在新代码中扩散；`lib/server/` 不得反向进入 `lib/domain` 之外的业务语义 |
 | `prisma/` | 冻结旧 schema（历史审计参照） | 修改 schema 必须同步 DATA_MODEL + migration + migration test（本次未触碰） |
 | `tests/` | 根工程测试（node:test + TS strip types） | 与 `poc/dsh-child` 的测试体系互不依赖 |
 | `poc/dsh-child/` | **完全隔离的 R0 DSH PoC** | 独立 package.json/pnpm-lock/tsconfig/CI 门禁；根工程与其无依赖关系；根 tsconfig 显式排除 |
@@ -78,8 +78,9 @@ CI 门禁：`.github/workflows/r1-baseline-gate.yml`（Ubuntu：干净环境断�
 | R0-C（双 Skill 纵向闭环）、R0-D（Session/Memory 治理）未开始 | 未完成 | R0 → R1 |
 | HARNESS.md 仅为 v0 草案，无实现 | 未完成 | R1-03/R1-07 |
 | 新领域持久化选型未定；旧 schema 与新领域之间的数据迁移策略只有“拒绝 + 显式归档”守卫，尚无批量迁移工具 | 未完成 | R1/R2 |
-| 真实模型接入、流式、取消、成本控制：R1-02 已交付域层 Model Gateway（`lib/domain/gateway/`：Provider 契约 + Mock + 预算/熔断/超时/取消 + 审计，见 [MODEL_GATEWAY](./MODEL_GATEWAY.md)）；HTTP 端点接线与真实供应商激活（独立数据外发评审前置）仍未完成，基线启动依旧零模型出网 | 部分完成 | R1-02（域层已交付）/ R1-05（接线）/ Iteration B（真实供应商） |
+| 真实模型接入、流式、取消、成本控制：R1-02 已交付域层 Model Gateway（`lib/domain/gateway/`：Provider 契约 + Mock + 预算/熔断/超时/取消 + 审计，见 [MODEL_GATEWAY](./MODEL_GATEWAY.md)）；R1-05 已把 Web MVP 文本端点接线到该域层（合同 v1.0 三路由 + SSE 流式 + 取消，Mock 为服务默认，零出网）；真实供应商激活（独立数据外发评审前置）仍未完成 | 部分完成 | R1-02（域层已交付）/ R1-05（Web MVP 接线已交付）/ Iteration B（真实供应商） |
+| 真实 DSH SDK 适配器绑定（独立进程拓扑）未完成：R1-05 以确定性进程内适配器绑定 `DshRuntimePort` 支撑 Web MVP 服务（仅会话生命周期面，消除 `no_port_bound` 缺陷窗口），根工程仍零 SDK 依赖；SDK 适配器与其独立验收待进程拓扑工作 | 未完成 | Iteration B / R1-05 后续 |
 | 监护人端、鉴权、隐私治理未实现；旧 parent 页面文案仍是旧产品语义 | 未完成 | R1-06 |
-| 旧页面在 R1-05 之前仅保证“可编译可启动”，不承诺 2.0 体验 | 进行中约束 | R1-05 |
+| 旧页面在 R1-05 之前仅保证“可编译可启动”，不承诺 2.0 体验；R1-05 已将儿童页重建为 Lumi 对话 MVP（正式交互 API + 流式 + 停止 + 退出路径），旧数学工具移至 `/kid/playground`，parent 页面保持冻结原型 | 部分完成（儿童端已重建） | R1-05（儿童端）/ R1-06（监护人端） |
 
 > 变更本表前先更新对应 Roadmap/Issue；未完成项不得标记为完成。

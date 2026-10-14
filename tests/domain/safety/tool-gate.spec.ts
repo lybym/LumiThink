@@ -206,3 +206,30 @@ test("non-string permission entries fail closed instead of being dropped (review
   assert.ok(!serialized.includes("evil"));
   assert.ok(!serialized.includes("42"));
 });
+
+test("prototype-chain tool ids can never masquerade as registered (carried #27 review, R1-05 hard precondition)", () => {
+  // With a plain-object registry, ids like "constructor"/"toString" inherited
+  // Object.prototype members, were misread as "registered", and then crashed
+  // the gate with a bare TypeError instead of a structured block.
+  const registryTarget = SAFE_TOOL_REGISTRY as Record<string, unknown>;
+  for (const toolId of ["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__"]) {
+    const result = evaluateToolGate(
+      candidate({
+        toolId,
+        // Forgery-style descriptors a crafted caller would pair with the id.
+        declaredCategory: "evidence_read",
+        declaredVersion: "1.0",
+        requestedPermissions: ["evidence.read"],
+      }),
+      { decidedAt: FIXED_AT },
+    );
+    assert.equal(result.decision, "block", `${toolId} must be treated as unregistered`);
+    assert.ok(result.hits.some((hit) => hit.ruleId === "tool.unregistered"), toolId);
+    // The registry must not answer prototype lookups at all.
+    assert.equal(Object.hasOwn(registryTarget, toolId), false, toolId);
+  }
+  // The gate returns a STRUCTURED block (no throw) for the crafted ids.
+  const structured = evaluateToolGate(candidate({ toolId: "constructor" }));
+  assert.equal(structured.trace.layer, "tool");
+  assert.ok(structured.trace.ruleIds.includes("tool.unregistered"));
+});

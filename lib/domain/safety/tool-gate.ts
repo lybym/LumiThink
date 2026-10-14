@@ -69,32 +69,45 @@ export const DANGEROUS_PERMISSIONS: readonly string[] = Object.freeze([
   "raw_audio.read",
 ]);
 
-const REGISTRY_ENTRIES: Readonly<Record<string, SafeToolSpec>> = {
-  "evidence.search": {
-    toolId: "evidence.search",
-    category: "evidence_read",
-    version: "1.0",
-    allowedRoles: ["child", "guardian", "system"],
-    permissions: ["evidence.read"],
-    sideEffects: "read_only",
-  },
-  "memory.lookup": {
-    toolId: "memory.lookup",
-    category: "memory_read",
-    version: "1.0",
-    allowedRoles: ["child", "guardian", "system"],
-    permissions: ["memory.read"],
-    sideEffects: "read_only",
-  },
-  "memory.propose": {
-    toolId: "memory.propose",
-    category: "memory_propose",
-    version: "1.0",
-    allowedRoles: ["child", "guardian", "system"],
-    permissions: ["memory.propose"],
-    sideEffects: "memory_candidate",
-  },
-};
+/**
+ * The registry is a NULL-PROTOTYPE frozen map and every lookup goes through
+ * `Object.hasOwn` (carried #27 review hard precondition, fixed for R1-05
+ * wiring): with a plain object, a crafted toolId such as "constructor" or
+ * "toString" inherited `Object.prototype` members, was misread as
+ * "registered", and then crashed the gate with a bare TypeError — fail-
+ * closed in effect, but unstructured. Registered ids are own data properties
+ * only; prototype-chain names are unregistered like any other id.
+ */
+const REGISTRY_ENTRIES: Readonly<Record<string, SafeToolSpec>> = Object.freeze(
+  (() => {
+    const map: Record<string, SafeToolSpec> = Object.create(null);
+    map["evidence.search"] = {
+      toolId: "evidence.search",
+      category: "evidence_read",
+      version: "1.0",
+      allowedRoles: ["child", "guardian", "system"],
+      permissions: ["evidence.read"],
+      sideEffects: "read_only",
+    };
+    map["memory.lookup"] = {
+      toolId: "memory.lookup",
+      category: "memory_read",
+      version: "1.0",
+      allowedRoles: ["child", "guardian", "system"],
+      permissions: ["memory.read"],
+      sideEffects: "read_only",
+    };
+    map["memory.propose"] = {
+      toolId: "memory.propose",
+      category: "memory_propose",
+      version: "1.0",
+      allowedRoles: ["child", "guardian", "system"],
+      permissions: ["memory.propose"],
+      sideEffects: "memory_candidate",
+    };
+    return map;
+  })(),
+);
 
 /**
  * v0 whitelist (HARNESS §4 业务工具候选): read-only evidence search,
@@ -194,7 +207,11 @@ export function evaluateToolGate(
   const push = (ruleId: SafetyRuleId) => hits.push(Object.freeze({ ruleId, layer: "tool" as const, severity: "high" as const }));
 
   const toolId = candidate.toolId;
-  if (typeof toolId !== "string" || !TOOL_ID_PATTERN.test(toolId) || SAFE_TOOL_REGISTRY[toolId] === undefined) {
+  if (
+    typeof toolId !== "string" ||
+    !TOOL_ID_PATTERN.test(toolId) ||
+    !Object.hasOwn(SAFE_TOOL_REGISTRY, toolId)
+  ) {
     // Unregistered tools are refused without echoing the submitted id.
     push("tool.unregistered");
   }
@@ -226,7 +243,10 @@ export function evaluateToolGate(
     push("tool.dangerous_category");
   }
 
-  const registered = typeof toolId === "string" ? SAFE_TOOL_REGISTRY[toolId] : undefined;
+  const registered =
+    typeof toolId === "string" && Object.hasOwn(SAFE_TOOL_REGISTRY, toolId)
+      ? SAFE_TOOL_REGISTRY[toolId]
+      : undefined;
   if (registered !== undefined) {
     if (candidate.declaredCategory !== registered.category || candidate.declaredVersion !== registered.version) {
       push("tool.schema_forgery");

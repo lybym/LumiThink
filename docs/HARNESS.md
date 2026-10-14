@@ -124,12 +124,13 @@ InteractionEvent（统一入口）
 - LumiThink 领域能力（Persona/Evidence/Memory/Safety/协议）通过 SDK + 自定义 Cordis 插件接入，**不修改 DSH 上游核心**；版本锁定与升级审查按 [DSH_UPSTREAM](./DSH_UPSTREAM.md)。
 - 业务持久化不依赖 DSH 私有事件格式；DSH Session 与 Lumi 长期记忆、审计 Trace 分离存储。
 - 进程拓扑：独立长驻 Node 进程持有 SDK（见 [TECH_STACK §2](./TECH_STACK.md)）；Serverless/短生命周期 Handler 不得托管 DSH 生命周期。
-- **R1-03（Issue #15）**：领域层以 `DshRuntimePort`（`lib/domain/runtime/session-map.ts`）定义真实 SDK 适配器必须实现的端口——`openSession/resumeSession/closeSession/advertisedTools`，生命周期含超时、缺陷追踪与关闭；端口上**没有**中途取消/实时 Delta 面（官方 SDK 无此能力，属 R1-V2 Bridge）。根工程保持不依赖 `@deepseek-ai/dsh-*` 包（TECH_STACK §1），端口默认未绑定（fail-closed `no_port_bound`）；真实适配器在 R1-05 按进程拓扑绑定并独立验收。
+- **R1-03（Issue #15）**：领域层以 `DshRuntimePort`（`lib/domain/runtime/session-map.ts`）定义真实 SDK 适配器必须实现的端口——`openSession/resumeSession/closeSession/advertisedTools`，生命周期含超时、缺陷追踪与关闭；端口上**没有**中途取消/实时 Delta 面（官方 SDK 无此能力，属 R1-V2 Bridge）。根工程保持不依赖 `@deepseek-ai/dsh-*` 包（TECH_STACK §1）。
+- **R1-05（Issue #17）**：Web MVP 组合根（`lib/server/`）在服务前绑定一个**确定性进程内适配器**（仅会话生命周期面）——消除未绑定窗口把会话永久毒化为 `no_port_bound` 缺陷的路径（#38 评审 P2-2 硬前置）；同时 mapper 增加创建/重连单飞（single-flight）与超时废弃规则（并发 ensureSession 不再双重 open、超时后迟到的 port 结果永不覆写映射并回收孤儿会话，#38 评审 P2-1 硬前置）。真实 DSH SDK 适配器仍按进程拓扑延后（TECH_STACK §2 方向不变），无端口绑定的 mapper 保持 fail-closed。
 
 ## 8. 未决问题（进入实现前必须回答）
 
 1. Input Gate 的监护人/儿童鉴权载体（R1-06 未实现；v0 仅定义 `actor` 语义）。
 2. Context Builder 的记忆检索排序与预算分配算法（依赖 R1-14 受控记忆落地）。
-3. Orchestrator 对双 Skill 冲突请求的仲裁规则（R0-C 场景 3 的实现细节）。
+3. Orchestrator 对双 Skill 冲突请求的仲裁规则（R0-C 场景 3 的实现细节；已随 R1-03 交付确定性仲裁 `joint_emotion_precedence` v0——`routeSkillForText`，情绪信号优先，见 `lib/domain/runtime/skill-router.ts`）。
 4. Output Gate 的规则清单与误报处理流程（需要 R1-07 评测集支撑）。
 5. Recorder 的最小审计字段与脱敏规则（与 R1-08 日志治理合并决策）。

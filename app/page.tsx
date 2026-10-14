@@ -19,7 +19,7 @@ export default function HomePage() {
         className="rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50 to-sky-50 p-6 shadow-sm transition hover:-translate-y-0.5 hover:shadow"
       >
         <p className="text-sm font-medium text-indigo-500">Kid Mode</p>
-        <h2 className="mt-1 text-xl font-semibold text-slate-900">Start playground</h2>
+        <h2 className="mt-1 text-xl font-semibold text-slate-900">和 Lumi 聊一聊</h2>
       </Link>
     </section>
   );

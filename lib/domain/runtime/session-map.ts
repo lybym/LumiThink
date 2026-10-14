@@ -14,10 +14,14 @@
  *   is held by an independent long-lived Node process;
  * - the domain layer therefore owns the PORT (`DshRuntimePort`): the exact
  *   surface a DSH SDK adapter must implement, bounded by the R0-verified
- *   minimal-permission profile. The real adapter binds this port in the
- *   R1-05 process-topology work; until then every mapper is constructed
- *   WITHOUT a port and fails closed (`no_port_bound`) — the same explicit
- *   opt-in idiom as the gateway's real-provider adapter;
+ *   minimal-permission profile. R1-05 (issue #17) binds a deterministic
+ *   IN-PROCESS adapter at the web-MVP composition root (lib/server/) so a
+ *   serving session can never poison itself with `no_port_bound` defects
+ *   (carried #38 review note P2-2); the REAL DSH SDK adapter stays deferred
+ *   to the dedicated process-topology work and the root keeps zero SDK
+ *   dependency. When no port is bound, mappers fail closed
+ *   (`no_port_bound`) — the same explicit opt-in idiom as the gateway's
+ *   real-provider adapter;
  * - there is deliberately NO cancel / mid-turn delta surface on the port:
  *   the official SDK has no mid-turn cancel and real-time cancel/delta
  *   belongs to the separate R1-V2 voice bridge (issue #15 非目标).
@@ -254,6 +258,20 @@ export function createDshSessionMapper(options: DshSessionMapperOptions = {}): D
   /** One Lumi session ↔ at most one descriptor (isolation invariant). */
   const sessions = new Map<string, Readonly<DshSessionDescriptor>>();
 
+  /**
+   * Single-flight registry (carried #38 review hard precondition P2-1,
+   * fixed for R1-05 wiring): at most one in-flight create/resume lifecycle
+   * drive per Lumi session. Concurrent ensureSession callers JOIN the
+   * pending flight instead of issuing a second port.openSession/resume —
+   * without this, two concurrent creates both called the port and the
+   * last writer overwrote `dshSessionKey`, silently orphaning the first
+   * DSH session.
+   */
+  interface EnsureFlight {
+    readonly promise: Promise<DshEnsureSessionResult>;
+  }
+  const flights = new Map<string, EnsureFlight>();
+
   function descriptorOf(lumiSessionId: string): Readonly<DshSessionDescriptor> | null {
     return sessions.has(lumiSessionId) ? (sessions.get(lumiSessionId) as Readonly<DshSessionDescriptor>) : null;
   }
@@ -325,6 +343,127 @@ export function createDshSessionMapper(options: DshSessionMapperOptions = {}): D
     });
   }
 
+  /**
+   * Reconnect path for a session that already has a mapped DSH key but is
+   * not active (creating/reconnecting after a transient failure). Runs
+   * under the single-flight drive.
+   */
+  async function driveResume(
+    boundPort: DshRuntimePort,
+    refs: {
+      readonly lumiSessionId: string;
+      readonly conversationId: string;
+      readonly actorId: string;
+      readonly traceId: string;
+      readonly turnId: string;
+      readonly onEvent?: (event: DshSessionEventFact) => void;
+    },
+    base: Readonly<DshSessionDescriptor>,
+  ): Promise<DshEnsureSessionResult> {
+    refs.onEvent?.({ event: "session.reconnecting", state: "reconnecting", resultCode: "ok" });
+    const reconnecting = put({ ...base, state: "reconnecting", lastActivityAtMs: clock() });
+    const resumed = await withTimeout(boundPort.resumeSession(base.dshSessionKey as string));
+    if (resumed === null) {
+      return {
+        ok: false,
+        reason: "open_timeout",
+        descriptor: defectFold(reconnecting, "open_timeout", ["reconnecting"]),
+      };
+    }
+    if (resumed.ok === false) {
+      const reason: DshEnsureFailureReason =
+        resumed.defect === "resume_failed" ? "resume_failed" : "runtime_unavailable";
+      return {
+        ok: false,
+        reason,
+        descriptor: defectFold(reconnecting, resumed.defect, ["reconnecting"]),
+      };
+    }
+    const descriptor = put({
+      ...reconnecting,
+      state: "active",
+      dshVersion: resumed.dshVersion,
+      adapterId: boundPort.adapterId,
+      lastActivityAtMs: clock(),
+    });
+    refs.onEvent?.({ event: "session.reused", state: "active", resultCode: "ok" });
+    return { ok: true, descriptor, created: false };
+  }
+
+  /**
+   * Fresh create path (no descriptor, or a descriptor without a DSH key
+   * yet). Runs under the single-flight drive.
+   *
+   * Abandonment rule (carried #38 review P2-1): the lifecycle timeout does
+   * NOT cancel the port call — the port has no cancellation surface — so a
+   * timed-out open is ABANDONED: the late port result is never applied to
+   * the mapping (the drive has already returned) and, when it eventually
+   * succeeds, the orphaned DSH session is reaped best-effort. A later
+   * ensureSession starts a NEW drive; the late result cannot race it
+   * because each drive only ever applies its own outcome.
+   */
+  async function driveCreate(
+    boundPort: DshRuntimePort,
+    refs: {
+      readonly lumiSessionId: string;
+      readonly conversationId: string;
+      readonly actorId: string;
+      readonly traceId: string;
+      readonly turnId: string;
+      readonly onEvent?: (event: DshSessionEventFact) => void;
+    },
+    base: Readonly<DshSessionDescriptor>,
+  ): Promise<DshEnsureSessionResult> {
+    const rawOpen = boundPort.openSession({
+      lumiSessionId: refs.lumiSessionId,
+      conversationId: refs.conversationId,
+      actorId: refs.actorId,
+    });
+    const opened = await withTimeout(rawOpen);
+    if (opened === null) {
+      void rawOpen
+        .then((late) => {
+          if (late.ok) {
+            // Reap the orphaned DSH session nobody maps; never awaited, and
+            // a close failure is non-fatal (the mapping never pointed at it).
+            void Promise.resolve(boundPort.closeSession(late.dshSessionKey, "runtime_unavailable")).catch(
+              () => undefined,
+            );
+          }
+        })
+        .catch(() => undefined);
+      return {
+        ok: false,
+        reason: "open_timeout",
+        descriptor: defectFold(base, "open_timeout", ["creating"]),
+      };
+    }
+    if (opened.ok === false) {
+      return {
+        ok: false,
+        reason: "open_failed",
+        descriptor: defectFold(base, opened.defect, ["creating"]),
+      };
+    }
+    if (!isDshSessionKey(opened.dshSessionKey)) {
+      return {
+        ok: false,
+        reason: "open_failed",
+        descriptor: defectFold(base, "open_failed", ["creating"]),
+      };
+    }
+    const descriptor = put({
+      ...base,
+      state: "active",
+      dshSessionKey: opened.dshSessionKey,
+      dshVersion: opened.dshVersion,
+      adapterId: boundPort.adapterId,
+      lastActivityAtMs: clock(),
+    });
+    refs.onEvent?.({ event: "session.created", state: "active", resultCode: "ok" });
+    return { ok: true, descriptor, created: true };
+  }
+
   return Object.freeze({
     async ensureSession(refs: {
       readonly lumiSessionId: string;
@@ -358,8 +497,9 @@ export function createDshSessionMapper(options: DshSessionMapperOptions = {}): D
       }
 
       if (port === null) {
-        // No runtime adapter bound (default until R1-05): fail closed and
-        // make the gap observable as a tracked defect.
+        // No runtime adapter bound (the fail-closed default when no adapter
+        // is bound): fail closed and make the gap observable as a tracked
+        // defect.
         const base = existing ?? put(freshDescriptor(refs));
         const descriptor = defectFold(base, "runtime_unavailable", ["creating"]);
         refs.onEvent?.({
@@ -370,79 +510,36 @@ export function createDshSessionMapper(options: DshSessionMapperOptions = {}): D
         return { ok: false, reason: "no_port_bound", descriptor };
       }
 
-      // Resume path: the session exists with a mapped DSH key but is not
-      // active (creating/reconnecting after a transient failure).
-      if (existing !== null && existing.dshSessionKey !== null) {
-        refs.onEvent?.({ event: "session.reconnecting", state: "reconnecting", resultCode: "ok" });
-        const reconnecting = put({ ...existing, state: "reconnecting", lastActivityAtMs: clock() });
-        const resumed = await withTimeout(port.resumeSession(existing.dshSessionKey));
-        if (resumed === null) {
-          return {
-            ok: false,
-            reason: "open_timeout",
-            descriptor: defectFold(reconnecting, "open_timeout", ["reconnecting"]),
-          };
-        }
-        if (resumed.ok === false) {
-          const reason: DshEnsureFailureReason =
-            resumed.defect === "resume_failed" ? "resume_failed" : "runtime_unavailable";
-          return {
-            ok: false,
-            reason,
-            descriptor: defectFold(reconnecting, resumed.defect, ["reconnecting"]),
-          };
-        }
-        const descriptor = put({
-          ...reconnecting,
-          state: "active",
-          dshVersion: resumed.dshVersion,
-          adapterId: port.adapterId,
-          lastActivityAtMs: clock(),
+      // Single-flight join: another caller is already driving the lifecycle
+      // for this Lumi session. Await the SAME drive instead of issuing a
+      // second port call (carried #38 review hard precondition P2-1).
+      const inFlight = flights.get(refs.lumiSessionId);
+      if (inFlight !== undefined) {
+        refs.onEvent?.({
+          event: "session.reconnecting",
+          state: existing?.state ?? "creating",
+          resultCode: "ok",
         });
-        refs.onEvent?.({ event: "session.reused", state: "active", resultCode: "ok" });
-        return { ok: true, descriptor, created: false };
+        const joined = await inFlight.promise;
+        // A joiner never reports itself as the creator of the DSH session.
+        return joined.ok ? { ...joined, created: false } : joined;
       }
 
-      // Fresh create (no descriptor, or a descriptor without a DSH key yet).
       const base = existing ?? put(freshDescriptor(refs));
-      const opened = await withTimeout(
-        port.openSession({
-          lumiSessionId: refs.lumiSessionId,
-          conversationId: refs.conversationId,
-          actorId: refs.actorId,
-        }),
-      );
-      if (opened === null) {
-        return {
-          ok: false,
-          reason: "open_timeout",
-          descriptor: defectFold(base, "open_timeout", ["creating"]),
-        };
+      const flight: EnsureFlight = {
+        promise: (async (): Promise<DshEnsureSessionResult> => {
+          if (base.dshSessionKey !== null) {
+            return driveResume(port, refs, base);
+          }
+          return driveCreate(port, refs, base);
+        })(),
+      };
+      flights.set(refs.lumiSessionId, flight);
+      try {
+        return await flight.promise;
+      } finally {
+        flights.delete(refs.lumiSessionId);
       }
-      if (opened.ok === false) {
-        return {
-          ok: false,
-          reason: "open_failed",
-          descriptor: defectFold(base, opened.defect, ["creating"]),
-        };
-      }
-      if (!isDshSessionKey(opened.dshSessionKey)) {
-        return {
-          ok: false,
-          reason: "open_failed",
-          descriptor: defectFold(base, "open_failed", ["creating"]),
-        };
-      }
-      const descriptor = put({
-        ...base,
-        state: "active",
-        dshSessionKey: opened.dshSessionKey,
-        dshVersion: opened.dshVersion,
-        adapterId: port.adapterId,
-        lastActivityAtMs: clock(),
-      });
-      refs.onEvent?.({ event: "session.created", state: "active", resultCode: "ok" });
-      return { ok: true, descriptor, created: true };
     },
 
     confirmActive(lumiSessionId: string): Readonly<DshSessionDescriptor> {
