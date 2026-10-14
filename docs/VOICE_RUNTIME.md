@@ -121,7 +121,7 @@ Bridge IPC 不可公网直连；强制 peer 权限、schema 校验、限速和�
 
 | 工作包 | 状态 | 交付/明确 PASS 条件 |
 | --- | --- | --- |
-| **R1-V1** Orchestrator/Fencing | 未开始 | 模拟迟到 ASR、重复取消、旧事件/TTS/记忆的 100 次竞态；旧输出和过期写入均为 0 |
+| **R1-V1** Orchestrator/Fencing | **合成 POC 已交付**（issue #28）| 模拟迟到 ASR、重复取消、旧事件/TTS/记忆的 100 次竞态；旧输出和过期写入均为 0 |
 | **R1-V2** Cordis Bridge POC | 未开始 | `prompt/cancel/stream/close` 合同、唯一所有权、真实 live Delta / 取消、进程重启、Profile 白名单与隐私门禁 |
 | **R5-V3** 小智及 XVF3800 实机 | 未开始 | 思考中打断、播放中打断、连续抢话、服务重启、断网恢复；私有化设备激活/OTA，完整语音闭环 |
 
@@ -144,3 +144,7 @@ Bridge IPC 不可公网直连；强制 peer 权限、schema 校验、限速和�
 任一安全用例中出现跨轮播报、过期记忆写入、未授权 Agent 工具、真实儿童数据被无授权外发，即 **BLOCK**，不得进入真实语音环境。若 Bridge 在当前固定版本不能提供安全的 live+cancel，则保留 R0 文本 SDK 路线，复议后续上游官方 API、ACP 或语音协议，不强行 Fork Agent Loop。
 
 当 DSH 上游正式推出 cancel/stream 等价稳定 API 时，可用协议适配器替换 Bridge 内部实现，保持 Orchestrator/Domain API 不变。
+
+## 11. R1-V1 实现落点（issue #28）
+
+Turn Orchestrator 与 epoch fencing 的合成 POC 实现于 `lib/domain/voice/`（状态机/可信栅栏存储/Orchestrator/结构化审计，无依赖领域层）与 `lib/server/voice-turn-sqlite-store.ts`（同一存储端口的 SQLite `BEGIN IMMEDIATE` 事务实现，含版本化迁移门禁与重启幂等账本恢复）。§4 的严格先后关系由 `cancelTurn`（原子递增 epoch + 旧轮翻转 CANCELLING）与 `pumpScheduler`（旧任务停稳前不调度新 prompt）承载；§5 的原子条件提交由 `fenceWrite`/`fenceOutput`/`drainTtsQueue` 承载，全部携带 `session_key, turn_id, epoch, idempotency_key`，内容仅以十六进制摘要过界。确定性竞态证据（120 个种子场景、种子重放同审计同终态）见 `tests/domain/voice/race.spec.ts`。R1-V2 Bridge 之前不宣称 DSH 进程内已真取消。
