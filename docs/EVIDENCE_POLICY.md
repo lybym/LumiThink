@@ -103,6 +103,7 @@ Registry 查找**全部使用 `Object.hasOwn`**：`constructor`/`toString`/`hasO
 
 - 依赖方向：`lib/domain/evidence/` → Eval 词表（skill ids / exit paths）+ Safety 工具白名单 + Contract 错误模型；不依赖 prisma/react/next/node builtins（`tests/domain/boundary.spec.ts` 强制）。
 - **Eval 桥**：`toEvalEvidenceCardView` 把治理卡投影为 R1-07 的最小 `EvalEvidenceCard` 视图；真实 subject 的证据引用必须来自 Registry 已核验卡片（视图是投影，不是 subject 自报）。
+- **Skill 执行面（R1-11，issue #23）**：`lib/domain/skills/emotion-support.ts` 是 `emotion_support@1.0.0` 的确定性策略执行器——只消费 **served** 的 `loadSkillForChild` 结果（manifest + 精确卡版本 + 合并 limitations，每次调用 fail-closed 重验 manifest），产出阶段化策略指引（倾听澄清 → 少量可选策略 → 尊重退出/成人求助 → 非临床诚实边界）；退出路径以 manifest `exitPaths` 为界（fail-closed），限制说明逐字来自绑定卡 limitations，不新增任何声明。它不做危机处理（危机文本在 Input Gate 升级，永不路由至 Skill）、不产生诊断/治疗表述、不承诺保密；结果观察由 `emotion_support_skill_subject`（`lib/domain/skills/emotion-eval-subject.ts`）从真实输出导出，Skill 不自报结果。
 - **持久化**：本 PR 无持久化 schema 变更、无 migration——Registry 为代码内冻结常量；新领域模型的持久化选型按 [TECH_STACK](./TECH_STACK.md) 待定项由 R1/R2 数据建模任务另行决策。
 - 高严重度安全/隐私失败依旧由 [SAFETY_POLICY](./SAFETY_POLICY.md) 三层门禁阻断；本模块不复制安全规则，只引用其白名单与词表。
 

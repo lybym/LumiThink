@@ -35,6 +35,7 @@ import {
   EVAL_ID_PATTERN,
   EVAL_SCENARIO_CATEGORIES,
   EVAL_SCHEMA_VERSIONS,
+  EVAL_SKILL_IDS,
 } from "./scenario.ts";
 import {
   EVAL_FAIL_CLOSED_TRIGGERS,
@@ -60,6 +61,7 @@ const REPORT_KEYS = Object.freeze([
   "counts",
   "pendingHumanReview",
   "llmJudge",
+  "versionStamps",
   "ranAt",
 ] as const);
 
@@ -76,6 +78,48 @@ const SCENARIO_RESULT_KEYS = Object.freeze([
 ] as const);
 
 const ASSERTION_KEYS = Object.freeze(["assertionId", "kind", "status", "detail"] as const);
+
+const STAMP_SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
+const MAX_REPORT_VERSION_STAMPS = 10;
+
+/** Validate the v1.1 `versionStamps` field (fail-closed; bounded counts). */
+function validateVersionStamps(value: unknown, problems: ContractProblem[]): void {
+  expectObject(value, "report.versionStamps", problems);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return;
+  }
+  const stamps = value as Record<string, unknown>;
+  rejectUnknownKeys(stamps, ["skills", "evidence"], "report.versionStamps", problems);
+  for (const listField of ["skills", "evidence"] as const) {
+    if (!Array.isArray(stamps[listField])) {
+      problems.push(problem("CONTRACT_FIELD_INVALID", `report.versionStamps.${listField}`, "expected an array."));
+      continue;
+    }
+    if (stamps[listField].length > MAX_REPORT_VERSION_STAMPS) {
+      problems.push(
+        problem("CONTRACT_FIELD_INVALID", `report.versionStamps.${listField}`, "stamp count over bound."),
+      );
+    }
+    stamps[listField].forEach((entry, index) => {
+      const path = `report.versionStamps.${listField}[${index}]`;
+      expectObject(entry, path, problems);
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        return;
+      }
+      const record = entry as Record<string, unknown>;
+      const idField = listField === "skills" ? "skillId" : "cardId";
+      rejectUnknownKeys(record, [idField, "version"], path, problems);
+      if (listField === "skills") {
+        expectEnum(record.skillId, EVAL_SKILL_IDS, `${path}.skillId`, problems);
+      } else if (typeof record.cardId !== "string" || !EVAL_ID_PATTERN.test(record.cardId)) {
+        problems.push(problem("CONTRACT_FIELD_INVALID", `${path}.cardId`, "not a valid evaluation id."));
+      }
+      if (typeof record.version !== "string" || !STAMP_SEMVER_PATTERN.test(record.version)) {
+        problems.push(problem("CONTRACT_FIELD_INVALID", `${path}.version`, "expected a semver string."));
+      }
+    });
+  }
+}
 
 function expectObject(value: unknown, path: string, problems: ContractProblem[]): void {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -183,6 +227,19 @@ export function parseEvalRunReport(value: unknown): Readonly<EvalRunReport> {
   for (const idField of ["suiteId", "subjectId"] as const) {
     if (typeof report[idField] !== "string" || !EVAL_ID_PATTERN.test(report[idField] as string)) {
       problems.push(problem("CONTRACT_FIELD_INVALID", `report.${idField}`, "not a valid evaluation id."));
+    }
+  }
+
+  // Version stamps (HARNESS §6.4 merge, R1-11): v1.1 reports may carry the
+  // subject's resolved skill/evidence versions; v1.0 reports must not (the
+  // field did not exist — an old report with stamps is tampered).
+  if (report.versionStamps !== undefined) {
+    if (report.schemaVersion !== "1.1") {
+      problems.push(
+        problem("CONTRACT_FIELD_INVALID", "report.versionStamps", "versionStamps require report schemaVersion 1.1."),
+      );
+    } else {
+      validateVersionStamps(report.versionStamps, problems);
     }
   }
   if (typeof report.suiteVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(report.suiteVersion)) {
