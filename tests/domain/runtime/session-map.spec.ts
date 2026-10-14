@@ -173,3 +173,90 @@ test("invalid session refs and unknown-session operations fail closed", async ()
   await assert.rejects(() => mapper.close(SYNTHETIC_SESSION_A, "explicit_close"));
   assert.throws(() => mapper.markUnhealthy(SYNTHETIC_SESSION_A, "resume_failed"));
 });
+
+test("concurrent creates join one flight: the port opens exactly one DSH session (carried #38 review P2-1)", async () => {
+  let openCalls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const mapper = createDshSessionMapper({
+    port: fakePort({
+      openSession: async () => {
+        openCalls += 1;
+        await gate;
+        return { ok: true, dshSessionKey: "dshsess-flight01", dshVersion: "0.2.0-rc.2" };
+      },
+    }),
+    clock: () => 1000,
+  });
+
+  const first = mapper.ensureSession(refsFor(SYNTHETIC_SESSION_A, SYNTHETIC_CONVERSATION_A));
+  const second = mapper.ensureSession(refsFor(SYNTHETIC_SESSION_A, SYNTHETIC_CONVERSATION_A));
+  release();
+  const [r1, r2] = await Promise.all([first, second]);
+
+  assert.equal(openCalls, 1, "single-flight: concurrent creates must not double-open");
+  assert.equal(r1.ok && r2.ok, true);
+  const leader = r1.ok ? r1 : null;
+  const joiner = r2.ok ? r2 : null;
+  assert.equal(leader?.created, true);
+  assert.equal(joiner?.created, false, "a joiner never reports itself as the creator");
+  assert.equal(
+    leader?.descriptor.dshSessionKey,
+    joiner?.descriptor.dshSessionKey,
+    "both callers observe the same mapped DSH session key",
+  );
+});
+
+test("a timed-out open is abandoned: the late result never overwrites the mapping and the orphan is reaped (carried #38 review P2-1)", async () => {
+  let openCalls = 0;
+  const deferred: { resolve?: (value: { ok: true; dshSessionKey: string; dshVersion: string }) => void } = {};
+  const closeCalls: string[] = [];
+  const mapper = createDshSessionMapper({
+    port: fakePort({
+      openSession: () => {
+        openCalls += 1;
+        if (openCalls === 1) {
+          return new Promise((resolve) => {
+            deferred.resolve = resolve;
+          });
+        }
+        return Promise.resolve({ ok: true, dshSessionKey: "dshsess-second00", dshVersion: "0.2.0-rc.2" });
+      },
+      closeSession: async (key) => {
+        closeCalls.push(key);
+        return { ok: true };
+      },
+    }),
+    clock: () => 1000,
+    lifecycleTimeoutMs: 20,
+  });
+
+  const timedOut = await mapper.ensureSession(refsFor(SYNTHETIC_SESSION_A, SYNTHETIC_CONVERSATION_A));
+  assert.equal(timedOut.ok, false);
+  assert.equal(timedOut.ok ? null : timedOut.reason, "open_timeout");
+
+  // The abandoned open eventually succeeds — it must NOT be applied.
+  deferred.resolve?.({ ok: true, dshSessionKey: "dshsess-lateopen1", dshVersion: "0.2.0-rc.2" });
+  for (let tick = 0; tick < 10; tick += 1) {
+    await Promise.resolve();
+  }
+  const descriptor = mapper.describe(SYNTHETIC_SESSION_A);
+  assert.notEqual(descriptor, null);
+  assert.equal(
+    descriptor?.dshSessionKey,
+    null,
+    "a late abandoned result can never overwrite the mapping",
+  );
+  assert.ok(
+    closeCalls.includes("dshsess-lateopen1"),
+    "the orphaned DSH session of the abandoned open is reaped",
+  );
+
+  // A later ensureSession starts a NEW drive and succeeds cleanly.
+  const second = await mapper.ensureSession(refsFor(SYNTHETIC_SESSION_A, SYNTHETIC_CONVERSATION_A));
+  assert.equal(second.ok, true);
+  assert.equal(second.ok ? second.descriptor.dshSessionKey : null, "dshsess-second00");
+  assert.equal(openCalls, 2);
+});

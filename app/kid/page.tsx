@@ -1,17 +1,17 @@
-import { VisualMathTool } from '../../components/kid/visual-math-tool';
+import { LumiChat } from "@/components/kid/chat/lumi-chat";
 
 /**
- * Kid Mode home: highly visual and playful learning surface.
+ * R1-05 minimal web children's client (issue #17, Roadmap R1-05).
+ *
+ * The kid home is now the Lumi conversation surface (touch + keyboard,
+ * streaming replies, stop, retry, clear, visible exit path) served by the
+ * formal interaction API (POST /api/v1/interactions + SSE + cancel). The
+ * frozen prototype math tool stays available, re-homed under /kid/playground.
  */
 export default function KidPage() {
   return (
-    <section className="space-y-6">
-      <header>
-        <p className="text-sm font-semibold uppercase tracking-wide text-indigo-600">Kid Mode</p>
-        <h1 className="mt-2 text-3xl font-black tracking-tight text-slate-900 sm:text-4xl">Math Playground</h1>
-      </header>
-
-      <VisualMathTool />
+    <section className="space-y-4">
+      <LumiChat />
     </section>
   );
 }

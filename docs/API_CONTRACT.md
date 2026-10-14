@@ -1,6 +1,7 @@
 # LumiThink 2.0 统一交互 API 合同（Contract v1.0）
 
-> 版本：`1.0` ｜ 状态：**随 R1-01 交付的合同定义与契约测试；端点实现尚未开始**
+> 版本：`1.0` ｜ 状态：**合同定义与契约测试随 R1-01 交付；端点层自 R1-05 起为 Web MVP 接线（进程内内存态、单进程拓扑，见下方交付说明）**
+> R1-05 交付说明（Issue #17）：§4/§5/§6 三条路由由 `app/api/v1/interactions/*`（薄传输层）+ `lib/server/interaction-service.ts`（服务语义）为 Web MVP 接线——服务端验证身份注入（R1-06 鉴权落地前为固定合成演示儿童，客户端无法影响任何身份字段）、幂等台账按 **(verifiedActor, requestId)** 隔离（评审硬前置：全局台账会让重放的 requestId 返回他人会话）、请求体字节上限（超限映射 `CONTRACT_TEXT_TOO_LONG` 413）、SSE 流把 **Gate 批准后的完整输出**按有界短片段节流发出（合同 §5 语义"短句片段，非原始模型 token"；未过 Output Gate 的模型增量永远不可达儿童）、取消 = 网关调用者取消 + 迟到结果抑制。会话/台账/在途轮次状态为进程内内存（单进程 MVP），持久化选型仍按 TECH_STACK §3 待定。
 > 对应：[Issue #13](https://github.com/lybym/LumiThink/issues/13) ｜ [PRD FR-001](./PRD.md) ｜ [Roadmap R1-01](./ROADMAP.md) ｜ [架构](./ARCHITECTURE.md)
 > 代码：`lib/domain/contract/`（类型 + 解析器 + JSON Schema + fixtures）｜ 测试：`tests/domain/contract/`
 > 本合同只定义协议语义与验证规则，不包含 HTTP handler、鉴权实现或持久化；这些由后续 Issue（R1-02+）交付。
@@ -77,8 +78,9 @@ ID 由服务端生成；错误回显只允许通过同一语法**再验证**的 
 
 - `POST /api/v1/interactions/{turnId}/cancel`，body：`{ protocolVersion, turnId, conversationId, reason }`；reason：`user_stop | client_disconnect | guardian_stop | system_policy`。
 - 允许角色：`child | guardian | system`。
-- 结果三种安全终态：`cancelled | already_final | unknown_turn`（后两者为安全 no-op）。
+- 结果三种安全终态：`cancelled | already_final | unknown_turn`（后两者为安全 no-op；unknown_turn 同时覆盖他人轮次——不泄露存在性）。
 - **取消/忽略规则**：已取消轮次迟到到达的结果被降级为 `ignored` 且 content 丢弃（`suppressLateAgentResponse`），关联 ID 保留供审计——取消后的输出永远不会到达儿童。
+- **真取消能力边界（R1-05 书面说明，不得误宣称）**：Web MVP 的"停止"由三层真实生效的机制构成——(1) 客户端立即撤销输出消费权（reducer 层丢弃该轮次全部迟到 delta）；(2) 服务端经 pipeline `AbortSignal` 触发网关调用者取消（对在途模型调用是真实取消，Mock Provider 可观测）；(3) 轮次取消/忽略语义（取消后片段停止发出）。**`DshRuntimePort` 没有轮次中途取消面**（官方 SDK 无此能力，属 R1-V2 Voice Bridge），因此本 MVP 不宣称"Agent Loop 级真取消"；DSH 适配器仅承担会话生命周期。
 
 ## 7. 统一错误模型 ErrorEnvelope
 
