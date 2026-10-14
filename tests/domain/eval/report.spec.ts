@@ -30,7 +30,7 @@ test("the baseline report carries the version stamps the harness contract requir
   const report = fullRun();
   assert.equal(report.schemaVersion, "1.1");
   assert.equal(report.suiteId, "lumithink_eval_suite");
-  assert.equal(report.suiteVersion, "1.1.0");
+  assert.equal(report.suiteVersion, "1.2.0");
   assert.equal(report.policyVersion, "1.0");
   assert.equal(report.protocolVersion, "1.0");
   assert.equal(report.subjectId, "synthetic_reference_subject");

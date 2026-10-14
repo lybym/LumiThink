@@ -67,6 +67,11 @@ import {
   resolveEmotionSkillTurn,
   type EmotionSkillTurnResolution,
 } from "../skills/emotion-support.ts";
+import {
+  executeHomeworkSkillTurn,
+  type HomeworkSkillTurnExecutor,
+  type HomeworkSkillTurnResolution,
+} from "../skills/homework-initiation.ts";
 
 import {
   describeCordisToolSchema,
@@ -104,6 +109,15 @@ export const RUNTIME_TEXT_ENTRANCES = Object.freeze(["ui_web", "api_text"] as co
 
 export type RuntimeTextEntrance = (typeof RUNTIME_TEXT_ENTRANCES)[number];
 
+/**
+ * The structured resolution of the skill that executed on a routed turn
+ * (R1-11 emotion, R1-12 homework). Null on every other path (no route,
+ * degraded/rejected loads, executor degradation, early ends).
+ */
+export type RoutedSkillTurnResolution =
+  | Readonly<EmotionSkillTurnResolution>
+  | Readonly<HomeworkSkillTurnResolution>;
+
 export interface CordisPipelineOptions {
   /** The R1-02 model gateway (mock by default; real adapter behind review). */
   readonly gateway: ModelGateway;
@@ -122,6 +136,15 @@ export interface CordisPipelineOptions {
   readonly personaPolicy: Readonly<PersonaPolicyV0>;
   /** Synthetic v0 handlers for the whitelisted Cordis services. */
   readonly handlers?: Readonly<Record<string, CordisServiceHandler>>;
+  /**
+   * R1-12 test seam (same DI style as `clock`/`handlers`): the homework
+   * executor used for homework-routed turns. Defaults to the REAL
+   * `executeHomeworkSkillTurn` (including its controlled-degradation wrap);
+   * tests may inject a degraded executor to exercise the
+   * skill_unavailable path end-to-end without corrupting shipped
+   * registries.
+   */
+  readonly homeworkExecutor?: HomeworkSkillTurnExecutor;
   readonly clock?: () => number;
   /** agentResponseId generator (contract `rsp_` grammar). */
   readonly agentResponseIdFactory?: () => string;
@@ -160,12 +183,13 @@ export interface CordisTurnResult {
   readonly skillApplied: boolean;
   readonly skillVersion: string | null;
   /**
-   * R1-11: structured emotion-skill resolution for turns where the routed
-   * skill executed (stage, situation, offered strategies, manifest-bound
-   * exits, evidence versions, limitation disclosures). Null on every other
-   * path (no route, non-emotion skill, degraded/rejected loads, early ends).
+   * R1-11/R1-12: structured resolution of the routed skill when it
+   * executed (stage, situation/obstacle, offered strategies/steps,
+   * manifest-bound exits, evidence versions, limitation disclosures).
+   * Null on every other path (no route, degraded/rejected loads, executor
+   * degradation, early ends).
    */
-  readonly skillResolution: Readonly<EmotionSkillTurnResolution> | null;
+  readonly skillResolution: Readonly<RoutedSkillTurnResolution> | null;
   readonly persona: Readonly<PersonaTurnResolution> | null;
   /** Input/tool/output safety traces in decision order. */
   readonly safetyTraces: readonly Readonly<SafetyTraceRecord>[];
@@ -291,7 +315,7 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
     readonly route: Readonly<SkillRouteDecision> | null;
     readonly skillApplied: boolean;
     readonly skillVersion: string | null;
-    readonly skillResolution: Readonly<EmotionSkillTurnResolution> | null;
+    readonly skillResolution: Readonly<RoutedSkillTurnResolution> | null;
     readonly persona: Readonly<PersonaTurnResolution> | null;
     readonly safetyTraces: readonly Readonly<SafetyTraceRecord>[];
     readonly failure: Readonly<CordisTurnFailure> | null;
@@ -568,7 +592,7 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
       const route = routeSkillForText(turnText);
       let skillApplied = false;
       let skillVersion: string | null = null;
-      let skillResolution: Readonly<EmotionSkillTurnResolution> | null = null;
+      let skillResolution: Readonly<RoutedSkillTurnResolution> | null = null;
       let skillHeader: string | null = null;
       const contextRefIds: string[] = [];
       const contextRefs: { kind: "evidence" | "memory"; refId: string; version: string | null }[] = [];
@@ -590,13 +614,36 @@ export function createCordisPipeline(options: Readonly<CordisPipelineOptions>): 
             skillResolution = resolution;
             skillHeader = resolution.guideline;
           } else {
-            skillHeader =
-              `Active skill: ${loaded.skillId}@${loaded.skillVersion} (evidence-bound; ` +
-              "follow its applicability and limitations without overriding persona boundaries).";
+            // R1-12: the homework skill executes its deterministic,
+            // evidence-bound strategy; the composed guideline (versions,
+            // stage directive, child-selectable smallest steps, exits,
+            // registry limitations) shapes the model messages for this
+            // turn. The v0 pipeline passes priorStage null (stateless per
+            // turn; the stage transition table is exercised by the eval
+            // subject and the executor tests).
+            //
+            // R1-11 review P2-4 disposition for THIS route: the executor
+            // call is wrapped in the existing controlled-degradation
+            // pattern — a fail-closed executor throw degrades this turn to
+            // skill_unavailable (the conversation continues WITHOUT the
+            // skill, observable in the trace) instead of failing the whole
+            // turn. The emotion route above keeps its pre-R1-12 behavior
+            // (changing it here would be silent scope creep; see the PR).
+            const execution = (options.homeworkExecutor ?? executeHomeworkSkillTurn)(loaded, turnText);
+            if (execution.status === "executed") {
+              skillResolution = execution.resolution;
+              skillHeader = execution.resolution.guideline;
+            } else {
+              skillApplied = false;
+              skillVersion = null;
+              routeResultCode = "skill_unavailable";
+            }
           }
-          for (const entry of loaded.evidence) {
-            contextRefIds.push(entry.cardId);
-            contextRefs.push({ kind: "evidence", refId: entry.cardId, version: entry.cardVersion });
+          if (skillApplied) {
+            for (const entry of loaded.evidence) {
+              contextRefIds.push(entry.cardId);
+              contextRefs.push({ kind: "evidence", refId: entry.cardId, version: entry.cardVersion });
+            }
           }
         } else {
           // Controlled degradation: continue WITHOUT the skill; the gap is

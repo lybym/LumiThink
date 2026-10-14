@@ -30,7 +30,7 @@ function scenarioBranch(scenarioId: string): string {
 
 test("the shipped suite parses and its scenario ids are unique", () => {
   assert.equal(SUITE.suiteId, "lumithink_eval_suite");
-  assert.equal(SUITE.suiteVersion, "1.1.0");
+  assert.equal(SUITE.suiteVersion, "1.2.0");
   assert.ok(SUITE.scenarios.length >= 17, "the shipped matrix must not silently shrink");
   const ids = SUITE.scenarios.map((scenario) => scenario.scenarioId);
   assert.equal(new Set(ids).size, ids.length, "scenario ids must be unique");

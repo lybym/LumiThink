@@ -1,6 +1,6 @@
 /**
- * R1-11 public entrypoint of the Skills domain module
- * (lib/domain/skills/, issue #23).
+ * R1-11/R1-12 public entrypoint of the Skills domain module
+ * (lib/domain/skills/, issues #23 and #24).
  *
  * The skill executors are the deterministic behavior surfaces governed by
  * the R1-13 evidence/skill registries: each consumes ONLY a served
@@ -13,3 +13,6 @@
 export * from "./emotion-support.ts";
 export * from "./emotion-eval-subject.ts";
 export * from "./emotion-eval-suite.ts";
+export * from "./homework-initiation.ts";
+export * from "./homework-eval-subject.ts";
+export * from "./homework-eval-suite.ts";
