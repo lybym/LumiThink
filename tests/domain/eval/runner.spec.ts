@@ -220,7 +220,7 @@ test("missing exit paths and missing evidence citations are detected (negative c
   );
   assert.equal(report.status, "fail");
   const result = resultOf(report, "homework.applicable.difficulty-001");
-  assert.equal(result.assertions.find((assertion) => assertion.assertionId === "required_evidence")?.detail, "missing=evd_synth_eef_meta_001");
+  assert.equal(result.assertions.find((assertion) => assertion.assertionId === "required_evidence")?.detail, "missing=evd_eef_meta_srl_001");
   assert.equal(result.assertions.find((assertion) => assertion.assertionId === "exit_paths")?.detail, "missing=end_turn");
 });
 
