@@ -56,17 +56,25 @@ export function LumiChat() {
   const [state, dispatch] = useReducer(chatReducer, undefined, initialChatState);
   const [draft, setDraft] = useState("");
   const eventsRef = useRef<EventSource | null>(null);
+  // Synchronous duplicate-submit lock: two clicks inside the SAME render
+  // pass would both read the (stale) pending=null state; the ref closes
+  // that window the reducer's lock alone cannot cover.
+  const inFlightRef = useRef(false);
 
   const pending = state.pending;
   const busy = pending !== null;
   const streaming = pending?.phase === "streaming";
   const stopping = pending?.phase === "stopping";
 
-  // Close the SSE subscription whenever the turn reached a terminal state.
+  // Close the SSE subscription and release the synchronous send lock
+  // whenever the turn reached a terminal state.
   useEffect(() => {
-    if (state.pending === null && eventsRef.current !== null) {
-      eventsRef.current.close();
-      eventsRef.current = null;
+    if (state.pending === null) {
+      inFlightRef.current = false;
+      if (eventsRef.current !== null) {
+        eventsRef.current.close();
+        eventsRef.current = null;
+      }
     }
   }, [state.pending]);
 
@@ -106,9 +114,10 @@ export function LumiChat() {
 
   const sendText = useCallback(
     async (text: string) => {
-      if (state.pending !== null) {
+      if (inFlightRef.current || state.pending !== null) {
         return; // duplicate-submit lock (belt) — the reducer enforces it too (braces)
       }
+      inFlightRef.current = true;
       const requestId = makeClientRequestId();
       dispatch({ type: "send/requested", text, requestId });
       const controller = new AbortController();
