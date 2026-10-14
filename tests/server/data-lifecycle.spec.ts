@@ -457,6 +457,43 @@ test("the inventory exposes the honest structural picture (ids + counts only)", 
   assert.ok(!serialized.includes("喜欢太空主题的故事"));
 });
 
+test("erase during an in-flight turn: the running turn is aborted and its output never reaches the child", async () => {
+  const runtime = createWebMvpRuntime();
+  const auth = loginAs(runtime, GUARDIAN_DEMO_ACCESS_CODE);
+  // Submit WITHOUT draining: the composed mock turn is still running
+  // (paced fragments) when the erase lands.
+  const result = await runtime.service.submitInteraction({ body: submitBody(), actor: childActor() });
+  assert.equal(result.kind, "ack");
+  if (result.kind !== "ack") {
+    throw new Error("unreachable");
+  }
+  const ack = result.body;
+
+  const erase = await runtime.guardian.eraseChildData({
+    authorization: auth,
+    body: { protocolVersion: "1.0", action: "erase_child_data" },
+  });
+  assert.equal(erase.kind, "ok");
+  const eraseBody = (erase.kind === "ok" ? erase.body : null) as {
+    purged: { conversations: number; turnStreams: number };
+  } | null;
+  assert.ok(eraseBody !== null);
+  assert.ok(eraseBody.purged.turnStreams >= 1, "the in-flight turn buffer is counted as purged");
+  assert.ok(eraseBody.purged.conversations >= 1);
+
+  // The aborted turn's event buffer is gone: the child can no longer attach
+  // to the stream, so no cancelled/completed frame content reaches anyone
+  // through the erased turn.
+  const lateStream = runtime.service.openEventStream({ actor: childActor(), traceId: ack.traceId });
+  assert.equal(lateStream.kind, "error");
+  // Nothing survives: zero conversations, zero streams.
+  const snapshot = runtime.service.childDataSnapshot(childActor().actorId);
+  assert.equal(snapshot.conversations.length, 0);
+  assert.equal(snapshot.turnStreams.total, 0);
+  // The guardian audit records the erase with structural counts only.
+  assert.ok(runtime.guardian.auditEntries().some((entry) => entry.kind === "data_erase"));
+});
+
 test("an unauthorized expire-cleanup attempt is now observable in the memory audit (carried #26 P2-4)", () => {
   const runtime = createWebMvpRuntime();
   const child = childActor();
