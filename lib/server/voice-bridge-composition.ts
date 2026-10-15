@@ -47,6 +47,7 @@ import {
 import { createMockCordisRuntime, type MockCordisRuntime, type MockGenerationScript } from "../domain/voice/bridge/mock-cordis.ts";
 import { canonicalBridgeProfile, type BridgeCordisProfile } from "../domain/voice/bridge/profile.ts";
 import { createVoiceTurnOrchestrator, type VoiceTurnOrchestrator } from "../domain/voice/orchestrator.ts";
+import { VOICE_TERMINAL_TURN_STATES } from "../domain/voice/schema.ts";
 import {
   createVoiceBridgeIpcClient,
   createVoiceBridgeIpcServer,
@@ -302,6 +303,13 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
       // stays live instead of holding a stuck RUNNING turn.
       orchestrator.settleTurn({ sessionKey, turnId: pumped.dispatchedTurnId, outcome: "FAILED" });
       gate.clearTurn(sessionKey, pumped.dispatchedTurnId);
+      // The refusal is THIS turn's failure, not the queue's: keep pumping
+      // so one fail-closed turn (e.g. prompt_text_lost after vault
+      // starvation) does not strand its QUEUED siblings. Every recursion
+      // settles one turn terminal, so the drain always terminates
+      // (issue #51 review R1 test gap 1: the queue must stay live).
+      await dispatchQueuedTurn(sessionKey);
+      return false;
     }
     return issued.ok;
   }
@@ -477,8 +485,14 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
       // Hold the transcript until the turn actually dispatches (bounded,
       // in-memory, destroyed on use/failure). A same-key replay re-puts the
       // same keyed content — same key + same fingerprint implies the same
-      // text — so the queued turn keeps its liveness.
-      vaultPut(refs.sessionKey, turnId, refs.transientText);
+      // text — so the queued turn keeps its liveness. A replay of an
+      // already-TERMINAL turn must NOT re-put: it can never dispatch again,
+      // so the entry would sit unconsumed until LRU eviction, against the
+      // vault's destroy-when-the-turn-can-no-longer-run invariant
+      // (issue #51 review R1 P2-2).
+      if (!(VOICE_TERMINAL_TURN_STATES as readonly string[]).includes(received.turn.state)) {
+        vaultPut(refs.sessionKey, turnId, refs.transientText);
+      }
       const dispatched = received.dispatchedTurnId === turnId;
       if (dispatched) {
         const issued = await issueBridgeDispatch(refs.sessionKey, turnId);
@@ -487,6 +501,9 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
           // the trusted turn can never run; settle FAILED (liveness).
           orchestrator.settleTurn({ sessionKey: refs.sessionKey, turnId, outcome: "FAILED" });
           gate.clearTurn(refs.sessionKey, turnId);
+          // Same liveness duty as dispatchQueuedTurn: a sibling that raced
+          // in QUEUED behind this turn must not strand behind the failure.
+          await dispatchQueuedTurn(refs.sessionKey);
           return { ok: false, code: issued.code };
         }
       }

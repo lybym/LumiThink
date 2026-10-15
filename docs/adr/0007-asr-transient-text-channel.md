@@ -14,9 +14,9 @@ R1-V3 交付的 Voice Gateway Adapter 将 `asr_final` 文本在 Adapter 内即�
 
 建立**授权范围内的瞬态 ASR 明文通道**，并明确其生命周期边界：
 
-1. **贯通路径（每层 fail-closed）**：`asr_final`（≤512 字，协议解析层截断）→ Adapter 调用帧内过**真实 R1-15 Input Safety Gate**（新增 entrance `voice`；`block`/`escalate_crisis` 一律 `input_gate_blocked` 枚举拒绝）→ 可信 Orchestrator 注册（turn_id/epoch 铸造 + 幂等键）→ 组合层**瞬态 prompt vault**（有界 64 条、纯内存、不导出）暂存 QUEUED 轮 → Bridge IPC `turn.prompt`（协议 **v1 → v2**）新增可选有界 `promptText` → 受信 Agent 的 `runPrompt({promptText})` 单轮模型请求。
+1. **贯通路径（每层 fail-closed）**：`asr_final`（≤512 字，协议解析层**整条即拒** `gateway.parse_failed`，不做服务端截断）→ Adapter 调用帧内过**真实 R1-15 Input Safety Gate**（新增 entrance `voice`；`block`/`escalate_crisis` 一律 `input_gate_blocked` 枚举拒绝）→ 可信 Orchestrator 注册（turn_id/epoch 铸造 + 幂等键）→ 组合层**瞬态 prompt vault**（有界 64 条、纯内存、不导出）暂存 QUEUED 轮 → Bridge IPC `turn.prompt`（协议 **v1 → v2**）新增可选有界 `promptText` → 受信 Agent 的 `runPrompt({promptText})` 单轮模型请求。
 2. **生命周期与销毁**：明文只存在于受保护单轮调用、必要 IPC 与获批模型请求；vault 条目派发时取用即毁（成功或失败都毁）、fence 取消/Worker 崩溃/终态结算时销毁；丢失条目的轮次派发即 `prompt_text_lost` fail-closed——宁可 FAILED，绝不让摘要冒充模型输入。
-3. **去重指纹密钥化**：转写去重指纹改为**HMAC-SHA256**（64 hex），密钥由服务组合层持有：生产 = 进程内 `randomBytes(32)`，不落盘、不打日志、随进程销毁；重启换钥后跨进程重放 `idempotency_conflict` fail-closed。测试重放可显式注入固定密钥（生产禁止）。FNV-1a 仅保留非隐私用途（会话键派生、帧批摘要、重放指纹）。
+3. **去重指纹密钥化**：转写去重指纹改为**HMAC-SHA256**（64 hex），密钥由服务组合层持有：生产 = 进程内 `randomBytes(32)`，不落盘、不打日志、随进程销毁。重启换钥后跨进程重放**不再连续**：幂等键派生自当前密钥下的指纹，换钥后同一转写得到不同指纹与不同幂等键，账本 miss，重放作为**新 turn 重新执行**（与"约束/后果"节一致；`idempotency_conflict` 仅覆盖"同键不同指纹"，不覆盖该场景）。测试重放可显式注入固定密钥（生产禁止）。FNV-1a 仅保留非隐私用途（会话键派生、帧批摘要、重放指纹）。
 4. **零泄漏不变量**：明文不入普通日志/审计/快照/错误包/制品；审计只出现枚举码或 64-hex 密钥化摘要；schema 测试断言字段 allow-list，泄漏扫描断言合成标记在全部内容无关表面零出现。
 5. **数据外发审批**：本通道不新增授权子系统——外发审批链 = 监护人激活绑定 → hello 持有凭证 → 连接租约/会话映射 → Input Safety Gate → 可信 Orchestrator（epoch/幂等）→ Bridge → 受信 Agent；每一环都是既有已审计的检查点，缺一即 fail-closed。
 

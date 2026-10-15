@@ -98,7 +98,6 @@ export const BRIDGE_REJECTION_CODES = Object.freeze([
   "auth_failed",
   "lease_denied",
   "frame_too_large",
-  "prompt_text_lost",
   "bridge.parse_failed",
 ] as const);
 

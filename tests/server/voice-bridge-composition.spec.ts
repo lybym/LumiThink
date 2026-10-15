@@ -14,7 +14,7 @@ import { join } from "node:path";
  */
 
 import { createVoiceBridgeStack, type VoiceBridgeStack } from "../../lib/server/voice-bridge-composition.ts";
-import type { MockGenerationScript } from "../../lib/domain/voice/bridge/mock-cordis.ts";
+import { MOCK_MAX_RECEIVED_PROMPTS, type MockGenerationScript } from "../../lib/domain/voice/bridge/mock-cordis.ts";
 
 const SESSION = "ses_stack0001";
 const CONVERSATION = "conv_stack0001";
@@ -191,6 +191,16 @@ test("worker crash settles the turn FAILED and recovery is explicit", async () =
     // is refused by the Bridge; the refused turn is settled FAILED (liveness).
     const refused = await stack.submitPrompt({ sessionKey: SESSION, idempotencyKey: "idem-stack-0032", fingerprint: "0123456789abcde0", transientText: "隔离期的说法。" });
     assert.ok(!refused.ok && refused.code === "worker_recovering");
+    // The refusal's liveness semantics, explicitly: the trusted turn is
+    // TERMINAL FAILED in the store (issue #51 review R1 test gap 3) and its
+    // transcript never reached the agent.
+    const refusedTurn = stack.orchestrator.listTurns(SESSION).find((turn) => turn.fingerprint === "0123456789abcde0");
+    assert.ok(refusedTurn, "the refused submit minted exactly one trusted turn");
+    assert.equal(stack.orchestrator.describeTurn(SESSION, refusedTurn.turnId)?.state, "FAILED", "the refused turn is settled FAILED, never stuck");
+    assert.ok(
+      !JSON.stringify(stack.runtime.receivedPromptsSnapshot(SESSION)).includes("隔离期的说法。"),
+      "the refused transcript never reached the agent",
+    );
 
     // ...until an explicit reopen rebuilds the worker.
     const reopened = await stack.openSession({ sessionKey: SESSION, conversationId: CONVERSATION, ownerActorId: OWNER });
@@ -301,6 +311,108 @@ test("illegal IPC payloads are rejected enumerated, without executing", async ()
     // The service audit carries no echo of the rejected payloads.
     const auditText = JSON.stringify(stack.service.auditSnapshot());
     assert.ok(!auditText.includes("not-hex"));
+  } finally {
+    await stack.stop();
+    cleanup();
+  }
+});
+
+test("an idempotent replay of a terminal turn is a no-op: no re-execution, no re-held transcript (issue #51 review R1 P2-2)", async () => {
+  const { stack, cleanup } = await createStack();
+  try {
+    assert.ok((await stack.openSession({ sessionKey: SESSION, conversationId: CONVERSATION, ownerActorId: OWNER })).ok);
+    const t1 = await stack.submitPrompt({ sessionKey: SESSION, idempotencyKey: "idem-stack-0081", fingerprint: "0123456789abcdef", transientText: "终态重放的说法。" });
+    assert.ok(t1.ok && t1.dispatched);
+    stack.pumpRuntime(SESSION, 20);
+    assert.ok(await waitFor(() => stack.orchestrator.describeTurn(SESSION, t1.turnId)?.state === "COMPLETED"));
+    assert.equal(stack.runtime.receivedPromptsSnapshot(SESSION).length, 1);
+
+    // Same key + same fingerprint replays the ORIGINAL (now terminal) turn:
+    // accepted as a replay, nothing re-dispatches, the agent sees no second
+    // prompt — and a terminal turn must not re-put a vault entry that no
+    // dispatch would ever consume (destroy-when-it-can-no-longer-run).
+    const replay = await stack.submitPrompt({ sessionKey: SESSION, idempotencyKey: "idem-stack-0081", fingerprint: "0123456789abcdef", transientText: "终态重放的说法。" });
+    assert.ok(replay.ok && !replay.dispatched, "the replay is accepted, dispatched=false");
+    assert.equal(replay.turnId, t1.turnId, "the replay returns the original turn");
+    assert.equal(stack.orchestrator.describeTurn(SESSION, t1.turnId)?.state, "COMPLETED", "terminal stays terminal");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(stack.runtime.receivedPromptsSnapshot(SESSION).length, 1, "no re-execution reached the agent");
+  } finally {
+    await stack.stop();
+    cleanup();
+  }
+});
+
+test("a vault-starved queued turn fails closed FAILED and the queue stays live (issue #51 review R1 test gap 1)", async () => {
+  const { stack, cleanup } = await createStack();
+  try {
+    assert.ok((await stack.openSession({ sessionKey: SESSION, conversationId: CONVERSATION, ownerActorId: OWNER })).ok);
+    // t1 occupies the agent (RUNNING) so every later final stays QUEUED and
+    // its transcript waits in the bounded vault.
+    const t1 = await stack.submitPrompt({ sessionKey: SESSION, idempotencyKey: "idem-stack-0091", fingerprint: "0123456789abcdef", transientText: "占用中的说法。" });
+    assert.ok(t1.ok && t1.dispatched);
+    stack.pumpRuntime(SESSION, 1);
+
+    // 65 more finals while busy: the vault (64 slots) holds turns 2..65;
+    // turn 66's entry evicts turn 2's — the OLDEST queued transcript.
+    const starvedMarker = "被逐出的说法zebra-44";
+    const queued: { readonly turnId: string; readonly text: string }[] = [];
+    for (let i = 0; i < 65; i += 1) {
+      const text = i === 0 ? starvedMarker : `排队说法第${i + 1}句。`;
+      const submitted = await stack.submitPrompt({
+        sessionKey: SESSION,
+        idempotencyKey: `idem-stack-0092-${String(i).padStart(3, "0")}`,
+        fingerprint: `0123456789ab${i.toString(16).padStart(4, "0")}`,
+        transientText: text,
+      });
+      assert.ok(submitted.ok && !submitted.dispatched, `queued final ${i} stays queued while busy`);
+      queued.push({ turnId: submitted.turnId, text });
+    }
+
+    // t1 completes; the queue drains. The starved turn fails CLOSED (its
+    // text is gone; a digest-only dispatch is forbidden) while every
+    // sibling still runs to completion — one fail-closed turn must not
+    // strand the queue. Each dispatch pair stays far under the IPC rate
+    // window at this pacing, so the socket transport behaves like in_process.
+    const allTerminal = () =>
+      [t1.turnId, ...queued.map((q) => q.turnId)].every((id) => {
+        const state = stack.orchestrator.describeTurn(SESSION, id)?.state;
+        return state !== undefined && ["COMPLETED", "CANCELLED", "FAILED", "TIMED_OUT"].includes(state);
+      });
+    const drained = await waitFor(() => {
+      stack.pumpRuntime(SESSION, 200);
+      return allTerminal();
+    }, 30_000);
+    assert.ok(drained && allTerminal(), "all turns reach a terminal state (no stranded queue)");
+    assert.equal(
+      stack.orchestrator.describeTurn(SESSION, queued[0].turnId)?.state,
+      "FAILED",
+      "the starved turn fails closed instead of dispatching digest-only",
+    );
+    for (const q of queued.slice(1)) {
+      assert.equal(stack.orchestrator.describeTurn(SESSION, q.turnId)?.state, "COMPLETED");
+    }
+    assert.equal(stack.orchestrator.describeTurn(SESSION, t1.turnId)?.state, "COMPLETED");
+
+    // The starved transcript reached NO agent request. The mock agent keeps
+    // a bounded 16-entry prompt ring (MOCK_MAX_RECEIVED_PROMPTS), so the
+    // verbatim check applies to the surviving records: the ring is full
+    // (every sibling dispatched), every record is a completed sibling's
+    // verbatim transcript, and the newest dispatch is present.
+    const received = stack.runtime.receivedPromptsSnapshot(SESSION);
+    assert.ok(!JSON.stringify(received).includes(starvedMarker), "the starved transcript never reached the agent");
+    assert.equal(received.length, MOCK_MAX_RECEIVED_PROMPTS, "the agent's prompt ring is full: every sibling dispatched");
+    const textByTurn = new Map(queued.map((q) => [q.turnId, q.text] as const));
+    for (const record of received) {
+      const text = textByTurn.get(record.turnId);
+      assert.ok(text !== undefined, "only queued siblings were dispatched to the agent");
+      assert.equal(record.promptText, text, "verbatim arrival");
+      assert.equal(
+        stack.orchestrator.describeTurn(SESSION, record.turnId)?.state,
+        "COMPLETED",
+        "every dispatched sibling is terminal COMPLETED",
+      );
+    }
   } finally {
     await stack.stop();
     cleanup();

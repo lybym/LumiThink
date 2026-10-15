@@ -65,7 +65,7 @@ v1.0 中 `asr_final` 文本在 Adapter 内即刻降为 FNV-1a 摘要并丢弃—
 
 - **外发审批链**（每层缺一不可，fail-closed）：监护人激活绑定（activation digest）→ hello 持有凭证比对 → 连接租约 + 会话映射授权 → **真实 R1-15 Input Safety Gate**（`evaluateInputGate`，entrance `voice`；`block`/`escalate_crisis` 一律 `input_gate_blocked` 拒绝，枚举码进审计，文本不留痕）→ 可信 Orchestrator 注册（turn_id/epoch 铸造 + 幂等键）→ Bridge `turn.prompt`（协议 **v2**）→ 受信 Agent 的单轮模型请求。
 - **明文生命周期**：文本只存在于 Adapter 单个调用帧、组合层瞬态 prompt vault（QUEUED 轮暂存；有界 64 条、纯内存、不导出不落盘）、必要 IPC 与获批模型请求。vault 条目派发时取用即毁（成功或失败都毁）、fence 取消/Worker 崩溃/终态结算时销毁；丢失条目的轮次派发即 `prompt_text_lost` fail-closed（宁可 FAILED，不让摘要冒充模型输入）。长度上限 512 字符，在协议解析层即拒。
-- **密钥化去重**：转写去重指纹为 HMAC-SHA256（64 hex），密钥 = 进程内 `randomBytes(32)`，不落盘不打日志、随进程销毁；跨进程重放 `idempotency_conflict` fail-closed。可重放测试可注入固定测试密钥（`asrFingerprintKeyHex`，生产必须省略）。FNV-1a 仅保留非隐私用途（会话键派生、帧批摘要、重放指纹）。
+- **密钥化去重**：转写去重指纹为 HMAC-SHA256（64 hex），密钥 = 进程内 `randomBytes(32)`，不落盘不打日志、随进程销毁。密钥随进程销毁意味着跨进程重放**不再被幂等账本识别**：幂等键派生自当前密钥下的指纹（`idem-gw<指纹前 8 位>t<计数>`），重启换钥后同一转写产生**不同指纹 → 不同幂等键 → 账本 miss → 铸造新 turn 重新执行**（fail-closed 方向的显式接受语义，见 ADR-0007"约束/后果"；`idempotency_conflict` 仅覆盖"同键不同指纹"，跨进程重放不会持有旧键，不适用）。可重放测试可注入固定测试密钥（`asrFingerprintKeyHex`，生产必须省略）。FNV-1a 仅保留非隐私用途（会话键派生、帧批摘要、重放指纹）。
 - **零泄漏不变量**：文本不入普通日志/审计/快照/错误包/制品；审计 detail 只有枚举码或 64-hex 密钥化摘要；schema 测试断言字段 allow-list，泄漏扫描断言合成标记在全部内容无关表面零出现（唯一允许位置 = Fake Agent 收到的获批模型请求）。
 
 ### 2.4 播放停止 / TTS 队列清空 / Opus 发送（验收 1）

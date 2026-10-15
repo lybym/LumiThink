@@ -426,6 +426,13 @@ export const GATEWAY_REJECTION_CODES = Object.freeze([
   "cancel_timeout",
   "scheduler_busy",
   "turn_state_transition_illegal",
+  // Composition-internal code (lib/server/voice-bridge-composition.ts): the
+  // core port reports it when a text-bearing turn's held transcript is
+  // missing at dispatch (fail-closed). The Adapter forwards core-port
+  // failures verbatim, so this code is part of ITS rejection vocabulary;
+  // the Bridge IPC itself never produces it (it is NOT in
+  // BRIDGE_REJECTION_CODES — issue #51 review R1 P2-1).
+  "prompt_text_lost",
 ] as const);
 
 export type GatewayRejectionCode = (typeof GATEWAY_REJECTION_CODES)[number];

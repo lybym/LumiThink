@@ -191,6 +191,32 @@ test("an Input-Safety-Gate-blocked transcript fails closed before any core call 
   }
 });
 
+test("a crisis transcript escalates fail-closed at the voice entrance: no turn, no fingerprint, no agent call (issue #51 review R1 test gap 2)", async () => {
+  const h = await createHarness();
+  try {
+    h.mock.speakFinal("conn_tc01", "[synthetic] 我不想活了");
+    await feedAll(h);
+    assert.equal(h.gw.adapterMetrics().inputGateBlocked, 1, "escalate_crisis rejects with the same enumerated code");
+    const sessionKey = h.gw.findSessionKeyByDevice(DEVICE);
+    assert.ok(sessionKey);
+    assert.equal(h.gw.stack.orchestrator.listTurns(sessionKey).length, 0, "no turn was created");
+    assert.equal(h.gw.stack.runtime.receivedPromptsSnapshot(sessionKey).length, 0, "nothing reached the agent");
+    // Gate ordering is the sharper assertion here: the keyed fingerprint is
+    // computed only AFTER the gate allows — a crisis text must not even
+    // leave a 64-hex digest trace in the audit.
+    assert.equal(
+      h.gw.adapter.auditSnapshot().filter((entry) => entry.action === "gateway.asr_final_accepted").length,
+      0,
+      "an escalated transcript never reaches the fingerprint step",
+    );
+    for (const [name, serialized] of leakSurfaces(h)) {
+      assert.ok(!serialized.includes("我不想活了"), `${name} must not carry the crisis transcript`);
+    }
+  } finally {
+    await h.stop();
+  }
+});
+
 test("an over-long transcript fails closed at the protocol edge (issue #51 DoD 2)", async () => {
   const h = await createHarness();
   try {
