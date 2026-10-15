@@ -161,3 +161,14 @@ Cordis Runtime Bridge 的**合成 POC** 实现于 `lib/domain/voice/bridge/`（�
 - **候选基线**（§9，仅采集不达标）：取消 ACK、`whenIdle` 停稳、首段安全文字、Worker 回收四项延迟在 Bridge/Gate 指标快照中分别采集（`baselineMetrics()`），测试明确标注为候选值。
 - **竞态证据**：`tests/domain/voice/bridge/race.spec.ts` 100 个种子场景（抢话、重复取消、迟到 delta 风暴、崩溃恢复、非法 IPC 注入五族），不变量断言：交付 TTS 全部当前 epoch（旧 TTS 交付 = 0）、终态 turn 的栅栏写入全部拒绝（旧记忆写入 = 0）、被栅栏 delta > 0、非 text 通道丢弃 > 0、每轮取消的进程内 cancel 恰好一次；取消 ACK/idle/首段安全文字/回收耗时作为候选基线输出。真实 UDS 传输路径由 `tests/server/voice-bridge-ipc.spec.ts` 与 `voice-bridge-composition.spec.ts` 在 POSIX CI 上行使（Windows 开发沙箱禁止开 socket，规格测试在 POSIX 上运行）。
 - **边界声明**：本 POC 的"上游运行时"是合成 Mock，未接入真实 DSH 进程；live/cancel 证据针对合成 Mock 的源级语义（取消即源头停止派发、durable 消息不参与 delta），不等于实机验收。实机 R5 是单独阶段。
+
+## 13. R1-V3 实现落点（issue #30）
+
+Voice Gateway Adapter 的**合同 + 合成故障注入 POC** 实现于 `lib/domain/voice/adapter/`（无依赖领域层）与 `lib/server/voice-gateway-composition.ts`（把 Adapter 绑到 R1-V1 Orchestrator + R1-V2 Bridge 栈的设备边缘组合）。协议与兼容矩阵固定于 `docs/VOICE_GATEWAY_PROTOCOL.md`（小智官方固件 **v2.5.2** 线协议 + 自建 `xinnan-tech/xiaozhi-esp32-server` 评估基线，来源差异如实记录：线协议报文名为 `abort`，`client_abort` 是自建服务端内部状态标志；矩阵与私有 OTA 均标注未实机验证）：
+
+- **设备可信绑定**（§8 延伸）：`binding.ts` 只接受监护人激活摘要的绑定；变更 device_id、未绑定设备、伪造/跨会话 session_id 全部枚举拒绝；每设备至多一条连接租约。小智连接 `session_id` 只是连接级一次性映射句柄，**永不作为儿童身份**——身份始终来自受信绑定（actorId/conversationId），重连续接同一受信会话而 session_id 重新铸造。
+- **ASR final/partial**（§5 延伸）：瞬态转写文本在 Adapter 内即刻降为十六进制摘要并丢弃，只以 fingerprint+幂等键进入 `turn.prompt`；partial 只计数/作打断候选，永不自行提升 epoch。
+- **client_abort → fence 先行**（§4）：`abort` 事件经 `GatewayCorePort.bargeIn`（组合层 fence→真取消→`whenIdle`→CANCELLED→调度下一轮）后才发端侧 `tts.stop{interrupted}`（每 turn 恰一次）与 `tts.clear{droppedStale}`；无播放中的 abort 是枚举 no-op（连续抢话无第二次 epoch bump）。
+- **Opus 发送合同**（§5）：`drainTts` 只交付当前 epoch → 每批再过 `fenceOutput(kind:"audio_send")` → `tts.frames{frameCount,audioDigest}`——协议面不存在音频字节字段，真实编解码与 AEC 时钟对齐属 R5。
+- **合成故障注入**（§9 延伸）：`mock-xiaozhi.ts`（确定性 pump/flush 驱动、逐字节可重放）+ `fixtures.ts` 七族命名 fixture（迟到 ASR、连续 abort、服务重启、乱序输出、断网重连、重复连接、身份伪造）在真实组合栈上跑 56 场景：旧响应泄漏 0、全部 turn 终态无死锁、审计环联合无文本泄漏；设备侧对停后/旧 epoch 帧批的拒绝可观测。
+- **竞争性证据**：`tests/domain/voice/adapter/`（protocol/binding/adapter/fault-injection/fixtures 五套件）；R0 与 R1-V1/V2 回归保持不变（全量本地 818 tests，0 FAIL，5 SKIP 为既有 POSIX-only 真 socket 用例）。实机 R5 验收清单与硬件板级 TODO 见 `docs/VOICE_GATEWAY_PROTOCOL.md` §6/§7。
