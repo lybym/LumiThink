@@ -136,13 +136,27 @@ function requireInteger(map: Map<string, string>, key: string, context: string):
   return value
 }
 
+/** Structural baseline shape shared by the R0 and E2E-02 report contracts. */
+export interface ReportBaseline {
+  readonly tests: number
+  readonly suites: number
+  readonly skipped: number
+  readonly failures: number
+  readonly errors: number
+}
+
 /**
- * Parse and validate one JUnit report against the baseline and required tests.
+ * Parse and validate one JUnit report against a baseline and required tests.
  *
  * Throws {@link ReportGateError} for every fail-closed condition; returns the
  * observed evidence otherwise. Callers must treat a throw as a blocked gate.
  */
-export function evaluateJUnitReport(raw: string, options: { reportPath?: string } = {}): ReportGateResult {
+export function evaluateJUnitReportForBaseline(
+  raw: string,
+  baseline: ReportBaseline,
+  requiredTests: ReadonlyArray<{ file: string; name: string }>,
+  options: { reportPath?: string } = {},
+): ReportGateResult {
   const context = options.reportPath === undefined ? 'JUnit report' : `JUnit report ${options.reportPath}`
 
   if (raw.trim().length === 0) {
@@ -231,17 +245,17 @@ export function evaluateJUnitReport(raw: string, options: { reportPath?: string 
 
   // The gate's hard requirements come first, so a tampered report blocks with
   // the reason that actually matters (baseline drift, skipped, failed).
-  if (counts.tests !== R0_BASELINE.tests) {
+  if (counts.tests !== baseline.tests) {
     throw new ReportGateError(
-      `${context}: baseline mismatch — expected exactly ${R0_BASELINE.tests} executed tests, observed ${counts.tests}`,
+      `${context}: baseline mismatch — expected exactly ${baseline.tests} executed tests, observed ${counts.tests}`,
     )
   }
-  if (counts.failures !== R0_BASELINE.failures || counts.fail !== R0_BASELINE.failures || failedCases > 0) {
+  if (counts.failures !== baseline.failures || counts.fail !== baseline.failures || failedCases > 0) {
     throw new ReportGateError(
       `${context}: failures must be 0 (summary fail=${counts.fail}, suites=${declaredSuiteFailures}, cases=${failedCases})`,
     )
   }
-  if (counts.errors !== R0_BASELINE.errors || erroredCases > 0) {
+  if (counts.errors !== baseline.errors || erroredCases > 0) {
     throw new ReportGateError(`${context}: errors must be 0 (summary errors=${counts.errors}, cases=${erroredCases})`)
   }
   if (counts.skipped !== R0_BASELINE.skipped || declaredSuiteSkipped > 0 || skippedCases > 0) {
@@ -286,7 +300,7 @@ export function evaluateJUnitReport(raw: string, options: { reportPath?: string 
   }
 
   const requiredExecuted: string[] = []
-  for (const required of R0_REQUIRED_TESTS) {
+  for (const required of requiredTests) {
     const match = cases.find(item => item.file.endsWith(required.file) && item.name === required.name)
     if (match === undefined) {
       throw new ReportGateError(
@@ -309,6 +323,15 @@ export function evaluateJUnitReport(raw: string, options: { reportPath?: string 
   }
 
   return { counts, cases, requiredExecuted }
+}
+
+/**
+ * Evaluate a JUnit report against the R0 acceptance baseline. Kept as the
+ * exact previous entry point (R0 contract unchanged); the generalized
+ * {@link evaluateJUnitReportForBaseline} serves the E2E-02 report contract.
+ */
+export function evaluateJUnitReport(raw: string, options: { reportPath?: string } = {}): ReportGateResult {
+  return evaluateJUnitReportForBaseline(raw, R0_BASELINE, R0_REQUIRED_TESTS, options)
 }
 
 /** Read the report from disk and evaluate it. Missing/empty files block. */

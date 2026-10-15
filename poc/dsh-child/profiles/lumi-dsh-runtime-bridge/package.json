@@ -1,0 +1,10 @@
+{
+  "name": "lumi-dsh-runtime-bridge-profile",
+  "private": true,
+  "description": "LumiThink E2E-02 (issue #52) bridge worker profile: explicit Cordis allowlist for the REAL DSH runtime that the lumi-dsh-runtime-bridge BridgeAgentPort adapter drives. Zero bundles; no SDK JSON-RPC serving (the bridge is the in-process owner), no tool providers, no telemetry/session-log/crash-reporting, loopback-only model route. Must never reuse the R0 lumithink-child profile or any official default profile.",
+  "dsh": {
+    "profile": {
+      "bundles": []
+    }
+  }
+}

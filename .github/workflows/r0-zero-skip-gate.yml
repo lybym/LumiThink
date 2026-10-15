@@ -4,6 +4,13 @@ name: R0 zero-skip gate
 # real, with zero skips, on both Linux and Windows before an R0 change can be
 # merged. Any missing/empty/unparseable report, any skip, and any unexpected
 # egress to a non-loopback model endpoint fails the gate closed.
+#
+# E2E-02 (Issue #52): the `e2e02` job runs the REAL DSH runtime acceptance on
+# Linux CI — a genuine `dsh-v0.2.0-rc.2` Cordis process (profile
+# `lumi-dsh-runtime-bridge`) behind the BridgeAgentPort adapter, with the
+# loopback mock model, three-round streaming, real cancellation, worker crash
+# and whenIdle-hang isolation, negative permissions, and its own zero-skip
+# JUnit report gate (`reports/e2e02-bridge.xml`).
 on:
   pull_request:
     paths:
@@ -180,4 +187,100 @@ jobs:
           report "report contract + zero-skip report gate" "${{ steps.r0_gate.outcome }}"
           report "gate fail-closed self-tests" "${{ steps.r0_gate_tests.outcome }}"
           report "unexpected-egress guard" "${{ steps.r0_egress.outcome }}"
+          exit "${status}"
+
+  e2e02:
+    name: E2E-02 real DSH runtime (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install exact pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Install exact Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Assert the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_node="$(node --version)"
+          actual_pnpm="$(pnpm --version)"
+          echo "node=${actual_node} pnpm=${actual_pnpm}"
+          if [ "${actual_node}" != "v${NODE_VERSION}" ]; then
+            echo "::error::Node ${actual_node} is not the pinned v${NODE_VERSION}"
+            exit 1
+          fi
+          if [ "${actual_pnpm}" != "${PNPM_VERSION}" ]; then
+            echo "::error::pnpm ${actual_pnpm} is not the pinned ${PNPM_VERSION}"
+            exit 1
+          fi
+
+      - name: Prepare isolated DSH_HOME
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${DSH_HOME}"
+          mkdir -p "${DSH_HOME}"
+          echo "DSH_HOME=${DSH_HOME}"
+
+      - name: Frozen-lockfile install
+        working-directory: poc/dsh-child
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: poc/dsh-child
+        run: pnpm run typecheck
+
+      - name: E2E-02 real-runtime suite (JUnit report + spec output)
+        id: e2e02_tests
+        if: ${{ !cancelled() }}
+        working-directory: poc/dsh-child
+        continue-on-error: true
+        run: pnpm run test:e2e02:run
+
+      - name: Attach the report contract and enforce the zero-skip gate
+        id: e2e02_gate
+        if: ${{ !cancelled() }}
+        working-directory: poc/dsh-child
+        continue-on-error: true
+        run: pnpm run test:e2e02:gate
+
+      - name: Sanitize the JUnit artifact (strip absolute paths)
+        if: ${{ !cancelled() }}
+        working-directory: poc/dsh-child
+        run: pnpm run test:e2e02:sanitize
+
+      - name: Upload sanitized E2E-02 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e02-bridge-acceptance
+          if-no-files-found: warn
+          retention-days: 14
+          path: poc/dsh-child/reports/e2e02-bridge.sanitized.xml
+
+      - name: Fail the job if any E2E-02 gate step failed
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          report() {
+            if [ "$2" != "success" ]; then
+              echo "::error::E2E-02 gate step '$1' concluded '$2'"
+              status=1
+            fi
+          }
+          report "E2E-02 real-runtime suite" "${{ steps.e2e02_tests.outcome }}"
+          report "E2E-02 zero-skip report gate" "${{ steps.e2e02_gate.outcome }}"
           exit "${status}"

@@ -33,6 +33,26 @@ export interface MockScript {
    * the negative test also probes other unmounted tools.
    */
   bashToolName?: string
+  /**
+   * E2E-02 (issue #52): respond with these exact fixed texts (consumed in
+   * order, one per model request; the last repeats) instead of the `MOCK-OK`
+   * echo, so leak assertions never depend on how much of the user prompt the
+   * echo replays. Default behavior (echo) is unchanged.
+   */
+  fixedTurnTexts?: string[]
+  /**
+   * E2E-02 (issue #52): delay between streamed delta frames (ms), making the
+   * stream genuinely slow enough for a mid-stream cancellation to land.
+   * Default (undefined) keeps the R0 instant stream.
+   */
+  streamChunkDelayMs?: number
+  /**
+   * E2E-02 (issue #52): when set, the streamed response opens with a
+   * `thinking` content block carried in this many `thinking_delta` frames —
+   * the deterministic upstream source the bridge's `thinking` channel drop
+   * is exercised against.
+   */
+  reasoningDeltaCount?: number
 }
 
 /** One sanitized request record kept as egress evidence. */
@@ -118,6 +138,7 @@ export class MockMessagesServer {
   private readonly server: Server
   private readonly requests: MockRequestRecord[] = []
   private bashToolRequested = false
+  private fixedTurnIndex = 0
   private readonly script: MockScript
 
   constructor(script: MockScript = {}) {
@@ -195,9 +216,23 @@ export class MockMessagesServer {
   private async respondMessages(res: ServerResponse, parsed: MessagesRequest): Promise<void> {
     const messages = Array.isArray(parsed.messages) ? parsed.messages : []
     const lastUser = [...messages].reverse().find(message => message.role === 'user')
-    const turnText = `MOCK-OK messages=${messages.length} last="${firstText(lastUser?.content).slice(0, 60)}"`
+    let turnText: string
+    if (this.script.fixedTurnTexts !== undefined) {
+      const index = Math.min(this.fixedTurnIndex, this.script.fixedTurnTexts.length - 1)
+      this.fixedTurnIndex += 1
+      turnText = this.script.fixedTurnTexts[index] ?? ''
+    } else {
+      turnText = `MOCK-OK messages=${messages.length} last="${firstText(lastUser?.content).slice(0, 60)}"`
+    }
 
     const blocks: Array<Record<string, unknown>> = []
+    if (this.script.reasoningDeltaCount !== undefined && this.script.reasoningDeltaCount > 0) {
+      blocks.push({
+        type: 'thinking',
+        thinking: 'synthetic reasoning trace',
+        deltaCount: this.script.reasoningDeltaCount,
+      })
+    }
     if (this.script.requestBashToolOnce && !this.bashToolRequested) {
       this.bashToolRequested = true
       // Negative test: ask for a tool that the profile never mounted.
@@ -235,7 +270,16 @@ export class MockMessagesServer {
       'cache-control': 'no-cache',
       connection: 'keep-alive',
     })
+    // A client that aborts mid-stream (issue #52 cancel injection) must never
+    // turn into an unhandled write error inside the mock.
+    res.on('error', () => undefined)
+    const chunkDelay = this.script.streamChunkDelayMs
+    const sleep = (ms: number): Promise<void> => new Promise(resolve => {
+      const timer = setTimeout(resolve, ms)
+      timer.unref?.()
+    })
     const send = (type: string, data: Record<string, unknown>): void => {
+      if (res.destroyed) return
       res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`)
     }
     send('message_start', {
@@ -251,20 +295,43 @@ export class MockMessagesServer {
       },
     })
     for (const [index, block] of blocks.entries()) {
+      if (res.destroyed) break
       if (block.type === 'text') {
         send('content_block_start', { index, content_block: { type: 'text', text: '' } })
         const text = block.text as string
-        // Emit the text in two deltas so the stream is genuinely incremental.
-        const half = Math.max(1, Math.floor(text.length / 2))
-        send('content_block_delta', { index, delta: { type: 'text_delta', text: text.slice(0, half) } })
-        send('content_block_delta', { index, delta: { type: 'text_delta', text: text.slice(half) } })
+        if (chunkDelay === undefined) {
+          // Emit the text in two deltas so the stream is genuinely incremental
+          // (the R0 evidence shape).
+          const half = Math.max(1, Math.floor(text.length / 2))
+          send('content_block_delta', { index, delta: { type: 'text_delta', text: text.slice(0, half) } })
+          send('content_block_delta', { index, delta: { type: 'text_delta', text: text.slice(half) } })
+        } else {
+          // E2E-02: a deliberately slow stream so a mid-stream cancel can land.
+          const pieceLength = 12
+          for (let start = 0; start < text.length; start += pieceLength) {
+            await sleep(chunkDelay)
+            send('content_block_delta', {
+              index,
+              delta: { type: 'text_delta', text: text.slice(start, start + pieceLength) },
+            })
+          }
+        }
+      } else if (block.type === 'thinking') {
+        send('content_block_start', { index, content_block: { type: 'thinking', thinking: '' } })
+        const deltaCount = typeof block.deltaCount === 'number' ? block.deltaCount : 2
+        for (let i = 0; i < deltaCount; i += 1) {
+          if (chunkDelay !== undefined) await sleep(chunkDelay)
+          send('content_block_delta', { index, delta: { type: 'thinking_delta', thinking: `trace-${i}` } })
+        }
       } else {
         send('content_block_start', { index, content_block: block })
       }
       send('content_block_stop', { index })
     }
-    send('message_delta', { delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: 2 } })
-    send('message_stop', {})
-    res.end()
+    if (!res.destroyed) {
+      send('message_delta', { delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: 2 } })
+      send('message_stop', {})
+      res.end()
+    }
   }
 }
