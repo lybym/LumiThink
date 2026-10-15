@@ -10,13 +10,14 @@
  * permissions, peer lease) lives in lib/server/voice-bridge-ipc.ts — the
  * domain layer never imports node builtins.
  *
- * PRIVACY (issue #29 统一阻断规则): every command payload and every event
- * payload except `assistant.delta` is content-free — ids, epochs, attempt/
- * step/index bindings, enumerated codes, counts and hex digests only. The
- * single content-bearing field in the entire protocol is the transient
- * `text` of an `assistant.delta` event (the live stream the Orchestrator
- * must gate); it is NEVER persisted, audited, logged or re-sent as part of
- * any durable message. Schema tests assert this field allow-list.
+ * PRIVACY (issue #29 统一阻断规则, revised by issue #51 / E2E-01): every
+ * command payload and every event payload is content-free EXCEPT exactly two
+ * transient carriers: the `text` of an `assistant.delta` event (the live
+ * stream the Orchestrator must gate) and the OPTIONAL bounded `promptText`
+ * of a `turn.prompt` command (the authorized transient ASR transcript for
+ * that turn's protected single-turn model request). Neither is persisted,
+ * audited, logged or re-sent as part of any durable message. Schema tests
+ * assert both field allow-lists.
  *
  * This module must stay dependency-free (no prisma, react, next, node
  * builtins) — enforced by tests/domain/boundary.spec.ts.
@@ -38,7 +39,8 @@ import {
 // Protocol identity + transport bounds
 // ---------------------------------------------------------------------------
 
-export const BRIDGE_IPC_PROTOCOL = "lumithink.bridge-ipc/v1" as const;
+/** v2 (issue #51): turn.prompt gained the optional bounded `promptText`. */
+export const BRIDGE_IPC_PROTOCOL = "lumithink.bridge-ipc/v2" as const;
 
 /** Maximum JSON frame body length in code units (transport re-caps bytes). */
 export const BRIDGE_IPC_MAX_FRAME_CHARS = 16_384;
@@ -416,12 +418,22 @@ export interface BridgeTurnPromptPayload {
   /** Content-free hex digest of the prompt payload (never the content). */
   readonly fingerprint: string;
   readonly idempotencyKey: string;
+  /**
+   * The authorized transient transcript for this turn's model request
+   * (issue #51). OPTIONAL on the wire for contract back-compat; the
+   * composition attaches it from its transient vault exactly once. Length-
+   * capped, never echoed in errors, never persisted.
+   */
+  readonly promptText: string | null;
 }
+
+/** Bounded transient prompt text for turn.prompt (chars). */
+export const BRIDGE_TURN_PROMPT_TEXT_MAX_CHARS = 512;
 
 export function parseTurnPromptPayload(raw: unknown): BridgeTurnPromptPayload {
   const payload = parsePayloadObject(raw, "turn.prompt");
   const problems: ContractProblem[] = [];
-  rejectUnknownFields(payload, ["sessionKey", "turnId", "epoch", "traceId", "fingerprint", "idempotencyKey"], problems);
+  rejectUnknownFields(payload, ["sessionKey", "turnId", "epoch", "traceId", "fingerprint", "idempotencyKey", "promptText"], problems);
   validateSessionTurnRefs(payload, problems, { turnId: true, traceId: true });
   if (!isValidVoiceEpoch(payload.epoch)) {
     problems.push(problem("CONTRACT_FIELD_INVALID", "payload.epoch", "epoch must be a positive integer."));
@@ -431,6 +443,18 @@ export function parseTurnPromptPayload(raw: unknown): BridgeTurnPromptPayload {
   }
   if (typeof payload.idempotencyKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$/.test(payload.idempotencyKey)) {
     problems.push(problem("CONTRACT_FIELD_INVALID", "payload.idempotencyKey", "idempotencyKey must match the bounded grammar."));
+  }
+  let promptText: string | null = null;
+  if (payload.promptText !== undefined && payload.promptText !== null) {
+    if (
+      typeof payload.promptText !== "string" ||
+      payload.promptText.length === 0 ||
+      payload.promptText.length > BRIDGE_TURN_PROMPT_TEXT_MAX_CHARS
+    ) {
+      problems.push(problem("CONTRACT_FIELD_INVALID", "payload.promptText", "promptText must be a bounded non-empty string."));
+    } else {
+      promptText = payload.promptText;
+    }
   }
   if (problems.length > 0) {
     throw new ContractValidationError(problems);
@@ -442,6 +466,7 @@ export function parseTurnPromptPayload(raw: unknown): BridgeTurnPromptPayload {
     traceId: (payload.traceId as string | null | undefined) ?? null,
     fingerprint: payload.fingerprint as string,
     idempotencyKey: payload.idempotencyKey as string,
+    promptText,
   };
 }
 

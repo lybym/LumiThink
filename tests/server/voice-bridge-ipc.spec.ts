@@ -17,6 +17,7 @@ import { BridgeFrameDecoder, createVoiceBridgeIpcClient, createVoiceBridgeIpcSer
 import { createVoiceBridge } from "../../lib/domain/voice/bridge/bridge.ts";
 import { createMockCordisRuntime } from "../../lib/domain/voice/bridge/mock-cordis.ts";
 import { canonicalBridgeProfile, validateBridgeProfile } from "../../lib/domain/voice/bridge/profile.ts";
+import { BRIDGE_IPC_PROTOCOL } from "../../lib/domain/voice/bridge/ipc-contract.ts";
 import type { VoiceBridgeService } from "../../lib/domain/voice/bridge/bridge.ts";
 
 const AUTH_OK = "ab".repeat(48); // 96 hex chars, grammar-valid
@@ -89,7 +90,7 @@ test("the frame decoder assembles partial deliveries and flags oversize/malforme
 
   function encodeHello(): Buffer {
     const body = Buffer.from(
-      JSON.stringify({ kind: "hello", v: "lumithink.bridge-ipc/v1", auth: AUTH_OK, role: "orchestrator" }),
+      JSON.stringify({ kind: "hello", v: BRIDGE_IPC_PROTOCOL, auth: AUTH_OK, role: "orchestrator" }),
       "utf8",
     );
     const header = Buffer.alloc(4);

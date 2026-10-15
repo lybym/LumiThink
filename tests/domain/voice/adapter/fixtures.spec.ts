@@ -57,6 +57,8 @@ async function runConsecutiveAbortFixture(): Promise<ReplayRun> {
     framesPerSentence: 4,
     turnIdFactory,
     clock: createVirtualClock().now,
+    // Pinned TEST key: the transcript-dedup HMAC must replay byte-identically.
+    asrFingerprintKeyHex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     directiveSink: (directive) => {
       mock.applyDirective(directive);
     },

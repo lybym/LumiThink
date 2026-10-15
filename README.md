@@ -42,7 +42,7 @@ Next.js Web / 触屏 → 同一 LumiThink API / Domain Services
 
 - **已完成的 R0 技术证据**：`poc/dsh-child` 的隔离最小权限 Profile，固定 DSH `dsh-v0.2.0-rc.2`，合成多轮 SDK 事件流、关闭、安全和隐私回归；R0-02 记录 35/35 PASS、0 SKIP（Windows/Linux CI）。这**不等于**真实儿童或实时语音生产验收。
 - **R1 文字端（进行中/待开发）**：统一请求接口、儿童 Persona、经证据约束的日常情绪和困难作业启动双 Skill、受控记忆与家长治理。
-- **R1-V 语音运行时先导（进行中）**：R1-V1 Turn Fencing 已交付（issue #28）；R1-V2 Cordis Bridge 真取消与实时 Delta 合成 POC 已交付（issue #29）：独立最小权限 Profile、私有本地 IPC 合同、live Delta→儿童 Output Gate→TTS 准入、进程内真取消/whenIdle、Worker 隔离恢复与 100 次竞态证据；实机联调与真实 DSH 进程接入仍未开始。
+- **R1-V 语音运行时先导（进行中）**：R1-V1 Turn Fencing 已交付（issue #28）；R1-V2 Cordis Bridge 真取消与实时 Delta 合成 POC 已交付（issue #29）：独立最小权限 Profile、私有本地 IPC 合同、live Delta→儿童 Output Gate→TTS 准入、进程内真取消/whenIdle、Worker 隔离恢复与 100 次竞态证据；R1-V3 小智 Gateway Adapter 合同与故障注入已交付（issue #30）；E2E-01 ASR 瞬态文本通道已交付（issue #51，[ADR-007](docs/adr/0007-asr-transient-text-channel.md)）：授权 final 转写经 Input Safety Gate 与私有 IPC 以瞬态明文到达受信 Agent（合成验证），去重指纹改用进程内 HMAC，裸 FNV-1a 不再承担隐私角色；实机联调与真实 DSH 进程接入仍未开始。
 - **R5 实机语音（计划）**：XVF3800 + ESP32-S3 小智板级固件、自建服务端、Bridge 与 DSH 完整闭环、断网/多次打断/延迟验收。
 - **后续**：Evidence/Skills 扩展、Web 交互场景与可审计的持续改进。
 
@@ -59,6 +59,7 @@ Next.js Web / 触屏 → 同一 LumiThink API / Domain Services
 | [Voice Runtime / 打断设计](docs/VOICE_RUNTIME.md) | `turn_id`/`epoch`、Cordis Bridge、实时安全流、取消/恢复/验收 |
 | [ADR-001](docs/adr/0001-deepseek-harness.md) | 采用 DSH 作为主 Agent Runtime |
 | [ADR-002](docs/adr/0002-voice-runtime-bridge.md) | 采用自定义 Cordis Runtime Bridge |
+| [ADR-007](docs/adr/0007-asr-transient-text-channel.md) | ASR 瞬态文本通道（授权明文进受信 Agent） |
 | [R0 DSH PoC](docs/R0_DSH_POC.md) | 合成 POC 合同与安全门禁 |
 | [DSH 上游版本治理](docs/DSH_UPSTREAM.md) | SDK/Cordis/插件版本锁定、升级审查 |
 | [技术栈与工程基线](docs/TECH_STACK.md) | 已确认的 Next.js/Node 24/pnpm 10/SQLite 栈、目录边界与 API/DSH 拓扑 |

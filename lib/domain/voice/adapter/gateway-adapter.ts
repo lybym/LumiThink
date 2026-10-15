@@ -13,11 +13,19 @@
  *   The hello MUST present the binding's activation digest (possession
  *   proof) — transport-layer authentication is layered ON TOP of this
  *   in-contract check, never a silent precondition of it.
- * - ASR final/partial: the transient transcript is reduced to a content-free
- *   hex digest and immediately discarded; only the digest becomes the
- *   prompt fingerprint (VOICE_RUNTIME §5 — content never crosses this
- *   boundary). Partials only advance speech-state counters — a partial is
- *   NEVER an interruption (不是每一帧 VAD 都提升 epoch).
+ * - ASR final/partial: a partial is only a candidate (never an interruption,
+ *   不是每一帧 VAD 都提升 epoch). An authorized final transcript — length-
+ *   capped by the protocol parser and screened by the REAL R1-15 Input
+ *   Safety Gate (`evaluateInputGate`, entrance "voice") — continues into the
+ *   authorized TRANSIENT channel (issue #51 / E2E-01): the verbatim text is
+ *   handed to the core port's protected single-turn call
+ *   (`submitPrompt.transientText`) and discarded when the call returns. The
+ *   text NEVER enters audit/metrics/directives/snapshots. Its only
+ *   content-derived residue is a KEYED fingerprint (injected
+ *   `asrFingerprint` — HMAC-SHA256 with a per-process key from the server
+ *   composition) used for idempotent dedup: a bare FNV-1a digest no longer
+ *   poses as the transcript's privacy guarantee. Gate-blocked or over-long
+ *   text fails closed with an enumerated code before any core call.
  * - client_abort (wire `abort`): the ONLY device signal that fences. Order
  *   is fence-first (VOICE_RUNTIME §4): the core barge-in atomically bumps
  *   the trusted epoch, then the Adapter issues the device playback-stop
@@ -46,6 +54,7 @@
  */
 
 import { ingestDomainFact } from "../../legacy-guard.ts";
+import { evaluateInputGate } from "../../safety/input-gate.ts";
 import { VOICE_TERMINAL_TURN_STATES, type VoiceTurnState } from "../schema.ts";
 import type {
   GatewayDeviceBindingRegistry,
@@ -74,12 +83,19 @@ export interface GatewayCorePort {
     readonly conversationId: string;
     readonly ownerActorId: string;
   }): Promise<{ readonly ok: true; readonly recovered: boolean; readonly continued: boolean } | { readonly ok: false; readonly code: string }>;
-  /** Submit one new prompt (ASR final) — fingerprint only, never text. */
+  /**
+   * Submit one new prompt (ASR final). The content-free fingerprint drives
+   * idempotent dedup; `transientText` is the authorized verbatim transcript
+   * for THIS turn's protected single-turn invocation — the implementation
+   * must keep it transient (necessary IPC + approved model request only)
+   * and destroy it on failure/cancel (issue #51).
+   */
   submitPrompt(refs: {
     readonly sessionKey: string;
     readonly traceId: string | null;
     readonly idempotencyKey: string;
     readonly fingerprint: string;
+    readonly transientText: string;
   }): Promise<{ readonly ok: true; readonly turnId: string; readonly dispatched: boolean } | { readonly ok: false; readonly code: string }>;
   /** The fence-first interruption flow (VOICE_RUNTIME §4 steps 1–4). */
   bargeIn(refs: {
@@ -113,6 +129,7 @@ export interface GatewayMetricsSnapshot {
   readonly eventsRejected: number;
   readonly asrFinalsAccepted: number;
   readonly asrPartialsSeen: number;
+  readonly inputGateBlocked: number;
   readonly interruptCandidates: number;
   readonly abortsFenced: number;
   readonly abortsWithoutPlayback: number;
@@ -165,7 +182,7 @@ export interface GatewayMappingSnapshotEntry {
 // Adapter
 // ---------------------------------------------------------------------------
 
-export const GATEWAY_ADAPTER_VERSION = "1.0" as const;
+export const GATEWAY_ADAPTER_VERSION = "1.1" as const;
 
 /** Synthetic frames per admitted TTS sentence (POC stand-in for Opus framing). */
 export const GATEWAY_FRAMES_PER_SENTENCE_DEFAULT = 4;
@@ -183,6 +200,15 @@ export const GATEWAY_MAX_STOPS_TRACKED = 64;
 export interface VoiceGatewayAdapterOptions {
   readonly core: GatewayCorePort;
   readonly binding: GatewayDeviceBindingRegistry;
+  /**
+   * KEYED transcript digest for idempotent dedup (issue #51: 必要去重使用有
+   * 明确用途和密钥生命周期的 HMAC). The server composition injects an
+   * HMAC-SHA256 hex digest over a per-process random key (never logged,
+   * never persisted, discarded with the process). Required — the adapter
+   * refuses to be created without it, so no bare/unkeyed digest can silently
+   * degrade into the old privacy pretense.
+   */
+  readonly asrFingerprint: (text: string) => string;
   readonly clock?: () => number;
   readonly framesPerSentence?: number;
   readonly sweepBudgetMs?: number;
@@ -214,6 +240,10 @@ function failAdapterInput(path: string, message: string): never {
 /**
  * 64-bit FNV-1a over a UTF-16 code-unit sequence — the same digest
  * discipline as tests/domain/voice/helpers.ts. Pure TS, no builtins.
+ *
+ * SCOPE (issue #51): identifier derivation ONLY (session keys, frame-batch
+ * digests, replay fingerprints). It must NOT be used on transcripts — the
+ * transcript dedup fingerprint is the injected keyed `asrFingerprint`.
  */
 export function gatewayContentDigest(text: string): string {
   let hash = 0xcbf29ce484222325n;
@@ -259,6 +289,10 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
   if (typeof core !== "object" || core === null || typeof binding !== "object" || binding === null) {
     failAdapterInput("options.core/binding", "the core port and the binding registry are required.");
   }
+  if (typeof options.asrFingerprint !== "function") {
+    failAdapterInput("options.asrFingerprint", "a keyed transcript digest function is required (bare digests must not pose as transcript privacy).");
+  }
+  const asrFingerprint = options.asrFingerprint;
   const clock = options.clock ?? (() => Date.now());
   const framesPerSentence = Math.max(1, Math.min(options.framesPerSentence ?? GATEWAY_FRAMES_PER_SENTENCE_DEFAULT, 1024));
   const sweepBudgetMs = Math.max(0, options.sweepBudgetMs ?? GATEWAY_SWEEP_BUDGET_MS_DEFAULT);
@@ -274,6 +308,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
     eventsRejected: 0,
     asrFinalsAccepted: 0,
     asrPartialsSeen: 0,
+    inputGateBlocked: 0,
     interruptCandidates: 0,
     abortsFenced: 0,
     abortsWithoutPlayback: 0,
@@ -576,9 +611,18 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
           return { ok: true, kind: event.kind, sessionKey: state.sessionKey };
         }
         case "asr_final": {
-          // The transient transcript never leaves this call frame: digest,
-          // submit, discard.
-          const fingerprint = gatewayContentDigest(event.text);
+          // The transient transcript lives only inside this call frame.
+          // Order is fail-closed: Input Safety Gate FIRST (a blocked or
+          // crisis text never crosses any boundary), then the keyed
+          // fingerprint, then the protected single-turn submit with the
+          // verbatim text. Nothing content-bearing reaches audit/metrics.
+          const gate = evaluateInputGate(event.text, { entrance: "voice" });
+          if (gate.decision !== "allow") {
+            metrics.inputGateBlocked += 1;
+            // Enumerated rejection only — never the decision details' text.
+            return reject("input_gate_blocked", state.sessionKey);
+          }
+          const fingerprint = asrFingerprint(event.text);
           state.turnCounter += 1;
           const idempotencyKey = `idem-gw${fingerprint.slice(0, 8)}t${state.turnCounter.toString().padStart(3, "0")}`;
           const submitted = await core.submitPrompt({
@@ -586,6 +630,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
             traceId: null,
             idempotencyKey,
             fingerprint,
+            transientText: event.text,
           });
           if (!submitted.ok) {
             return reject(submitted.code as GatewayRejectionCode, state.sessionKey);

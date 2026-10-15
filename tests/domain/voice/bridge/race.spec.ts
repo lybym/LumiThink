@@ -100,6 +100,7 @@ async function runScenario(stack: VoiceBridgeStack, seed: number, index: number)
       traceId: `trc_race${index.toString().padStart(8, "0")}`,
       idempotencyKey: `idem-r${index.toString().padStart(6, "0")}t${turnCounter.toString().padStart(3, "0")}`,
       fingerprint: (seed * 7919 + turnCounter).toString(16).padStart(16, "0").slice(-16),
+      transientText: `竞态场景 ${seed} 第 ${turnCounter} 轮合成说法。`,
     });
     assert.ok(submitted.ok, `scenario ${seed}: submitPrompt failed`);
     return submitted.turnId;

@@ -16,11 +16,19 @@
  *   drain → audio_send re-fence → tts.frames directives (frame counts +
  *   digests only — no audio bytes exist in this POC).
  *
- * PRIVACY: no child audio, transcript or key material ever appears here;
- * the auth token is generated per process and never logged; ASR text is
- * digested inside the Adapter and discarded.
+ * PRIVACY (revised by issue #51 / E2E-01): no child audio or key material
+ * ever appears here; the auth token is generated per process and never
+ * logged. The transcript plaintext exists ONLY inside the authorized
+ * transient channel: the Adapter's single handler call frame, the protected
+ * single-turn `submitPrompt` call, the necessary Bridge IPC and the
+ * approved model request — never in logs, audit, metrics or snapshots. The
+ * ASR dedup fingerprint is HMAC-SHA256 over a per-process random key
+ * (purpose: transcript idempotent dedup; lifecycle: born with the process,
+ * never persisted, never logged, discarded with it — a restart therefore
+ * fails closed on cross-restart replays instead of forging continuity).
  */
 
+import { createHmac, randomBytes } from "node:crypto";
 import { createVoiceBridgeStack, type VoiceBridgeStack } from "./voice-bridge-composition.ts";
 import {
   createVoiceGatewayAdapter,
@@ -52,6 +60,13 @@ export interface VoiceGatewayStackOptions {
   readonly framesPerSentence?: number;
   /** Device-directive sink override (defaults to the injected mock sink). */
   readonly directiveSink?: (directive: GatewayDeviceDirective) => void;
+  /**
+   * FIXED transcript-dedup HMAC key (exactly 64 hex chars) for deterministic
+   * test REPLAYS only. Production MUST omit it: the key is then per-process
+   * random (`randomBytes(32)`), never logged or persisted, and discarded
+   * with the process (issue #51 key lifecycle).
+   */
+  readonly asrFingerprintKeyHex?: string;
 }
 
 export interface VoiceGatewayStack {
@@ -98,6 +113,23 @@ export function createVoiceGatewayStack(options: VoiceGatewayStackOptions): Voic
 
   const binding = createGatewayDeviceBindingRegistry({ clock });
 
+  // Keyed transcript dedup fingerprint (issue #51): HMAC-SHA256 over a
+  // per-process random key. The key lives only in this closure — never
+  // logged, never persisted; a new process starts a new key, so a replayed
+  // ledger entry across a restart fails closed (idempotency_conflict)
+  // instead of pretending continuity. Replays may pin a fixed key.
+  const asrFingerprintKey =
+    options.asrFingerprintKeyHex !== undefined
+      ? (() => {
+          if (!/^[0-9a-f]{64}$/.test(options.asrFingerprintKeyHex)) {
+            throw new Error("voice gateway stack: asrFingerprintKeyHex must be exactly 64 hex chars.");
+          }
+          return Buffer.from(options.asrFingerprintKeyHex, "hex");
+        })()
+      : randomBytes(32);
+  const asrFingerprint = (text: string): string =>
+    createHmac("sha256", asrFingerprintKey).update(text, "utf8").digest("hex");
+
   // The core port maps the Adapter's needs onto the EXISTING Bridge stack —
   // the Adapter never reaches past these calls.
   const core: GatewayCorePort = {
@@ -123,6 +155,7 @@ export function createVoiceGatewayStack(options: VoiceGatewayStackOptions): Voic
         traceId: refs.traceId ?? undefined,
         idempotencyKey: refs.idempotencyKey,
         fingerprint: refs.fingerprint,
+        transientText: refs.transientText,
       });
       return submitted.ok
         ? { ok: true, turnId: submitted.turnId, dispatched: submitted.dispatched }
@@ -167,6 +200,7 @@ export function createVoiceGatewayStack(options: VoiceGatewayStackOptions): Voic
   const adapter = createVoiceGatewayAdapter({
     core,
     binding,
+    asrFingerprint,
     clock,
     ...(options.framesPerSentence !== undefined ? { framesPerSentence: options.framesPerSentence } : {}),
     ...(options.directiveSink !== undefined ? { sink: options.directiveSink } : {}),

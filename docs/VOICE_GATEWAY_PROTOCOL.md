@@ -1,7 +1,7 @@
 # Voice Gateway Adapter：小智 v2.5.2 协议兼容矩阵与合同（R1-V3）
 
-> 版本：1.0 ｜ 2026-10-15 ｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30) ｜ **合同 + 合成验证；固件/服务端兼容与私有 OTA 均【未实机验证】**
-> [VOICE_RUNTIME](./VOICE_RUNTIME.md) · [ADR-002](./adr/0002-voice-runtime-bridge.md) · [硬件选型](./VOICE_HARDWARE.md) · [Roadmap R1-V3](./ROADMAP.md)
+> 版本：1.1 ｜ 2026-10-15 ｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30)，1.1 修订 Issue [#51](https://github.com/lybym/LumiThink/issues/51) ｜ **合同 + 合成验证；固件/服务端兼容与私有 OTA 均【未实机验证】**
+> [VOICE_RUNTIME](./VOICE_RUNTIME.md) · [ADR-002](./adr/0002-voice-runtime-bridge.md) · [ADR-007](./adr/0007-asr-transient-text-channel.md) · [硬件选型](./VOICE_HARDWARE.md) · [Roadmap R1-V3](./ROADMAP.md)
 
 ## 1. 固定评估基线（版本/契约钉死）
 
@@ -31,7 +31,10 @@ xiaozhi 设备/自建服务端 (v2.5.2 线协议)
        ├── 受信绑定注册表：activation digest → (deviceId → actorId, conversationId)；hello 强制比对持有凭证（device_possession_denied）
        ├── 连接租约：每设备至多 1 条连接；重复连接拒绝 device_connection_conflict；容量耗尽拒绝 binding_capacity_exceeded
        ├── 会话映射：(connectionId, xiaozhi session_id[一次性]) → sessionKey
-       ├── ASR final/partial：文本即刻降为十六进制摘要并丢弃，只以摘要过界
+       ├── ASR final（v1.1，issue #51）：长度受限 + Input Safety Gate 通过的授权
+       │    final 以受保护单轮调用携逐字瞬态文本进 Core（瞬态 vault → turn.prompt
+       │    v2 `promptText` → 受信 Agent）；去重指纹为进程内 HMAC-SHA256；
+       │    partial 仍只计数/候选
        ├── abort（client_abort）：fence 先行（epoch 原子递增）→ 端侧 stop → TTS 队列清空
        └── Opus 发送合同：drain → audio_send 二次栅栏 → tts.frames（帧数+摘要，无音频字节）
             └── Turn Orchestrator（R1-V1，turn/epoch 唯一信任锚）
@@ -56,7 +59,16 @@ xiaozhi 设备/自建服务端 (v2.5.2 线协议)
 
 设备永远不能指定 epoch/turnId；打断 = 受信存储原子递增 epoch 并翻转旧轮，晚到的旧轮 delta/TTS/写请求在 Orchestrator/Adapter 双层栅栏拒绝。
 
-### 2.3 播放停止 / TTS 队列清空 / Opus 发送（验收 1）
+### 2.3 ASR 瞬态文本通道（v1.1，issue #51 / E2E-01）
+
+v1.0 中 `asr_final` 文本在 Adapter 内即刻降为 FNV-1a 摘要并丢弃——该摘要无法作为 Agent 真正的对话输入，且裸 FNV-1a 不能承担短句隐私保障。v1.1 建立授权范围内的**瞬态明文通道**：
+
+- **外发审批链**（每层缺一不可，fail-closed）：监护人激活绑定（activation digest）→ hello 持有凭证比对 → 连接租约 + 会话映射授权 → **真实 R1-15 Input Safety Gate**（`evaluateInputGate`，entrance `voice`；`block`/`escalate_crisis` 一律 `input_gate_blocked` 拒绝，枚举码进审计，文本不留痕）→ 可信 Orchestrator 注册（turn_id/epoch 铸造 + 幂等键）→ Bridge `turn.prompt`（协议 **v2**）→ 受信 Agent 的单轮模型请求。
+- **明文生命周期**：文本只存在于 Adapter 单个调用帧、组合层瞬态 prompt vault（QUEUED 轮暂存；有界 64 条、纯内存、不导出不落盘）、必要 IPC 与获批模型请求。vault 条目派发时取用即毁（成功或失败都毁）、fence 取消/Worker 崩溃/终态结算时销毁；丢失条目的轮次派发即 `prompt_text_lost` fail-closed（宁可 FAILED，不让摘要冒充模型输入）。长度上限 512 字符，在协议解析层即拒。
+- **密钥化去重**：转写去重指纹为 HMAC-SHA256（64 hex），密钥 = 进程内 `randomBytes(32)`，不落盘不打日志、随进程销毁。密钥随进程销毁意味着跨进程重放**不再被幂等账本识别**：幂等键派生自当前密钥下的指纹（`idem-gw<指纹前 8 位>t<计数>`），重启换钥后同一转写产生**不同指纹 → 不同幂等键 → 账本 miss → 铸造新 turn 重新执行**（fail-closed 方向的显式接受语义，见 ADR-0007"约束/后果"；`idempotency_conflict` 仅覆盖"同键不同指纹"，跨进程重放不会持有旧键，不适用）。可重放测试可注入固定测试密钥（`asrFingerprintKeyHex`，生产必须省略）。FNV-1a 仅保留非隐私用途（会话键派生、帧批摘要、重放指纹）。
+- **零泄漏不变量**：文本不入普通日志/审计/快照/错误包/制品；审计 detail 只有枚举码或 64-hex 密钥化摘要；schema 测试断言字段 allow-list，泄漏扫描断言合成标记在全部内容无关表面零出现（唯一允许位置 = Fake Agent 收到的获批模型请求）。
+
+### 2.4 播放停止 / TTS 队列清空 / Opus 发送（验收 1）
 
 - `abort` → **fence 先行**（`core.bargeIn` = 组合层 `bargeInCancel`：原子 epoch 递增 → Bridge 进程内真取消 + `whenIdle` 复核 → CANCELLED）→ 才发 `tts.stop{reason:"interrupted"}`（每 turn 恰好一次）→ `drainTts` 丢弃全部旧 epoch 队列项并回执 `tts.clear{droppedStale}`。
 - 连续抢话：无播放中的 abort 是枚举化 no-op（`no_active_playback` 语义，无第二次 epoch bump、无重复 stop——"不是每一帧 VAD 都提升 epoch"）。
@@ -73,7 +85,7 @@ xiaozhi 设备/自建服务端 (v2.5.2 线协议)
 | `listen` start/stop/detect（mode auto/manual/realtime） | 设备→服务端 | 语音状态计数；**播放中 detect 仅计为打断候选，不栅栏** | 合同+合成已验；未实机验证 |
 | `abort`（reason: wake_word_detected/manual/vad_detected）——即 issue 所称 client_abort | 设备→服务端 | fence 先行打断：epoch 递增 → 端侧 `tts.stop(interrupted)` → 队列清空 | 合同+合成已验（56 场景）；实机打断 未实机验证 |
 | ASR partial（自建服务端流式 ASR 内部事件） | 服务端内部 | `asr_partial` 有界瞬态事件：只计数/候选，不产生 prompt | 合同+合成已验；真实流式 ASR 行为 未实机验证 |
-| `stt`（text，ASR 终稿） | 服务端→设备 | `asr_final`：摘要化 → `turn.prompt`（fingerprint+幂等键），文本即刻丢弃 | 合同+合成已验；未实机验证 |
+| `stt`（text，ASR 终稿） | 服务端→设备 | `asr_final`：长度受限 + Input Safety Gate → 授权瞬态明文走 §2.3 通道（vault → `turn.prompt` v2 `promptText` → 受信 Agent）；去重指纹为 HMAC-SHA256（§2.3） | 合同+合成已验（`transient-channel.spec.ts`）；未实机验证 |
 | `tts` start / sentence_start / stop | 服务端→设备 | `tts.start` / `tts.frames`（帧数+摘要）/ `tts.stop`（completed/interrupted/failed，每 turn 恰一次） | 合同+合成已验；未实机验证 |
 | 二进制 Opus 帧（v1 裸帧；v2/v3 带元数据） | 双向 | POC 固定 v1 契约面；帧批以 frameCount+digest 表示；v2/v3 与 AEC 时钟对齐留 R5 | 契约固定；未实机验证 |
 | `mcp`（JSON-RPC 2.0 IoT 控制） | 双向 | **本阶段不开放**：设备工具必须走 R1-15 SAFE_TOOL_REGISTRY/工具栅栏，禁止设备 MCP 旁路安全 Gate | 拒绝（fail-closed 解析器不接受该类型） |
@@ -119,7 +131,15 @@ node --experimental-strip-types --test-isolation=none --test \
 - R1-V2 竞态回归未受影响：`scenarios=100 staleTtsDelivered=0 staleWritesAccepted=0 deltasFenced=25 toolDropped=178 cancelAckMaxMs=0ms whenIdleMaxMs=1ms firstSafeTextMaxMs=3ms workerRecoveryMaxMs=17ms`（候选基线，仅采集不达标）。
 - 固件/服务端兼容、私有 OTA、实机打断时延：**未实机验证**，无任何 PASS 声明。
 
-回滚说明：本 PR 为纯增量（新目录 `lib/domain/voice/adapter/` + 新组合 `lib/server/voice-gateway-composition.ts` + 测试/文档），不改 Orchestrator/Bridge 既有端口与语义、无持久化 schema/migration、未接入 app 页面；回滚即 revert 该 PR，不影响 R0 SDK 合成环境与既有 Bridge 路径。
+### 5.1 v1.1 修订证据（issue #51 / E2E-01，本地实跑 2026-10-15）
+
+- `pnpm run typecheck` 通过；全仓回归 **837 tests：0 FAIL，5 SKIP**（SKIP 同上，既有 POSIX-only 用例；基线 824 + 本修订新增 13 例）。
+- 新增 `tests/domain/voice/adapter/transient-channel.spec.ts`（6 例，真实组合栈 in_process）：合成转写**逐字**到达受信 Fake Agent（唯一允许位置 = 获批模型请求记录）；partial / Input-Gate 命中 / 超长（>512）/ 伪造会话 / 无租约连接全部 fail-closed 且 Agent 收到 0 条；泄漏扫描（adapter/orchestrator/bridge 审计与指标、mapping、exportState 快照、gate、设备出站指令）合成标记零出现；`asr_final` 审计 detail 为 **64-hex HMAC-SHA256**；打断后旧文本不回流。
+- fixture 重放（`fixtures.spec.ts`）以显式固定测试密钥保持逐字节可重放（生产省略该参数 = 进程内随机密钥）。
+- 修订语义：`asr_final` 不再"摘要化即丢弃"；裸 FNV-1a 不再承担转写隐私角色；Bridge IPC 协议 **v1 → v2**（`turn.prompt` 新增可选有界 `promptText`；旧 v1 帧被版本门禁拒绝）。
+
+回滚说明（v1.0）：本 PR 为纯增量（新目录 `lib/domain/voice/adapter/` + 新组合 `lib/server/voice-gateway-composition.ts` + 测试/文档），不改 Orchestrator/Bridge 既有端口与语义、无持久化 schema/migration、未接入 app 页面；回滚即 revert 该 PR，不影响 R0 SDK 合成环境与既有 Bridge 路径。
+回滚说明（v1.1 / issue #51）：改动集中在 voice 栈内部（adapter/composition/bridge/ipc 合同 + 测试/文档/ADR），无持久化 schema/migration、未接入 app 页面；回滚即 revert 该 PR，恢复 v1.0"摘要即丢弃"合同，不影响 R0 与既有回归。
 
 ## 6. 硬件板级适配待验证清单（R5 前置，均未开始）
 

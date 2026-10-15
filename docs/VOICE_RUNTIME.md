@@ -50,7 +50,7 @@ R0 的 `poc/dsh-child` + TypeScript SDK 继续保留为独立**合成环境**；
 | 命令 | 示例字段 | 行为 |
 | --- | --- | --- |
 | `session.open` | `session_key, actor_id, conversation_id` | Bridge 创建/恢复一个自有 AgentHandle，检查租约与唯一所有者 |
-| `turn.prompt` | `session_key, turn_id, epoch, text, idempotency_key` | Orchestrator 确认当前代且空闲时再入队，回 `accepted` |
+| `turn.prompt` | `session_key, turn_id, epoch, prompt_text(瞬态,≤512字), fingerprint, idempotency_key`（v2，issue #51） | Orchestrator 确认当前代且空闲时再入队，回 `accepted`；`prompt_text` 是授权瞬态转写，只服务本轮受保护的模型请求 |
 | `turn.cancel` | `session_key, turn_id, epoch, reason` | 首先在 Orchestrator 失效旧 epoch；Bridge 调 `cancel` 并等 `whenIdle` |
 | `turn.stream` | `session_key, turn_id, epoch` | 实时 Delta、状态及结算事件；支持背压和过滤 |
 | `session.close` | `session_key, reason` | 停止调度、`dispose` 并等资源回收；保持调用幂等 |
@@ -167,7 +167,16 @@ Cordis Runtime Bridge 的**合成 POC** 实现于 `lib/domain/voice/bridge/`（�
 Voice Gateway Adapter 的**合同 + 合成故障注入 POC** 实现于 `lib/domain/voice/adapter/`（无依赖领域层）与 `lib/server/voice-gateway-composition.ts`（把 Adapter 绑到 R1-V1 Orchestrator + R1-V2 Bridge 栈的设备边缘组合）。协议与兼容矩阵固定于 `docs/VOICE_GATEWAY_PROTOCOL.md`（小智官方固件 **v2.5.2** 线协议 + 自建 `xinnan-tech/xiaozhi-esp32-server` 评估基线，来源差异如实记录：线协议报文名为 `abort`，`client_abort` 是自建服务端内部状态标志；矩阵与私有 OTA 均标注未实机验证）：
 
 - **设备可信绑定**（§8 延伸）：`binding.ts` 只接受监护人激活摘要的绑定；变更 device_id、未绑定设备、伪造/跨会话 session_id 全部枚举拒绝；每设备至多一条连接租约。小智连接 `session_id` 只是连接级一次性映射句柄，**永不作为儿童身份**——身份始终来自受信绑定（actorId/conversationId），重连续接同一受信会话而 session_id 重新铸造。
-- **ASR final/partial**（§5 延伸）：瞬态转写文本在 Adapter 内即刻降为十六进制摘要并丢弃，只以 fingerprint+幂等键进入 `turn.prompt`；partial 只计数/作打断候选，永不自行提升 epoch。
+- **ASR final/partial**（§5 延伸；**E2E-01（issue #51）修订**）：瞬态转写不再降为裸 FNV-1a 摘要充当隐私保障——授权 final（长度受限、过真实 Input Safety Gate）以受保护单轮调用携逐字文本进入 Core，经 Bridge IPC `turn.prompt.promptText` 到达受信 Agent；详见 §14。
+
+## 14. E2E-01 实现落点：ASR 瞬态文本通道（issue #51）
+
+授权范围内的瞬态 ASR 明文通道实现于既有栈（`lib/domain/voice/adapter/gateway-adapter.ts` → `lib/server/voice-gateway-composition.ts` → `voice-bridge-composition.ts` → `ipc-contract.ts`/`bridge.ts` → `agent-port.ts`）：
+
+- **贯通路径**：`asr_final` 文本在 Adapter 单个调用帧内过**真实 R1-15 Input Safety Gate**（`evaluateInputGate`，entrance `voice`；block/escalate_crisis 一律以 `input_gate_blocked` fail-closed 拒绝）→ 以 `transientText` 进入受保护单轮调用 `submitPrompt` → 组合层**瞬态 prompt vault**（有界 64 条、纯内存、不导出/不落盘）暂存 QUEUED 轮 → 派发时随 `turn.prompt`（协议 **v2**）的 `promptText`（≤512 字）跨 IPC → Bridge 传给 `handle.runPrompt({promptText})` → 受信 Fake Agent 逐字收到。partial 仍只计数/候选，永不触发推理。
+- **密钥化去重**（不再使用裸 FNV-1a 充当短句隐私保障）：转写去重指纹为组合层注入的 **HMAC-SHA256**（64 hex）；密钥生命周期 = 进程内 `randomBytes(32)`、不落盘不打日志、随进程销毁。重启换钥后跨进程重放**不再连续**：幂等键派生自当前密钥下的指纹（`idem-gw<指纹前 8 位>t<计数>`），同一转写在换钥后得到不同指纹 → 不同幂等键 → 账本 miss → 铸造新 turn **重新执行**（`idempotency_conflict` 仅覆盖"同键不同指纹"，与该场景无关；与 ADR-0007"约束/后果"节一致，对 SQLite 持久化部署是显式接受的行为变化）。可重放测试可显式注入固定测试密钥，生产必须省略。FNV-1a（`gatewayContentDigest`）仅保留给非隐私用途：会话键派生、帧批摘要、重放指纹。
+- **生命周期与失败销毁**：明文只存在于受保护单轮调用、必要 IPC 与获批模型请求；vault 条目在派发时取用即毁（成功或失败都毁）、fence 取消/Worker 崩溃/终态结算时销毁；丢失 vault 条目的轮次派发即 `prompt_text_lost` fail-closed（宁可 FAILED，绝不让摘要冒充模型输入）；超长文本在协议解析层（512 字）即拒。全程不入普通日志/审计/快照/错误包（schema 测试断言字段 allow-list + 泄漏扫描断言零出现）。
+- **证据**：`tests/domain/voice/adapter/transient-channel.spec.ts`（逐字到达、partial/Gate/超长/伪造会话 fail-closed、泄漏扫描、HMAC 指纹形态、打断后旧文本不回流）+ `adapter.spec.ts` / `ipc-contract.spec.ts` / `bridge.spec.ts` / `voice-bridge-composition.spec.ts` 相应修订。实机 R5 仍未验证，不写 PASS。
 - **client_abort → fence 先行**（§4）：`abort` 事件经 `GatewayCorePort.bargeIn`（组合层 fence→真取消→`whenIdle`→CANCELLED→调度下一轮）后才发端侧 `tts.stop{interrupted}`（每 turn 恰一次）与 `tts.clear{droppedStale}`；无播放中的 abort 是枚举 no-op（连续抢话无第二次 epoch bump）。
 - **Opus 发送合同**（§5）：`drainTts` 只交付当前 epoch → 每批再过 `fenceOutput(kind:"audio_send")` → `tts.frames{frameCount,audioDigest}`——协议面不存在音频字节字段，真实编解码与 AEC 时钟对齐属 R5。
 - **合成故障注入**（§9 延伸）：`mock-xiaozhi.ts`（确定性 pump/flush 驱动、逐字节可重放）+ `fixtures.ts` 七族命名 fixture（迟到 ASR、连续 abort、服务重启、乱序输出、断网重连、重复连接、身份伪造）在真实组合栈上跑 56 场景：旧响应泄漏 0、全部 turn 终态无死锁、审计环联合无文本泄漏；设备侧对停后/旧 epoch 帧批的拒绝可观测。
