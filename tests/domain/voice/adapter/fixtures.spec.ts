@@ -25,6 +25,8 @@ import { mulberry32, pick, randomInt, createTurnIdFactory, createVirtualClock } 
 
 const DEVICE = "abcdef123456";
 const CONNECTION = "conn_replay01";
+/** The guardian-issued activation digest = the hello possession proof. */
+const ACTIVATION = "0123456789abcdef0123456789abcdef";
 
 function scriptFor(sessionKey: string, turnId: string) {
   const seed = (gatewayContentDigest(`${sessionKey}|${turnId}`).slice(0, 8) + "0000").slice(0, 8);
@@ -66,9 +68,9 @@ async function runConsecutiveAbortFixture(): Promise<ReplayRun> {
       deviceId: DEVICE,
       actorId: "act_owner0001",
       conversationId: "conv_child0001",
-      activationDigest: "0123456789abcdef0123456789abcdef",
+      activationDigest: ACTIVATION,
     });
-    mock.connect({ connectionId: CONNECTION, deviceId: DEVICE });
+    mock.connect({ connectionId: CONNECTION, deviceId: DEVICE, clientDigest: ACTIVATION });
     await drain(gw, mock);
     const sessionKey = gw.findSessionKeyByDevice(DEVICE);
     assert.ok(sessionKey);
@@ -203,6 +205,7 @@ test("the sanitized report carries counts and digests only — no synthetic text
       abortsFenced: 2,
       abortsWithoutPlayback: 2,
       forgedSessionsRefused: 0,
+      possessionRefused: 0,
       duplicateConnectionsRefused: 0,
       suspensions: 0,
       deadlocks: 0,
@@ -218,6 +221,7 @@ test("the sanitized report carries counts and digests only — no synthetic text
       abortsFenced: 0,
       abortsWithoutPlayback: 0,
       forgedSessionsRefused: 2,
+      possessionRefused: 2,
       duplicateConnectionsRefused: 1,
       suspensions: 0,
       deadlocks: 0,

@@ -134,7 +134,13 @@ export type GatewayDeviceEvent =
   | {
       readonly kind: "hello";
       readonly deviceId: string;
-      /** Content-free hex digest of the client-id (never the raw uuid). */
+      /**
+       * Device possession proof (content-free hex): the activation digest the
+       * guardian issued for THIS device. Compared against the binding record
+       * at connection time — a public MAC alone never opens a lease (issue
+       * #30 验收 1; binding.ts openConnection). Wire-level replay protection
+       * (TLS / challenge-response) stays transport work (R5).
+       */
       readonly clientDigest: string | null;
       readonly audioParams: GatewayAudioParams | null;
     }
@@ -397,8 +403,10 @@ export type GatewayDeviceDirective =
 export const GATEWAY_REJECTION_CODES = Object.freeze([
   "gateway.parse_failed",
   "device_unbound",
+  "device_possession_denied",
   "device_connection_conflict",
   "device_rebinding_denied",
+  "binding_capacity_exceeded",
   "connection_unknown",
   "connection_closed",
   "session_not_mapped",

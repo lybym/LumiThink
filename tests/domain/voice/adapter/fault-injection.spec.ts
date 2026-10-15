@@ -15,6 +15,11 @@ import test from "node:test";
  *   late_asr / consecutive_abort / server_restart / out_of_order_output /
  *   network_drop_reconnect / duplicate_connection / forged_identity.
  *
+ * Every fixture device connects with the hello possession proof (the
+ * binding's activation digest) — the in-contract credential enforced by
+ * binding.openConnection; forged_identity additionally replays the
+ * already-bound deviceId WITHOUT the proof (missing and wrong variants).
+ *
  * Invariants asserted for EVERY scenario:
  *   - all trusted turns terminal (no deadlock, no resurrection);
  *   - NO accepted device frame batch occurs after the device-applied stop of
@@ -32,6 +37,10 @@ import { mulberry32, randomInt, pick, createTurnIdFactory, createVirtualClock } 
 
 const TERMINAL_STATES: readonly string[] = ["COMPLETED", "CANCELLED", "FAILED", "TIMED_OUT"];
 const SCENARIOS_PER_FAMILY = 8;
+/** The guardian-issued activation digest used for every fixture device. */
+const ACTIVATION = "0123456789abcdef0123456789abcdef";
+/** The hello possession proof: the device-held activation digest itself. */
+const HELLO_PROOF = ACTIVATION;
 
 // ---------------------------------------------------------------------------
 // Deterministic generation script (child-safe synthetic samples only)
@@ -122,10 +131,10 @@ async function connectDevice(
     deviceId,
     actorId: "act_owner0001",
     conversationId: "conv_child0001",
-    activationDigest: "0123456789abcdef0123456789abcdef",
+    activationDigest: ACTIVATION,
   });
   assert.ok(bound.ok, `seed ${harness.seed}: guardian binding must succeed`);
-  harness.mock.connect({ connectionId, deviceId });
+  harness.mock.connect({ connectionId, deviceId, clientDigest: HELLO_PROOF });
   await feedAll(harness);
   const sessionKey = harness.gw.findSessionKeyByDevice(deviceId);
   assert.ok(sessionKey, `seed ${harness.seed}: device binding must yield a trusted session`);
@@ -227,7 +236,7 @@ async function runServerRestart(harness: Harness, deviceId: string, connectionId
   assert.ok(!stale.ok, `seed ${harness.seed}: the pre-restart session id must be refused`);
   // Reconnect on a NEW connection: trusted session and identity continue.
   const reconnectId = `${connectionId}_r2`;
-  harness.mock.connect({ connectionId: reconnectId, deviceId });
+  harness.mock.connect({ connectionId: reconnectId, deviceId, clientDigest: HELLO_PROOF });
   await feedAll(harness);
   const newHandle = harness.mock.serverAccept(reconnectId);
   assert.notEqual(newHandle, handle, `seed ${harness.seed}: a fresh session id is minted`);
@@ -283,7 +292,7 @@ async function runNetworkDropReconnect(harness: Harness, deviceId: string, conne
   await settleAll(harness, sessionKey);
   // Trusted rebind on the same device.
   const reconnectId = `${connectionId}_r2`;
-  harness.mock.connect({ connectionId: reconnectId, deviceId });
+  harness.mock.connect({ connectionId: reconnectId, deviceId, clientDigest: HELLO_PROOF });
   await feedAll(harness);
   harness.mock.serverAccept(reconnectId);
   await feedAll(harness);
@@ -299,7 +308,9 @@ async function runNetworkDropReconnect(harness: Harness, deviceId: string, conne
 async function runDuplicateConnection(harness: Harness, deviceId: string, connectionId: string, rng: () => number): Promise<string[]> {
   const { sessionKey } = await connectDevice(harness, deviceId, connectionId);
   const duplicateId = `${connectionId}_dup`;
-  harness.mock.duplicateConnect({ connectionId: duplicateId, deviceId });
+  // The duplicate presents the CORRECT possession proof: it is refused as a
+  // duplicate LEASE (device_connection_conflict), not as a possession failure.
+  harness.mock.duplicateConnect({ connectionId: duplicateId, deviceId, clientDigest: HELLO_PROOF });
   await feedAll(harness);
   harness.mock.serverAccept(duplicateId);
   await feedAll(harness);
@@ -349,6 +360,34 @@ async function runForgedIdentity(harness: Harness, deviceId: string, connectionI
     activationDigest: "ffffffffffffffffffffffffffffffff",
   });
   assert.ok(!rebinding.ok && rebinding.code === "device_rebinding_denied");
+  // P1 regression: the ALREADY-BOUND deviceId replayed from a SECOND
+  // connection while the legitimate connection is idle/absent. The MAC is
+  // public — without the possession proof the spoof never obtains a lease,
+  // a session mapping or the child session (absent AND wrong credentials).
+  const spoofMissing = await harness.gw.handleDeviceEvent(`${connectionId}_spoof1`, {
+    kind: "hello",
+    deviceId,
+    clientDigest: null,
+    audioParams: null,
+  });
+  assert.ok(
+    !spoofMissing.ok && spoofMissing.code === "device_possession_denied",
+    `seed ${harness.seed}: bound deviceId without the credential is a possession denial`,
+  );
+  const spoofWrong = await harness.gw.handleDeviceEvent(`${connectionId}_spoof2`, {
+    kind: "hello",
+    deviceId,
+    clientDigest: "ffffffffffffffffffffffffffffffff",
+    audioParams: null,
+  });
+  assert.ok(!spoofWrong.ok && spoofWrong.code === "device_possession_denied");
+  assert.ok(
+    harness.gw.adapterMetrics().possessionRefused >= 2,
+    `seed ${harness.seed}: possession denials are counted`,
+  );
+  // The spoof connections hold no lease and no session mapping.
+  const mappings = harness.gw.mappingSnapshot().filter((entry) => entry.deviceId === deviceId);
+  assert.ok(mappings.length === 1 && mappings[0].connectionId === connectionId, `seed ${harness.seed}: only the legitimate connection is mapped`);
   // The legitimate device still works end to end.
   harness.mock.speakFinal(connectionId, pick(rng, GATEWAY_SYNTHETIC_SENTENCES));
   await feedAll(harness);
@@ -383,12 +422,28 @@ interface FamilyTally {
   abortsFenced: number;
   abortsWithoutPlayback: number;
   forgedSessionsRefused: number;
+  possessionRefused: number;
   duplicateConnectionsRefused: number;
   suspensions: number;
   deadlocks: number;
 }
 
 const TALLIES: FamilyTally[] = [];
+
+/**
+ * Real candidate-latency collection (P2 fix): the maxima below are READ from
+ * each scenario's stack.baselineMetrics() at the END of the run — measured
+ * under the deterministic virtual clock (never wall time, never hardcoded).
+ * They stay candidate values, not SLA claims.
+ */
+const LATENCY = { cancelAckMaxMs: 0, whenIdleMaxMs: 0, firstSafeTextMaxMs: 0 };
+
+function collectLatency(harness: Harness): void {
+  const measured = harness.gw.stack.baselineMetrics();
+  LATENCY.cancelAckMaxMs = Math.max(LATENCY.cancelAckMaxMs, measured.cancelAckMs.maxMs);
+  LATENCY.whenIdleMaxMs = Math.max(LATENCY.whenIdleMaxMs, measured.whenIdleMs.maxMs);
+  LATENCY.firstSafeTextMaxMs = Math.max(LATENCY.firstSafeTextMaxMs, measured.firstSafeTextMs.maxMs);
+}
 
 function assertScenarioInvariants(harness: Harness, sessionKeys: readonly string[]): void {
   // 1. All trusted turns terminal — no deadlock, no resurrection.
@@ -466,9 +521,11 @@ async function runFamily(family: GatewayFixtureFamily, tally: FamilyTally): Prom
       tally.abortsFenced += metrics.abortsFenced;
       tally.abortsWithoutPlayback += metrics.abortsWithoutPlayback;
       tally.forgedSessionsRefused += metrics.forgedSessionsRefused;
+      tally.possessionRefused += metrics.possessionRefused;
       tally.duplicateConnectionsRefused += metrics.duplicateConnectionsRefused;
       tally.suspensions += metrics.suspensions;
       tally.deadlocks += turns.filter((turn) => !TERMINAL_STATES.includes(turn.state)).length;
+      collectLatency(harness);
     } finally {
       await harness.stop();
     }
@@ -487,6 +544,7 @@ function createTally(family: GatewayFixtureFamily): FamilyTally {
     abortsFenced: 0,
     abortsWithoutPlayback: 0,
     forgedSessionsRefused: 0,
+    possessionRefused: 0,
     duplicateConnectionsRefused: 0,
     suspensions: 0,
     deadlocks: 0,
@@ -539,6 +597,7 @@ test("forged_identity: device_id/session_id forgeries never reach the child sess
   await runFamily("forged_identity", tally);
   TALLIES.push(tally);
   assert.ok(tally.forgedSessionsRefused > 0);
+  assert.ok(tally.possessionRefused >= 2 * tally.scenarios, "every scenario replayed the bound-deviceId spoof (missing + wrong credential)");
 });
 
 test("the sanitized report built from the real runs stays content-free and honest", async () => {
@@ -555,25 +614,34 @@ test("the sanitized report built from the real runs stays content-free and hones
       abortsFenced: tally.abortsFenced,
       abortsWithoutPlayback: tally.abortsWithoutPlayback,
       forgedSessionsRefused: tally.forgedSessionsRefused,
+      possessionRefused: tally.possessionRefused,
       duplicateConnectionsRefused: tally.duplicateConnectionsRefused,
       suspensions: tally.suspensions,
       deadlocks: tally.deadlocks,
     })),
-    cancelAckMaxMs: 0,
-    whenIdleMaxMs: 0,
-    firstSafeTextMaxMs: 0,
+    // P2 fix: candidate latency is now COLLECTED from stack.baselineMetrics()
+    // across every scenario (deterministic virtual clock) — no hardcoded 0s.
+    cancelAckMaxMs: LATENCY.cancelAckMaxMs,
+    whenIdleMaxMs: LATENCY.whenIdleMaxMs,
+    firstSafeTextMaxMs: LATENCY.firstSafeTextMaxMs,
   });
   assert.equal(report.totals.staleFramesPlayed, 0);
   assert.equal(report.totals.nonTerminalTurns, 0);
   assert.equal(report.totals.deadlocks, 0);
   assert.equal(report.baseline.deviceVerified, false, "compat/OTA remain 未实机验证");
+  assert.ok(Number.isFinite(report.candidateLatency.cancelAckMaxMs), "cancel-ack candidate latency was actually collected");
+  assert.ok(Number.isFinite(report.candidateLatency.whenIdleMaxMs), "when-idle candidate latency was actually collected");
+  assert.ok(Number.isFinite(report.candidateLatency.firstSafeTextMaxMs), "first-safe-text candidate latency was actually collected");
   const leaks = findReportContentLeaks(report, [...GATEWAY_SYNTHETIC_SENTENCES]);
   assert.deepEqual(leaks, []);
   // Compact single-line summary (the only output this suite prints).
   console.log(
     `[r1-v3 gateway] scenarios=${report.totals.scenarios} staleFramesPlayed=0 staleFramesRefused=${TALLIES.reduce((s, t) => s + t.staleFramesRefused, 0)} ` +
       `abortsFenced=${TALLIES.reduce((s, t) => s + t.abortsFenced, 0)} abortsNoPlayback=${TALLIES.reduce((s, t) => s + t.abortsWithoutPlayback, 0)} ` +
-      `forgedRefused=${TALLIES.reduce((s, t) => s + t.forgedSessionsRefused, 0)} dupRefused=${TALLIES.reduce((s, t) => s + t.duplicateConnectionsRefused, 0)} ` +
-      `suspensions=${TALLIES.reduce((s, t) => s + t.suspensions, 0)} (synthetic; device/firmware compatibility 未实机验证)`,
+      `forgedRefused=${TALLIES.reduce((s, t) => s + t.forgedSessionsRefused, 0)} possessionRefused=${TALLIES.reduce((s, t) => s + t.possessionRefused, 0)} ` +
+      `dupRefused=${TALLIES.reduce((s, t) => s + t.duplicateConnectionsRefused, 0)} ` +
+      `suspensions=${TALLIES.reduce((s, t) => s + t.suspensions, 0)} ` +
+      `cancelAckMaxMs=${report.candidateLatency.cancelAckMaxMs}ms whenIdleMaxMs=${report.candidateLatency.whenIdleMaxMs}ms firstSafeTextMaxMs=${report.candidateLatency.firstSafeTextMaxMs}ms (virtual clock) ` +
+      `(synthetic; device/firmware compatibility 未实机验证)`,
   );
 });

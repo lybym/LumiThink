@@ -103,7 +103,7 @@ export interface MockXiaozhiGateway {
   /** The whole self-hosted server restarts: every connection dies, every session id is invalidated. */
   restartServer(): void;
   /** Attempt a SECOND connection for an already-connected device. */
-  duplicateConnect(refs: { readonly connectionId: string; readonly deviceId: string }): void;
+  duplicateConnect(refs: { readonly connectionId: string; readonly deviceId: string; readonly clientDigest?: string }): void;
   // ---- inbound delivery ----
   /** Drain the scheduled inbound events of one connection, in schedule order. */
   flush(connectionId: string): readonly GatewayDeviceEvent[];
@@ -337,7 +337,7 @@ export function createMockXiaozhiGateway(options: MockXiaozhiGatewayOptions = {}
       schedule(state, {
         kind: "hello",
         deviceId: refs.deviceId,
-        clientDigest: null,
+        ...(refs.clientDigest !== undefined ? { clientDigest: refs.clientDigest } : { clientDigest: null }),
         audioParams: { ...uplinkAudio },
       });
     },

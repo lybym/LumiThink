@@ -28,8 +28,8 @@
 ```text
 xiaozhi 设备/自建服务端 (v2.5.2 线协议)
   └── Voice Gateway Adapter（设备可信绑定/标识映射/鉴权；纯合成可重放）
-       ├── 受信绑定注册表：activation digest → (deviceId → actorId, conversationId)
-       ├── 连接租约：每设备至多 1 条连接；重复连接拒绝 device_connection_conflict
+       ├── 受信绑定注册表：activation digest → (deviceId → actorId, conversationId)；hello 强制比对持有凭证（device_possession_denied）
+       ├── 连接租约：每设备至多 1 条连接；重复连接拒绝 device_connection_conflict；容量耗尽拒绝 binding_capacity_exceeded
        ├── 会话映射：(connectionId, xiaozhi session_id[一次性]) → sessionKey
        ├── ASR final/partial：文本即刻降为十六进制摘要并丢弃，只以摘要过界
        ├── abort（client_abort）：fence 先行（epoch 原子递增）→ 端侧 stop → TTS 队列清空
@@ -41,6 +41,7 @@ xiaozhi 设备/自建服务端 (v2.5.2 线协议)
 ### 2.1 设备可信绑定与身份（验收 1）
 
 - **绑定只由监护人激活产生**：`bindDevice({deviceId, actorId, conversationId, activationDigest})`，注册表只存激活摘要。**变更 device_id 而无对应激活摘要 → `device_rebinding_denied`**；未绑定设备连接 → `device_unbound`。冒用他人 `session_id` → `session_forged`；跨会话引用 → `cross_session_rejected`（`binding.ts`，测试 `binding.spec.ts`）。
+- **连接时刻强制持有凭证（hello possession proof）**：hello 必须携带设备持有的激活摘要（`clientDigest`），`openConnection` 将其与绑定记录比对，**缺失/不符 → `device_possession_denied`**（先于重复连接冲突判定）。deviceId（MAC）是公开广播的，**仅凭 MAC 冒用已绑定设备永远拿不到租约/会话映射/儿童会话授权**——传输层鉴权是叠加防御层，不再是 `handleDeviceEvent` 的隐式前置契约。v2.5.2 线协议本身无此字段：R5 传输层负责把设备激活/授权材料映射为 hello 凭证；线路重放防护归 TLS（R5 可升级为挑战-应答）。测试：`binding.spec.ts`（缺失/畸形/错误凭证）+ `fault-injection.spec.ts` `forged_identity`（已绑定 deviceId 二连接冒用，缺失与错误凭证两变体）。
 - **每设备至多一条连接租约**：第二条并发连接 → `device_connection_conflict`（重复设备连接故障注入的防死锁基础）。
 - **小智 `session_id` 不是儿童永久身份**：它由服务端按连接生成（`connection.py`：`self.session_id = str(uuid.uuid4())`），只作为连接级映射校验句柄记录（`binding.ts` 的 `GatewaySessionMapping`），断线/重启即失效，重连重新铸造；儿童身份始终来自受信绑定（actorId/conversationId）。测试断言：重连后 sessionKey/身份不变、session_id 必变、旧 session_id 复用被拒。
 
@@ -67,7 +68,7 @@ xiaozhi 设备/自建服务端 (v2.5.2 线协议)
 
 | v2.5.2 报文 | 方向 | Adapter 合同映射 | 状态 |
 | --- | --- | --- | --- |
-| `hello`（version=1, features, audio_params） | 设备→服务端 | 握手头鉴权（Authorization/Protocol-Version/Device-Id/Client-Id 归传输层）；hello 事件驱动绑定 + 连接租约 | 合同+合成已验；实机握手 未实机验证 |
+| `hello`（version=1, features, audio_params） | 设备→服务端 | 握手头鉴权（Authorization/Protocol-Version/Device-Id/Client-Id 归传输层，叠加防御）**+ 合同内持有凭证**：hello 携带激活摘要与绑定记录比对，缺失/不符 `device_possession_denied`；hello 事件驱动绑定 + 连接租约 | 合同+合成已验；实机握手 未实机验证 |
 | `hello` ack（含 `session_id`） | 服务端→设备 | `session_issued` → 连接级映射铸造 | 合同+合成已验；未实机验证 |
 | `listen` start/stop/detect（mode auto/manual/realtime） | 设备→服务端 | 语音状态计数；**播放中 detect 仅计为打断候选，不栅栏** | 合同+合成已验；未实机验证 |
 | `abort`（reason: wake_word_detected/manual/vad_detected）——即 issue 所称 client_abort | 设备→服务端 | fence 先行打断：epoch 递增 → 端侧 `tts.stop(interrupted)` → 队列清空 | 合同+合成已验（56 场景）；实机打断 未实机验证 |
@@ -94,7 +95,7 @@ xiaozhi 设备/自建服务端 (v2.5.2 线协议)
 | `out_of_order_output` | 帧批被延迟/乱序应用 | 设备拒绝全部过期/停后帧批（stale_epoch/after_stop） |
 | `network_drop_reconnect` | 播放中断网后重连 | 断连期间 0 帧下发；受信会话与身份不变；重连后续播 |
 | `duplicate_connection` | 同设备第二条连接 | 租约拒绝 `device_connection_conflict`；原连接不受影响 |
-| `forged_identity` | 未绑定设备/伪造 session_id/换绑 | 全部枚举拒绝；儿童会话授权不可迁移 |
+| `forged_identity` | 未绑定设备/伪造 session_id/换绑/已绑定 deviceId 二连接冒用（缺失+错误凭证） | 全部枚举拒绝（含 `device_possession_denied`）；儿童会话授权不可迁移 |
 
 ## 5. 脱敏测试报告（本地实跑，2026-10-15）
 
@@ -112,8 +113,9 @@ node --experimental-strip-types --test-isolation=none --test \
 
 结果（合成数据；候选值，不是达成 SLA）：
 
-- 适配层 5 个套件 **39/39 PASS, 0 SKIP**；全仓回归 **818 tests：0 FAIL，5 SKIP**（SKIP 均为既有 `voice-bridge-ipc.spec.ts` 真 socket 用例，仅 POSIX CI 执行——与 R1-V2 交付时一致，非本 PR 引入）。
-- 故障注入：**56 场景**（7 家族 × 8 种子，虚拟时钟 + 固定 turn-id 工厂，逐字节可重放）：`staleFramesPlayed=0`（旧响应泄漏 0）、`staleFramesRefused=19`（设备侧拒绝过期帧批）、`abortsFenced=26`、`abortsWithoutPlayback=16`（连续抢话 no-op）、`forgedRefused=8`、`dupRefused=8`、`suspensions=8`、`deadlocks=0`（全部 turn 终态）。审计环联合 JSON 不含任何样例句文本（schema 断言）。
+- 适配层 5 个套件 **45/45 PASS, 0 SKIP**；全仓回归 **824 tests：0 FAIL，5 SKIP**（SKIP 均为既有 `voice-bridge-ipc.spec.ts` 真 socket 用例，仅 POSIX CI 执行——与 R1-V2 交付时一致，非本 PR 引入）。
+- 故障注入：**56 场景**（7 家族 × 8 种子，虚拟时钟 + 固定 turn-id 工厂，逐字节可重放）：`staleFramesPlayed=0`（旧响应泄漏 0）、`staleFramesRefused=19`（设备侧拒绝过期帧批）、`abortsFenced=26`、`abortsWithoutPlayback=16`（连续抢话 no-op，含 abort 命中已终态回合的 race 分支——不再计入拒绝）、`forgedRefused=8`、`possessionRefused=16`（每种子"已绑定 deviceId 二连接冒用"缺失+错误凭证两变体）、`dupRefused=8`、`suspensions=8`、`deadlocks=0`（全部 turn 终态）。审计环联合 JSON 不含任何样例句文本（schema 断言）。
+- 候选时延（`candidateLatency`）**真采集自 `stack.baselineMetrics()`**（全部场景逐场景取最大值；确定性虚拟时钟，非挂钟、非硬编码）：`cancelAckMaxMs=1ms`、`whenIdleMaxMs=1ms`、`firstSafeTextMaxMs=4ms`（候选基线，仅采集不达标）。
 - R1-V2 竞态回归未受影响：`scenarios=100 staleTtsDelivered=0 staleWritesAccepted=0 deltasFenced=25 toolDropped=178 cancelAckMaxMs=0ms whenIdleMaxMs=1ms firstSafeTextMaxMs=3ms workerRecoveryMaxMs=17ms`（候选基线，仅采集不达标）。
 - 固件/服务端兼容、私有 OTA、实机打断时延：**未实机验证**，无任何 PASS 声明。
 
@@ -141,6 +143,7 @@ node --experimental-strip-types --test-isolation=none --test \
 - [ ] 第三方 ASR/TTS/LLM 供应商安全与保留评估、告知同意流程（[VOICE_HARDWARE §3](./VOICE_HARDWARE.md)）。
 - [ ] 私有 OTA 激活/升级/回滚演练；断网-重连-重激活全链路。
 - [ ] 真实无线环境下断线重连、重复连接、session_id 轮换行为复核（对照 §5 合成结论）。
+- [ ] Adapter 组合层真实 IPC 传输冒烟（POSIX-only，沿用 `voice-bridge-ipc.spec.ts` 的 SKIP 模式）：当前 5 个适配层套件固定 `transport:"in_process"`，`ipc` 路径由 R1-V2 Bridge 套件间接覆盖，Adapter 组合层自身无 IPC 用例（评审登记项，非本 PR 阻塞）。
 
 ## 7. R5 验收基线（本 PR 之后的状态声明）
 

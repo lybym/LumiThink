@@ -56,8 +56,8 @@ export const GATEWAY_FIXTURE_FAMILIES = Object.freeze([
   },
   {
     name: "forged_identity",
-    fault: "unknown device, foreign session ids, changed device_id without activation",
-    expect: "all identity forgeries rejected enumerated (device_unbound / session_forged / session_not_mapped); the child session is never authorized",
+    fault: "unknown device, foreign session ids, changed device_id without activation, already-bound deviceId replayed without the possession proof",
+    expect: "all identity forgeries rejected enumerated (device_unbound / device_possession_denied / session_forged / session_not_mapped); the child session is never authorized",
   },
 ] as const);
 
@@ -94,6 +94,7 @@ export interface GatewayFixtureScenarioReport {
   readonly abortsFenced: number;
   readonly abortsWithoutPlayback: number;
   readonly forgedSessionsRefused: number;
+  readonly possessionRefused: number;
   readonly duplicateConnectionsRefused: number;
   readonly suspensions: number;
   readonly deadlocks: number;

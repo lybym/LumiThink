@@ -14,6 +14,7 @@ import test from "node:test";
 import { createGatewayDeviceBindingRegistry } from "../../../../lib/domain/voice/adapter/binding.ts";
 import { createVoiceGatewayAdapter, gatewayContentDigest, type GatewayCorePort } from "../../../../lib/domain/voice/adapter/gateway-adapter.ts";
 import type { GatewayDeviceDirective } from "../../../../lib/domain/voice/adapter/protocol.ts";
+import type { VoiceTurnState } from "../../../../lib/domain/voice/schema.ts";
 
 const DEVICE = "aabbccddeeff0011";
 const ACTOR = "act_owner0001";
@@ -34,6 +35,7 @@ interface FakeCoreOptions {
   readonly fenceResult?: { readonly ok: true } | { readonly ok: false; readonly code: string };
   readonly queue?: readonly { readonly itemId: string; readonly turnId: string; readonly epoch: number }[];
   readonly droppedStale?: number;
+  readonly describeTurnResult?: { readonly state: VoiceTurnState; readonly epoch: number } | null;
 }
 
 function createFakeCore(options: FakeCoreOptions = {}) {
@@ -58,7 +60,7 @@ function createFakeCore(options: FakeCoreOptions = {}) {
     },
     describeTurn: (sessionKey, turnId) => {
       calls.push({ op: "describeTurn", refs: { sessionKey, turnId } });
-      return { state: "RUNNING", epoch };
+      return options.describeTurnResult !== undefined ? options.describeTurnResult : { state: "RUNNING", epoch };
     },
     fenceAudioSend(refs) {
       calls.push({ op: "fenceAudioSend", refs });
@@ -112,8 +114,9 @@ async function createHarness(fakeOptions: FakeCoreOptions = {}): Promise<Harness
   const directives: GatewayDeviceDirective[] = [];
   let nowMs = 1_000;
   const adapter = buildAdapter(fake, () => nowMs, (directive) => directives.push(directive));
-  // Connect + issue session (the standard entry).
-  await adapter.handleDeviceEvent("conn1", { kind: "hello", deviceId: DEVICE, clientDigest: null, audioParams: null });
+  // Connect + issue session (the standard entry). The hello presents the
+  // device-held activation digest — the in-contract possession proof.
+  await adapter.handleDeviceEvent("conn1", { kind: "hello", deviceId: DEVICE, clientDigest: ACTIVATION, audioParams: null });
   await adapter.handleDeviceEvent("conn1", { kind: "session_issued", xiaozhiSessionId: SESSION });
   return {
     adapter,
@@ -205,6 +208,65 @@ test("client_abort during playback fences first, then stops playback and clears 
   assert.equal(h.adapter.metricsSnapshot().playbackStopsIssued, 1, "no duplicate stop");
 });
 
+test("hello without the binding's activation digest is a possession denial at the edge (P1)", async () => {
+  const fake = createFakeCore();
+  const directives: GatewayDeviceDirective[] = [];
+  let nowMs = 1_000;
+  const adapter = buildAdapter(fake, () => nowMs, (directive) => directives.push(directive));
+  // The MAC is public: a spoofed already-bound deviceId without the credential
+  // must be refused BEFORE any core call, lease or session mapping.
+  const missing = await adapter.handleDeviceEvent("conn_spoof1", { kind: "hello", deviceId: DEVICE, clientDigest: null, audioParams: null });
+  assert.ok(!missing.ok && missing.code === "device_possession_denied");
+  const wrong = await adapter.handleDeviceEvent("conn_spoof2", { kind: "hello", deviceId: DEVICE, clientDigest: "ffffffffffffffffffffffffffffffff", audioParams: null });
+  assert.ok(!wrong.ok && wrong.code === "device_possession_denied");
+  assert.equal(fake.calls.length, 0, "the core was never consulted for a possession failure");
+  assert.equal(adapter.metricsSnapshot().possessionRefused, 2);
+  assert.equal(adapter.mappingSnapshot().length, 0, "no mapping was minted for the spoofed device");
+  // The credential holder still connects normally.
+  const holder = await adapter.handleDeviceEvent("conn1", { kind: "hello", deviceId: DEVICE, clientDigest: ACTIVATION, audioParams: null });
+  assert.ok(holder.ok);
+});
+
+test("abort racing a settled turn issues the owed stop exactly once from the terminal state (P2)", async () => {
+  const h = await createHarness({
+    queue: [{ itemId: "tts_item000001", turnId: "trn_fake000000001", epoch: 1 }],
+    bargeInResult: { ok: false, code: "turn_terminal", fenced: false },
+    describeTurnResult: { state: "COMPLETED", epoch: 1 },
+  });
+  await h.adapter.pumpPlayback(SESSION_KEY);
+  const outcome = await h.adapter.handleDeviceEvent("conn1", { kind: "abort", xiaozhiSessionId: SESSION, reason: "manual" });
+  assert.ok(outcome.ok, "the race is an accepted no-bump abort, not a rejection");
+  const stops = h.directives.filter((d) => d.kind === "tts.stop");
+  assert.equal(stops.length, 1, "the owed device stop is resolved by the adapter, not by tap ordering");
+  if (stops[0].kind === "tts.stop") {
+    assert.equal(stops[0].turnId, "trn_fake000000001");
+    assert.equal(stops[0].reason, "completed", "the stop reason maps the turn's actual terminal state");
+  }
+  assert.equal(h.adapter.metricsSnapshot().abortsWithoutPlayback, 1);
+  assert.equal(h.adapter.metricsSnapshot().eventsRejected, 0);
+  // A settled tap arriving later (in flight during the race) is a no-op.
+  h.adapter.noteTurnSettled(SESSION_KEY, "trn_fake000000001", "COMPLETED");
+  assert.equal(h.directives.filter((d) => d.kind === "tts.stop").length, 1, "exactly-once stop still holds");
+});
+
+test("abort racing a fence-unknown non-terminal turn keeps playback for the settled tap", async () => {
+  const h = await createHarness({
+    queue: [{ itemId: "tts_item000001", turnId: "trn_fake000000001", epoch: 1 }],
+    bargeInResult: { ok: false, code: "cancel_unknown_turn", fenced: false },
+  });
+  await h.adapter.pumpPlayback(SESSION_KEY);
+  const outcome = await h.adapter.handleDeviceEvent("conn1", { kind: "abort", xiaozhiSessionId: SESSION, reason: "manual" });
+  assert.ok(outcome.ok);
+  assert.equal(h.directives.filter((d) => d.kind === "tts.stop").length, 0, "no stop is guessed for a non-terminal turn");
+  // The in-flight settled tap delivers the owed stop exactly once.
+  h.adapter.noteTurnSettled(SESSION_KEY, "trn_fake000000001", "CANCELLED");
+  const stops = h.directives.filter((d) => d.kind === "tts.stop");
+  assert.equal(stops.length, 1);
+  if (stops[0].kind === "tts.stop") {
+    assert.equal(stops[0].reason, "interrupted");
+  }
+});
+
 test("every outbound frame batch is re-fenced; stale batches never leave", async () => {
   const h = await createHarness({
     queue: [
@@ -291,9 +353,9 @@ test("forged session ids and closed connections are rejected before any core cal
 
 test("reconnect keeps the SAME trusted session and identity, with a fresh session handle", async () => {
   const h = await createHarness();
-  // Disconnect, then reconnect on a new connection id.
+  // Disconnect, then reconnect on a new connection id (with the possession proof).
   await h.adapter.handleDeviceEvent("conn1", { kind: "connection_dropped", reason: "network" });
-  await h.adapter.handleDeviceEvent("conn2", { kind: "hello", deviceId: DEVICE, clientDigest: null, audioParams: null });
+  await h.adapter.handleDeviceEvent("conn2", { kind: "hello", deviceId: DEVICE, clientDigest: ACTIVATION, audioParams: null });
   await h.adapter.handleDeviceEvent("conn2", { kind: "session_issued", xiaozhiSessionId: "sessmock-000002-0002" });
   const mappings = h.adapter.mappingSnapshot();
   assert.equal(mappings.length, 1);
@@ -324,7 +386,7 @@ test("server restart suspends playback and invalidates mappings without killing 
   assert.equal(mapping.xiaozhiSessionId, null);
   assert.equal(mapping.sessionKey, SESSION_KEY, "the trusted session survives the server restart");
   // The old session id can no longer authorize anything.
-  await h.adapter.handleDeviceEvent("conn2", { kind: "hello", deviceId: DEVICE, clientDigest: null, audioParams: null });
+  await h.adapter.handleDeviceEvent("conn2", { kind: "hello", deviceId: DEVICE, clientDigest: ACTIVATION, audioParams: null });
   const stale = await h.adapter.handleDeviceEvent("conn2", {
     kind: "asr_final",
     xiaozhiSessionId: SESSION,

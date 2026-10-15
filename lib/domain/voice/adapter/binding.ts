@@ -9,6 +9,11 @@
  *   not bound, or presents a different activation digest, can never obtain
  *   the child session (issue #30 验收: 变更 device_id/冒用 session_id 无法
  *   获得儿童会话授权).
+ * - POSSESSION AT CONNECTION TIME: opening a lease requires the hello to
+ *   present the device-held activation digest, compared against the binding
+ *   record. A spoofed (already-bound) deviceId — the MAC is public — without
+ *   the credential is refused `device_possession_denied` BEFORE any lease,
+ *   mapping or child session can exist.
  * - Each device holds at most ONE open connection lease. A second concurrent
  *   connection for the same device is refused (`device_connection_conflict`)
  *   — duplicate device connections cannot fork the session.
@@ -71,8 +76,10 @@ export interface GatewaySessionMapping {
 
 export type GatewayBindingCode =
   | "device_unbound"
+  | "device_possession_denied"
   | "device_connection_conflict"
   | "device_rebinding_denied"
+  | "binding_capacity_exceeded"
   | "connection_unknown"
   | "connection_closed"
   | "session_not_mapped"
@@ -137,8 +144,16 @@ export interface GatewayDeviceBindingRegistry {
     readonly conversationId: unknown;
     readonly activationDigest: unknown;
   }): GatewayBindingResult<{ readonly created: boolean }>;
-  /** Open one connection lease for a bound device (one lease per device). */
-  openConnection(refs: { readonly connectionId: unknown; readonly deviceId: unknown }): GatewayBindingResult<{ readonly leased: true }>;
+  /**
+   * Open one connection lease for a bound device (one lease per device).
+   * The hello MUST present the device-held `activationDigest` (possession
+   * proof); missing or mismatched → `device_possession_denied`.
+   */
+  openConnection(refs: {
+    readonly connectionId: unknown;
+    readonly deviceId: unknown;
+    readonly activationDigest: unknown;
+  }): GatewayBindingResult<{ readonly leased: true }>;
   /** Record the connection-scoped session mapping (called on session_issued). */
   issueSession(refs: {
     readonly connectionId: unknown;
@@ -247,7 +262,7 @@ export function createGatewayDeviceBindingRegistry(
         return { ok: true, value: { created: false } };
       }
       if (bindings.size >= maxBindings) {
-        return { ok: false, code: "binding.parse_failed" };
+        return { ok: false, code: "binding_capacity_exceeded" };
       }
       const binding = ingestDomainFact({
         deviceId: parsed.deviceId,
@@ -264,11 +279,22 @@ export function createGatewayDeviceBindingRegistry(
     openConnection(refs) {
       const connectionId = parseConnectionId(refs, "openConnection");
       const record = refs as Record<string, unknown>;
-      rejectUnknownBindingFields(record, ["connectionId", "deviceId"], "openConnection");
+      rejectUnknownBindingFields(record, ["connectionId", "deviceId", "activationDigest"], "openConnection");
       const deviceId = requireStringField(record, "deviceId", XIAOZHI_DEVICE_ID_PATTERN, "openConnection");
       const binding = bindings.get(deviceId);
       if (!binding) {
         return { ok: false, code: "device_unbound" };
+      }
+      // Possession proof at connection time (issue #30 验收 1): the MAC is
+      // public, so the lease only opens for the credential holder. A missing
+      // or malformed credential is an authorization failure (enumerated,
+      // fail-closed) — NOT a parse error.
+      const presented = record.activationDigest;
+      if (typeof presented !== "string" || !GATEWAY_ACTIVATION_DIGEST_PATTERN.test(presented)) {
+        return { ok: false, code: "device_possession_denied" };
+      }
+      if (presented !== binding.activationDigest) {
+        return { ok: false, code: "device_possession_denied" };
       }
       const existingLease = openByDevice.get(deviceId);
       if (existingLease !== undefined && connections.get(existingLease)?.closed === false) {
@@ -279,7 +305,7 @@ export function createGatewayDeviceBindingRegistry(
         return { ok: false, code: "device_connection_conflict" };
       }
       if (connections.size >= maxConnections) {
-        return { ok: false, code: "binding.parse_failed" };
+        return { ok: false, code: "binding_capacity_exceeded" };
       }
       const lease = ingestDomainFact({
         connectionId,

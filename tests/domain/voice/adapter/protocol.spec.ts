@@ -160,7 +160,15 @@ test("transport fault events parse and reject unknown kinds and fields", () => {
 
 test("gateway rejection codes are a frozen superset of the trusted-core codes", () => {
   assert.ok(Object.isFrozen(GATEWAY_REJECTION_CODES));
-  for (const code of ["device_unbound", "device_connection_conflict", "session_forged", "no_active_playback", "gateway.parse_failed"]) {
+  for (const code of [
+    "device_unbound",
+    "device_possession_denied",
+    "device_connection_conflict",
+    "binding_capacity_exceeded",
+    "session_forged",
+    "no_active_playback",
+    "gateway.parse_failed",
+  ]) {
     assert.ok((GATEWAY_REJECTION_CODES as readonly string[]).includes(code), `missing ${code}`);
   }
 });

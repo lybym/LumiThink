@@ -8,8 +8,11 @@
  *
  * - 设备可信绑定: every event is authorized through the binding registry
  *   (connection lease + connection-scoped xiaozhi session). Unknown devices,
- *   duplicate connections, forged session ids and cross-session refs are
- *   rejected enumerated BEFORE any core call.
+ *   bound-deviceId possession spoofing, duplicate connections, forged session
+ *   ids and cross-session refs are rejected enumerated BEFORE any core call.
+ *   The hello MUST present the binding's activation digest (possession
+ *   proof) — transport-layer authentication is layered ON TOP of this
+ *   in-contract check, never a silent precondition of it.
  * - ASR final/partial: the transient transcript is reduced to a content-free
  *   hex digest and immediately discarded; only the digest becomes the
  *   prompt fingerprint (VOICE_RUNTIME §5 — content never crosses this
@@ -43,7 +46,7 @@
  */
 
 import { ingestDomainFact } from "../../legacy-guard.ts";
-import type { VoiceTurnState } from "../schema.ts";
+import { VOICE_TERMINAL_TURN_STATES, type VoiceTurnState } from "../schema.ts";
 import type {
   GatewayDeviceBindingRegistry,
   GatewayBindingCode,
@@ -118,6 +121,7 @@ export interface GatewayMetricsSnapshot {
   readonly playbackStopsIssued: number;
   readonly queueClears: number;
   readonly duplicateConnectionsRefused: number;
+  readonly possessionRefused: number;
   readonly forgedSessionsRefused: number;
   readonly suspensions: number;
 }
@@ -171,6 +175,10 @@ export const GATEWAY_SWEEP_BUDGET_MS_DEFAULT = 30_000;
 
 /** Max audit ring entries. */
 export const GATEWAY_MAX_AUDIT_ENTRIES = 512;
+
+/** Max exactly-once stop memories kept per device (bounded per-device state;
+ * oldest entries are reclaimed first — see issuePlaybackStop). */
+export const GATEWAY_MAX_STOPS_TRACKED = 64;
 
 export interface VoiceGatewayAdapterOptions {
   readonly core: GatewayCorePort;
@@ -274,6 +282,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
     playbackStopsIssued: 0,
     queueClears: 0,
     duplicateConnectionsRefused: 0,
+    possessionRefused: 0,
     forgedSessionsRefused: 0,
     suspensions: 0,
   };
@@ -319,6 +328,17 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
     }
     if (turnId !== null) {
       state.stopsIssued.add(turnId);
+      // Ring-bound the exactly-once memory: the guard is only consultable
+      // while a racing handler for that turn can still be suspended between
+      // observation and resume (one event-loop await — never dozens of later
+      // playback turns). Insertion order = issue order, so the OLDEST memory
+      // is the safest to reclaim; the just-added turn is never evicted.
+      if (state.stopsIssued.size > GATEWAY_MAX_STOPS_TRACKED) {
+        const oldest = state.stopsIssued.values().next();
+        if (oldest.done !== true) {
+          state.stopsIssued.delete(oldest.value);
+        }
+      }
     }
     metrics.playbackStopsIssued += 1;
     pushAudit({
@@ -371,13 +391,20 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
         return reject("gateway.parse_failed", null);
       }
 
-      // ---- hello: device trusted binding + connection lease ----
+      // ---- hello: device possession + trusted binding + connection lease ----
       if (event.kind === "hello") {
         const deviceId = event.deviceId;
-        const lease = binding.openConnection({ connectionId, deviceId });
+        const lease = binding.openConnection({
+          connectionId,
+          deviceId,
+          activationDigest: event.clientDigest,
+        });
         if (!lease.ok) {
           if (lease.code === "device_connection_conflict") {
             metrics.duplicateConnectionsRefused += 1;
+          }
+          if (lease.code === "device_possession_denied") {
+            metrics.possessionRefused += 1;
           }
           return reject(lease.code as GatewayRejectionCode, null);
         }
@@ -599,11 +626,34 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
             reason: "device_abort",
           });
           if (!fenced.ok) {
-            if (fenced.code === "cancel_unknown_turn" || fenced.code === "stale_turn_rejected") {
-              // The turn stopped between observation and abort: the fence
-              // already covers it — treat as no-playback abort.
+            if (fenced.code === "cancel_unknown_turn" || fenced.code === "stale_turn_rejected" || fenced.code === "turn_terminal") {
+              // The turn stopped (or is no longer fenceable) between
+              // observation and abort: the trusted epoch already covers it —
+              // no second bump, no drain. The device stop is still owed
+              // EXACTLY once: while this connection still tracks the turn,
+              // resolve the stop HERE from the turn's actual terminal state,
+              // so delivery no longer depends on settled-tap ordering (an
+              // in-flight tap becomes a no-op via the exactly-once guard).
+              // A fence-unknown turn that is NOT terminal in the trusted
+              // store keeps its playback binding for the settled tap.
+              pushAudit({
+                action: "gateway.abort_no_playback",
+                sessionKey: state.sessionKey,
+                turnId: playback.turnId,
+                epoch: core.currentEpoch(state.sessionKey),
+                detail: fenced.code,
+                count: null,
+              });
+              if (state.playback !== null && state.playback.turnId === playback.turnId) {
+                const described = core.describeTurn(state.sessionKey, playback.turnId);
+                if (described !== null && (VOICE_TERMINAL_TURN_STATES as readonly string[]).includes(described.state)) {
+                  const reason: GatewayPlaybackStopReason =
+                    described.state === "COMPLETED" ? "completed" : described.state === "CANCELLED" ? "interrupted" : "failed";
+                  issuePlaybackStop(state, playback.turnId, reason, playback.epoch);
+                  state.playback = null;
+                }
+              }
               metrics.abortsWithoutPlayback += 1;
-              state.playback = null;
               metrics.eventsAccepted += 1;
               return { ok: true, kind: event.kind, sessionKey: state.sessionKey };
             }
