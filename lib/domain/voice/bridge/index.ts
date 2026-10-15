@@ -98,7 +98,6 @@ export {
 
 export {
   // The Bridge service (exclusive AgentHandle owner).
-  BRIDGE_CANCEL_TIMEOUT_MS,
   createVoiceBridge,
   VOICE_BRIDGE_VERSION,
   type BridgeAuditEntry,

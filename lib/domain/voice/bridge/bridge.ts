@@ -63,8 +63,15 @@ import type { BridgeCordisProfile } from "./profile.ts";
 
 export const VOICE_BRIDGE_VERSION = "1.0" as const;
 
-/** whenIdle sanity budget: a resolved whenIdle must leave a stopped agent. */
-export const BRIDGE_CANCEL_TIMEOUT_MS = 2_000;
+/**
+ * Stop-verification design note: `turnCancel` awaits `whenIdle()` and then
+ * RE-VERIFIES the handle actually stopped (`isRunning() === false`). A
+ * resolved whenIdle with a still-running agent is pathological and
+ * quarantines the worker (`cancel_timeout`). A wall-clock deadline for a
+ * never-resolving whenIdle belongs to the deployment wiring (real timers
+ * are not used inside the dependency-free domain layer); the trusted
+ * Orchestrator's timeout sweep bounds the turn state machine meanwhile.
+ */
 
 export interface BridgeMetricsSnapshot {
   readonly cancelAck: { readonly count: number; readonly maxMs: number };
