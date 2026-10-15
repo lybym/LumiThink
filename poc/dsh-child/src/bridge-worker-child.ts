@@ -26,14 +26,68 @@
  *    timeout is exercised against a genuinely unresponsive worker.
  */
 import { createInterface } from 'node:readline'
+import { randomUUID } from 'node:crypto'
 import { runProfile } from '@deepseek-ai/dsh/profile-boot'
-import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-// Type-only imports that pull the Cordis Context/Events augmentations
-// (`ctx.agents`, `agent/assistant-stream`, `agent/status`, `session/event`)
-// into this file's program.
+// Type-only imports: they carry the Cordis Context/Events augmentations and
+// the branded id types into this file's program and are ERASED at runtime —
+// the worker keeps the root PoC dependency surface unchanged (zero new
+// runtime dependencies; the E2E-02 gate relies on that).
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
+import type { MessageId, UserMessage } from '@deepseek-ai/dsh-llm'
+import type { SessionId } from '@deepseek-ai/dsh-session'
+
+// ---------------------------------------------------------------------------
+// Local micro-seams (structural stand-ins for two upstream helpers the worker
+// needs at runtime; kept dependency-free by construction):
+// ---------------------------------------------------------------------------
+
+/** The pinned upstream LaunchEnvironmentSnapshot, built from child-env layers. */
+type LaunchLayer = {
+  readonly source: 'process' | 'project-env' | 'user-env'
+  readonly path?: string
+  readonly values: Readonly<Record<string, string>>
+}
+
+function launchEnvironmentFromLayers(layers: readonly LaunchLayer[]): LaunchEnvironmentSnapshot {
+  const trustOrder = ['process', 'project-env', 'user-env'] as const
+  const bySource = new Map<string, LaunchLayer>(layers.map((layer) => [layer.source, layer]))
+  const find = (name: string, sources: readonly string[]): { value: string; source: string; path?: string } | undefined => {
+    for (const source of trustOrder) {
+      if (!sources.includes(source)) continue
+      const layer = bySource.get(source)
+      const value = layer?.values[name]
+      if (layer !== undefined && value !== undefined) {
+        return { value, source, ...(layer.path !== undefined ? { path: layer.path } : {}) }
+      }
+    }
+    return undefined
+  }
+  return {
+    get: (name) => find(name, trustOrder),
+    getFrom: (name, sources) => find(name, sources),
+  } as LaunchEnvironmentSnapshot
+}
+
+/**
+ * Build the synthetic user message exactly like the upstream
+ * `createUserMessage` (fresh UUID identity, frozen) without importing the
+ * runtime helper — one content block, `kind: 'user'` source.
+ */
+function syntheticUserMessage(text: string): UserMessage {
+  const message = structuredClone({
+    id: randomUUID(),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  })
+  return Object.freeze(message) as unknown as UserMessage
+}
+
+/** The Bridge contract's sessionKey doubles as the durable session identity. */
+function asSessionId(value: string): SessionId {
+  return value as unknown as SessionId
+}
 
 /** One channel-mapped transient stream frame (upstream attempt id verbatim). */
 export type WorkerStreamFrame =
@@ -99,7 +153,7 @@ function stepIdOf(turn: number, step: number): string {
 async function main(): Promise<void> {
   // The launch snapshot is the scrubbed child environment the parent built —
   // one process layer, no project/user env files are ever read.
-  const environment = createLaunchEnvironmentSnapshot([
+  const environment = launchEnvironmentFromLayers([
     {
       source: 'process',
       values: Object.fromEntries(
@@ -123,11 +177,6 @@ async function main(): Promise<void> {
   let streamingAttemptId: string | null = null
   let streamingStepId: string | null = null
   let disposed = false
-
-  /** The Bridge contract's sessionKey doubles as the durable session identity. */
-  function asSessionId(value: string): ReturnType<typeof SessionId> {
-    return SessionId(value)
-  }
 
   /**
    * Agent-scoped diagnostics: agent-scoped listeners run BEFORE the root
@@ -316,10 +365,7 @@ async function main(): Promise<void> {
           }
           // The authorized transient transcript enters the real Agent Loop as
           // one synthetic user message. It is never logged by this module.
-          const message = createUserMessage({
-            content: [{ type: 'text', text: request.text }],
-            source: { kind: 'user' },
-          })
+          const message = syntheticUserMessage(request.text)
           handle.agent.followup(message)
           reply(request.id, true)
           return

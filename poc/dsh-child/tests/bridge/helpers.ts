@@ -11,6 +11,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { createServer as createNetServer } from 'node:net'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, closeSync, openSync, readFileSync, rmSync } from 'node:fs'
@@ -168,14 +169,45 @@ export async function waitForTerminalTurn(
   return observed
 }
 
-/** Submit one synthetic prompt and wait for its COMPLETED settlement. */
+/**
+ * Submit one synthetic prompt (contract keys derived) without waiting for the
+ * terminal state — used by the mid-stream injection scenarios.
+ */
+export async function submitSynthetic(
+  stack: VoiceBridgeStack,
+  sessionKey: string,
+  text: string,
+): Promise<{ readonly ok: true; readonly turnId: string } | { readonly ok: false; readonly code: string }> {
+  const digest = createHash('sha256').update(text, 'utf8').digest('hex')
+  const submitted = await stack.submitPrompt({
+    sessionKey,
+    idempotencyKey: `idem-e2e02-${digest.slice(0, 12)}`,
+    fingerprint: digest,
+    transientText: text,
+  })
+  return submitted.ok ? { ok: true, turnId: submitted.turnId } : { ok: false, code: submitted.code }
+}
+
+/**
+ * Submit one synthetic prompt and wait for its COMPLETED settlement.
+ *
+ * The IPC contract (v2, issue #51) requires the bounded idempotency key and
+ * the content-free hex fingerprint on every `turn.prompt`; this helper derives
+ * both deterministically from the synthetic text.
+ */
 export async function submitAndAwaitCompletion(
   stack: VoiceBridgeStack,
   sessionKey: string,
   text: string,
   timeoutMs = 30_000,
 ): Promise<string> {
-  const submitted = await stack.submitPrompt({ sessionKey, transientText: text })
+  const digest = createHash('sha256').update(text, 'utf8').digest('hex')
+  const submitted = await stack.submitPrompt({
+    sessionKey,
+    idempotencyKey: `idem-e2e02-${digest.slice(0, 12)}`,
+    fingerprint: digest,
+    transientText: text,
+  })
   assert.equal(submitted.ok, true, `submitPrompt refused: ${JSON.stringify(submitted)}`)
   if (!submitted.ok) throw new Error('unreachable')
   const state = await waitForTerminalTurn(stack, sessionKey, submitted.turnId, timeoutMs)

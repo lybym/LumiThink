@@ -24,6 +24,7 @@ import {
   canOpenLocalSocket,
   startBridgeFixture,
   submitAndAwaitCompletion,
+  submitSynthetic,
   waitFor,
   waitForTerminalTurn,
   type BridgeFixture,
@@ -61,15 +62,10 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
 
     for (const round of [1, 2, 3]) {
       const admissionsBefore = stack.gate.metricsSnapshot().ttsAdmissions
-      const turnId = await (async () => {
-        const submitted = await stack.submitPrompt({
-          sessionKey,
-          transientText: `E2E02-PROMPT-R${round} 合成转写。`,
-        })
-        assert.equal(submitted.ok, true, `round ${round} submit refused: ${JSON.stringify(submitted)}`)
-        if (!submitted.ok) throw new Error('unreachable')
-        return submitted.turnId
-      })()
+      const submitted = await submitSynthetic(stack, sessionKey, `E2E02-PROMPT-R${round} 合成转写。`)
+      assert.equal(submitted.ok, true, `round ${round} submit refused: ${JSON.stringify(submitted)}`)
+      if (!submitted.ok) throw new Error('unreachable')
+      const turnId = submitted.turnId
       // LIVE-delta proof: a sentence is admitted to TTS while the turn is
       // still RUNNING — the deltas came from the open real stream, not from
       // splitting a settled final message.
@@ -144,7 +140,7 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
       ownerActorId: 'act_e2e02parent01',
     })
     assert.equal(opened.ok, true)
-    const submitted = await stack.submitPrompt({ sessionKey, transientText: 'E2E02-CANCEL 合成转写，请开始播报。' })
+    const submitted = await submitSynthetic(stack, sessionKey, 'E2E02-CANCEL 合成转写，请开始播报。')
     assert.equal(submitted.ok, true)
     const turnId = submitted.ok ? submitted.turnId : ''
     await waitFor('the first safe-text admission of the streaming turn', () => stack.gate.metricsSnapshot().ttsAdmissions > 0)
@@ -271,7 +267,7 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
       ownerActorId: 'act_e2e02parent01',
     })
     assert.equal(opened.ok, true)
-    const submitted = await stack.submitPrompt({ sessionKey, transientText: 'E2E02-CRASH 合成转写。' })
+    const submitted = await submitSynthetic(stack, sessionKey, 'E2E02-CRASH 合成转写。')
     assert.equal(submitted.ok, true)
     const turnId = submitted.ok ? submitted.turnId : ''
     await waitFor('the worker to start streaming', () => stack.gate.metricsSnapshot().ttsAdmissions > 0)
@@ -285,7 +281,7 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
     assert.ok(crashed !== undefined, 'the bridge must emit the worker_crashed runtime error')
     await waitFor('the worker process to be reaped', () => !port.hasLiveWorker(sessionKey))
 
-    const refused = await stack.submitPrompt({ sessionKey, transientText: 'E2E02-CRASH-REFUSED 合成转写。' })
+    const refused = await submitSynthetic(stack, sessionKey, 'E2E02-CRASH-REFUSED 合成转写。')
     assert.equal(refused.ok, false, 'a quarantined session must refuse new prompts')
     if (!refused.ok) {
       assert.equal(refused.code, 'worker_recovering')
@@ -324,7 +320,7 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
       ownerActorId: 'act_e2e02parent01',
     })
     assert.equal(opened.ok, true)
-    const submitted = await stack.submitPrompt({ sessionKey, transientText: 'E2E02-HANG 合成转写。' })
+    const submitted = await submitSynthetic(stack, sessionKey, 'E2E02-HANG 合成转写。')
     assert.equal(submitted.ok, true)
     const turnId = submitted.ok ? submitted.turnId : ''
     await waitFor('the first safe-text admission', () => stack.gate.metricsSnapshot().ttsAdmissions > 0)

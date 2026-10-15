@@ -128,8 +128,17 @@ describe('E2E-02 bridge profile security and negative permissions', { skip: pipe
       }
       const llmRow = dump.find((entry) => entry.name === '@deepseek-ai/dsh-llm-deepseek-api-key')
       assert.ok(llmRow !== undefined, 'the llm adapter row is required')
-      const baseURL = String((llmRow?.config as { baseURL?: unknown } | undefined)?.baseURL ?? '')
-      assert.deepEqual(inspectModelBaseUrl(baseURL, 'bridge profile llm baseURL'), [])
+      // The dump renders `!!js` config expressions VERBATIM (documented in
+      // src/dump-config.ts). Resolve the pinned expression exactly as the
+      // runtime would — the ONLY permitted shape references
+      // DSH_POC_MOCK_BASE_URL with a loopback discard fallback — then inspect
+      // the resulting URL. A plain URL row resolves to itself.
+      const rawBaseURL = String((llmRow?.config as { baseURL?: unknown } | undefined)?.baseURL ?? '')
+      const expressionPattern =
+        /^process\.env\.DSH_POC_MOCK_BASE_URL \?\? '(https?:\/\/[^']+)'$/
+      const match = expressionPattern.exec(rawBaseURL)
+      const resolved = match !== null ? (process.env.DSH_POC_MOCK_BASE_URL ?? match[1]) : rawBaseURL
+      assert.deepEqual(inspectModelBaseUrl(resolved, 'bridge profile llm baseURL'), [])
 
       // The Lumi-side domain contract must stay intact and consistent with
       // the profile identity the bridge worker boots.
