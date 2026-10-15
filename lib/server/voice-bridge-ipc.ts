@@ -144,6 +144,25 @@ export class BridgeFrameDecoder {
 // Command dispatch (shared by the socket server and the in-process transport)
 // ---------------------------------------------------------------------------
 
+/**
+ * Wire the service's unsolicited event stream to a send target. BOTH
+ * transports share this single wiring so events can never be dropped by a
+ * transport forgetting to subscribe: the socket server forwards to the
+ * CURRENT leased connection (none while no client holds the lease —
+ * unsolicited events have no subscriber then), and the in-process
+ * transport queues them to its client listeners.
+ */
+export function wireBridgeEventForwarding(service: VoiceBridgeService, send: (frame: BridgeFrame) => void): void {
+  service.onEvent((event) => {
+    try {
+      send(event);
+    } catch {
+      // A failed send must never break the emitting service; the
+      // connection-level failure handling owns the recovery.
+    }
+  });
+}
+
 /** Dispatch one validated command frame to the service (in-order caller). */
 export async function dispatchBridgeCommand(service: VoiceBridgeService, frame: BridgeCommandFrame): Promise<BridgeFrame> {
   function rejection(code: BridgeReplyRejectionFrame["code"]): BridgeReplyRejectionFrame {
@@ -253,6 +272,14 @@ export function createVoiceBridgeIpcServer(options: VoiceBridgeIpcServerOptions)
   let leasedSocket: Socket | null = null;
   let started = false;
   let udsPath: string | null = null;
+
+  // Forward service events to the leased client (single shared wiring).
+  wireBridgeEventForwarding(service, (event) => {
+    const leased = leasedSocket;
+    if (leased !== null && !leased.destroyed) {
+      leased.write(encodeBridgeFrame(event));
+    }
+  });
 
   interface ConnectionState {
     socket: Socket;
@@ -512,19 +539,21 @@ export function createVoiceBridgeIpcClient(options: VoiceBridgeIpcClientOptions)
     }
     for (const { frame } of frames) {
       const captured = frame;
-      processQueue = processQueue.then(() => {
-        if (captured.kind === "reply") {
-          const resolver = pending.get(captured.seq);
-          if (resolver !== undefined) {
-            pending.delete(captured.seq);
-            resolver(captured.ok ? { ok: true, payload: captured.payload } : { ok: false, code: captured.code });
+      processQueue = processQueue
+        .then(() => {
+          if (captured.kind === "reply") {
+            const resolver = pending.get(captured.seq);
+            if (resolver !== undefined) {
+              pending.delete(captured.seq);
+              resolver(captured.ok ? { ok: true, payload: captured.payload } : { ok: false, code: captured.code });
+            }
+            return;
           }
-          return;
-        }
-        for (const listener of [...eventListeners]) {
-          listener(captured);
-        }
-      });
+          for (const listener of [...eventListeners]) {
+            listener(captured);
+          }
+        })
+        .catch(() => undefined);
     }
   }
 

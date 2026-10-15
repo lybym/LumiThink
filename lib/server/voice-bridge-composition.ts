@@ -47,6 +47,7 @@ import {
   createVoiceBridgeIpcServer,
   dispatchBridgeCommand,
   resolveBridgeIpcEndpoint,
+  wireBridgeEventForwarding,
   type BridgeIpcEndpoint,
   type VoiceBridgeIpcClient,
   type VoiceBridgeIpcServer,
@@ -167,16 +168,18 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
     let connected = false;
     let nextSeq = 1;
     let processQueue: Promise<void> = Promise.resolve();
-    service.onEvent((event) => {
-      // Event fidelity: round-trip through the real parser, deliver in order.
+    // Same shared event wiring as the socket server (single source).
+    wireBridgeEventForwarding(service, (event) => {
       const raw = JSON.stringify(event);
       try {
         const parsed = parseBridgeFrame(raw);
-        processQueue = processQueue.then(() => {
-          for (const listener of [...eventListeners]) {
-            listener(parsed);
-          }
-        });
+        processQueue = processQueue
+          .then(() => {
+            for (const listener of [...eventListeners]) {
+              listener(parsed);
+            }
+          })
+          .catch(() => undefined);
       } catch {
         // An unserviceable event frame must never leak past the boundary.
       }
