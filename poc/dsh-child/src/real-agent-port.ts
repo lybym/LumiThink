@@ -161,7 +161,7 @@ export interface WorkerFaultInfo {
   readonly sessionKey: string
   readonly code: 'worker_crashed'
   /** Bounded structured reason; never carries prompt or model text. */
-  readonly detail: 'process_exit' | 'boot_timeout' | 'protocol_violation' | 'control_timeout'
+  readonly detail: 'process_exit' | 'boot_timeout' | 'protocol_violation' | 'control_timeout' | 'request_failed'
   readonly exitCode: number | null
   /** Bounded control-error message when the fault came from a failed reply. */
   readonly message?: string
@@ -586,9 +586,9 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
             fireFault({
               sessionKey: handleState.sessionKey,
               code: 'worker_crashed',
-              detail: 'control_timeout',
+              detail: 'request_failed',
               exitCode: state.exitCode,
-              ...(reply.message !== undefined ? { message: reply.message.slice(0, 200) } : {}),
+              ...(reply.code !== undefined ? { message: reply.code.slice(0, 200) } : {}),
             })
           }
         })
@@ -698,6 +698,21 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       }
       const state = spawnWorker(sessionKey, options.dshHome, options.mockBaseUrl)
       workers.set(sessionKey, state)
+      // Register the agent inside the child BEFORE any followup can arrive:
+      // the worker processes control requests strictly in order, so a
+      // runPrompt issued right after this call still handles after `create`.
+      void request(state, 'create', { sessionId: sessionKey }).then((reply) => {
+        if (!reply.ok && !state.handle.state.crashed && !state.handle.state.disposed) {
+          state.handle.state.crashed = true
+          fireFault({
+            sessionKey,
+            code: 'worker_crashed',
+            detail: 'request_failed',
+            exitCode: state.exitCode,
+            ...(reply.code !== undefined ? { message: reply.code.slice(0, 200) } : {}),
+          })
+        }
+      })
       return { ok: true, handle: state.handle }
     },
     resumeAgent(sessionKey) {
