@@ -77,7 +77,18 @@ interface MockHandleState {
   cancelCallCount: number;
   whenIdleCount: number;
   attemptCounter: number;
+  /**
+   * Bounded record of the prompts this Fake Agent actually received
+   * (issue #51 DoD: 合成转写原文逐字到达受信 Fake Agent). This is the
+   * approved model-request stand-in — the one place the transcript may
+   * live after handoff; tests assert verbatim arrival here and ZERO
+   * occurrences everywhere else. Destroyed with the handle (dispose).
+   */
+  receivedPrompts: { readonly turnId: string; readonly promptText: string | null }[];
 }
+
+/** Max received-prompt records kept per handle (bounded; oldest dropped). */
+export const MOCK_MAX_RECEIVED_PROMPTS = 16;
 
 function createHandleState(sessionKey: string): MockHandleState {
   return {
@@ -93,6 +104,7 @@ function createHandleState(sessionKey: string): MockHandleState {
     cancelCallCount: 0,
     whenIdleCount: 0,
     attemptCounter: 0,
+    receivedPrompts: [],
   };
 }
 
@@ -125,6 +137,11 @@ function createMockHandle(
       const stepId = `step_${attemptId.slice(4)}`;
       state.attemptId = attemptId;
       state.turnId = input.turnId;
+      // Record what the model request actually received (verbatim or none).
+      state.receivedPrompts.push({ turnId: input.turnId, promptText: input.promptText ?? null });
+      if (state.receivedPrompts.length > MOCK_MAX_RECEIVED_PROMPTS) {
+        state.receivedPrompts.shift();
+      }
       state.pending = [
         { kind: "start", attemptId, stepId },
         ...scriptFor(state.sessionKey, input.turnId).map((fragment, index) => ({
@@ -180,6 +197,7 @@ function createMockHandle(
       state.turnId = null;
       state.streamListeners = [];
       state.durableListeners = [];
+      state.receivedPrompts = [];
       return { ok: true };
     },
     onStream(listener) {
@@ -215,6 +233,11 @@ export interface MockCordisRuntime extends BridgeAgentPort {
   cancelCallCount(sessionKey: string): number;
   /** whenIdle-call count for one session. */
   whenIdleCount(sessionKey: string): number;
+  /**
+   * The prompts the Fake Agent received for one session, oldest first
+   * (issue #51 verbatim-arrival observation; empty after dispose).
+   */
+  receivedPromptsSnapshot(sessionKey: string): readonly { readonly turnId: string; readonly promptText: string | null }[];
   /** Whether a live (non-disposed) handle exists for the session. */
   hasLiveHandle(sessionKey: string): boolean;
   /** Number of live handles across all sessions (ownership evidence). */
@@ -334,6 +357,9 @@ export function createMockCordisRuntime(options: MockCordisRuntimeOptions): Mock
     },
     whenIdleCount(sessionKey) {
       return sessions.get(sessionKey)?.whenIdleCount ?? 0;
+    },
+    receivedPromptsSnapshot(sessionKey) {
+      return Object.freeze([...(sessions.get(sessionKey)?.receivedPrompts ?? [])]);
     },
     hasLiveHandle(sessionKey) {
       const state = sessions.get(sessionKey);

@@ -61,7 +61,7 @@ import type { BridgeCordisProfile } from "./profile.ts";
 // Public surface
 // ---------------------------------------------------------------------------
 
-export const VOICE_BRIDGE_VERSION = "1.0" as const;
+export const VOICE_BRIDGE_VERSION = "1.1" as const;
 
 /**
  * Stop-verification design note: `turnCancel` awaits `whenIdle()` and then
@@ -453,7 +453,11 @@ export function createVoiceBridge(options: VoiceBridgeOptions): VoiceBridgeServi
       }
       let run;
       try {
-        run = state.handle.runPrompt({ turnId: parsed.turnId, nonceFingerprint: parsed.fingerprint });
+        run = state.handle.runPrompt({
+          turnId: parsed.turnId,
+          nonceFingerprint: parsed.fingerprint,
+          ...(parsed.promptText !== null ? { promptText: parsed.promptText } : {}),
+        });
       } catch {
         return { ok: false, code: "worker_quarantined" };
       }

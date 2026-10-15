@@ -89,11 +89,13 @@ export const SAFETY_DECISIONS = Object.freeze([
 export type SafetyGateDecision = (typeof SAFETY_DECISIONS)[number];
 
 /**
- * The three entrances that MUST route through the Safety Gate
+ * The enforced entrances that MUST route through the Safety Gate
  * (issue #27 acceptance criterion 3): the Web UI turn path, the text API
- * (POST /api/v1/interactions) and DSH tool invocations.
+ * (POST /api/v1/interactions), DSH tool invocations — and, since E2E-01
+ * (issue #51), the transient voice transcript path: an ASR final may only
+ * cross toward a model request after the input layer screens it.
  */
-export const SAFETY_ENTRANCES = Object.freeze(["ui_web", "api_text", "dsh_tool"] as const);
+export const SAFETY_ENTRANCES = Object.freeze(["ui_web", "api_text", "dsh_tool", "voice"] as const);
 export type SafetyEntrance = (typeof SAFETY_ENTRANCES)[number];
 
 // ---------------------------------------------------------------------------

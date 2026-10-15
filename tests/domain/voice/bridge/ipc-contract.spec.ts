@@ -47,7 +47,7 @@ test("the protocol defines exactly the five documented commands and events", () 
     [...BRIDGE_EVENTS],
     ["hello_ack", "turn.accepted", "assistant.delta", "attempt.ended", "turn.settled", "session.idle", "session.closed", "runtime.error"],
   );
-  assert.equal(BRIDGE_IPC_PROTOCOL, "lumithink.bridge-ipc/v1");
+  assert.equal(BRIDGE_IPC_PROTOCOL, "lumithink.bridge-ipc/v2");
 });
 
 // ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ test("hello frames round-trip and enforce version, auth grammar and role", () =>
   assert.equal(frame.kind, "hello");
   assert.ok(BRIDGE_IPC_AUTH_PATTERN.test(TEST_AUTH));
   assert.throws(
-    () => parseBridgeFrame(JSON.stringify({ kind: "hello", v: "lumithink.bridge-ipc/v2", auth: TEST_AUTH, role: "orchestrator" })),
+    () => parseBridgeFrame(JSON.stringify({ kind: "hello", v: "lumithink.bridge-ipc/v1", auth: TEST_AUTH, role: "orchestrator" })),
     ContractValidationError,
   );
   assert.throws(
@@ -145,10 +145,39 @@ test("turn.prompt payload requires epoch, hex fingerprint and bounded idempotenc
     idempotencyKey: "idem-key-000001",
   };
   assert.equal(parseTurnPromptPayload(payload).epoch, 1);
+  assert.equal(parseTurnPromptPayload(payload).promptText, null, "promptText is optional on the wire");
   assert.throws(() => parseTurnPromptPayload({ ...payload, epoch: 0 }), ContractValidationError);
   assert.throws(() => parseTurnPromptPayload({ ...payload, fingerprint: "not-hex" }), ContractValidationError);
   assert.throws(() => parseTurnPromptPayload({ ...payload, idempotencyKey: "short" }), ContractValidationError);
   assert.throws(() => parseTurnPromptPayload({ ...payload, text: "raw prompt content" }), ContractValidationError);
+});
+
+test("turn.prompt promptText is the bounded transient transcript carrier (issue #51)", () => {
+  const payload = {
+    sessionKey: "ses_bridge0001",
+    turnId: "trn_000000000001",
+    epoch: 1,
+    fingerprint: "0123456789abcdef0123456789abcdef",
+    idempotencyKey: "idem-key-000001",
+  };
+  // A bounded non-empty promptText round-trips verbatim.
+  const marker = "我们一起看看这道题。";
+  assert.equal(parseTurnPromptPayload({ ...payload, promptText: marker }).promptText, marker);
+  // Empty and oversized promptText fail closed (BRIDGE_TURN_PROMPT_TEXT_MAX_CHARS).
+  assert.throws(() => parseTurnPromptPayload({ ...payload, promptText: "" }), ContractValidationError);
+  assert.throws(() => parseTurnPromptPayload({ ...payload, promptText: "字".repeat(513) }), ContractValidationError);
+  // promptText stays the ONLY content field: the plain `text` field is
+  // still an unknown field, even next to a valid promptText.
+  assert.throws(
+    () => parseTurnPromptPayload({ ...payload, promptText: marker, text: "echo" }),
+    ContractValidationError,
+  );
+  // The full frame round-trip preserves the transcript verbatim.
+  const frame = parseBridgeFrame(
+    JSON.stringify({ kind: "command", name: "turn.prompt", seq: 7, payload: { ...payload, promptText: marker } }),
+  );
+  assert.ok(frame.kind === "command" && frame.name === "turn.prompt");
+  assert.equal(parseTurnPromptPayload(frame.payload).promptText, marker);
 });
 
 test("turn.cancel payload only accepts registered cancel reasons", () => {

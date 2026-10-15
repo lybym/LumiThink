@@ -55,7 +55,7 @@ function createFixture(): Fixture {
 async function openAndPrompt(fixture: Fixture, turnId: string): Promise<string> {
   const opened = await fixture.service.openSession({ sessionKey: SESSION, ownerActorId: OWNER, conversationId: CONVERSATION });
   assert.ok(opened.ok);
-  const prompted = await fixture.service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId, epoch: 1, fingerprint: "0123456789abcdef", idempotencyKey: "idem-bridge-0001" });
+  const prompted = await fixture.service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId, epoch: 1, fingerprint: "0123456789abcdef", idempotencyKey: "idem-bridge-0001", promptText: null });
   assert.ok(prompted.ok);
   const attemptId = prompted.value.attemptId;
   const streamed = await fixture.service.turnStream({ sessionKey: SESSION, turnId, epoch: 1 });
@@ -128,17 +128,45 @@ test("tool_call and thinking channel content never reaches the delta stream", as
   assert.equal(metrics.deltasDroppedNonText, 2);
 });
 
+test("a promptText transcript reaches the agent verbatim and never the audit (issue #51)", async () => {
+  const fixture = createFixture();
+  const opened = await fixture.service.openSession({ sessionKey: SESSION, ownerActorId: OWNER, conversationId: CONVERSATION });
+  assert.ok(opened.ok);
+  const marker = "睡前暗号zebra-42（伪私人标记）";
+  const prompted = await fixture.service.turnPrompt({
+    sessionKey: SESSION,
+    traceId: null,
+    turnId: "trn_bridge0051",
+    epoch: 1,
+    fingerprint: "0123456789abcdef",
+    idempotencyKey: "idem-bridge-0051",
+    promptText: marker,
+  });
+  assert.ok(prompted.ok);
+  // Verbatim arrival at the Fake Agent (the approved model request).
+  const record = fixture.runtime.receivedPromptsSnapshot(SESSION).find((entry) => entry.turnId === "trn_bridge0051");
+  assert.equal(record?.promptText, marker);
+  // Zero leakage in audit/metrics/events; a prompt without text records none.
+  const auditText = JSON.stringify(fixture.service.auditSnapshot());
+  assert.ok(!auditText.includes(marker), "the bridge audit never carries the transcript");
+  assert.ok(!JSON.stringify(fixture.events).includes(marker), "no event frame carries the transcript");
+  assert.equal(fixture.service.metricsSnapshot().deltasForwarded, 0);
+  // dispose destroys the agent-side record.
+  await fixture.service.closeSession({ sessionKey: SESSION, reason: "orchestrator_close" });
+  assert.equal(fixture.runtime.receivedPromptsSnapshot(SESSION).length, 0, "dispose destroys the received prompts");
+});
+
 test("deltas are dropped until turn.stream subscribes the turn", async () => {
   const fixture = createFixture();
   const opened = await fixture.service.openSession({ sessionKey: SESSION, ownerActorId: OWNER, conversationId: CONVERSATION });
   assert.ok(opened.ok);
-  await fixture.service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId: "trn_bridge0001", epoch: 1, fingerprint: "0123456789abcdef", idempotencyKey: "idem-bridge-0001" });
+  await fixture.service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId: "trn_bridge0001", epoch: 1, fingerprint: "0123456789abcdef", idempotencyKey: "idem-bridge-0001", promptText: null });
   fixture.runtime.pumpAll(SESSION);
   assert.equal(deltasOf(fixture.events).length, 0, "unsubscribed stream is filtered");
   assert.equal(fixture.service.metricsSnapshot().deltasDroppedUnsubscribed, 3);
 
   // A second turn with an explicit subscription forwards.
-  await fixture.service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId: "trn_bridge0002", epoch: 1, fingerprint: "0123456789abcde0", idempotencyKey: "idem-bridge-0002" });
+  await fixture.service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId: "trn_bridge0002", epoch: 1, fingerprint: "0123456789abcde0", idempotencyKey: "idem-bridge-0002", promptText: null });
   await fixture.service.turnStream({ sessionKey: SESSION, turnId: "trn_bridge0002", epoch: 1 });
   fixture.runtime.pumpAll(SESSION);
   assert.ok(deltasOf(fixture.events).length > 0);
@@ -198,7 +226,7 @@ test("a worker crash quarantines the session; recovery rebuilds on reopen only",
   assert.ok(crashEvent && (crashEvent.payload as { code: string }).code === "worker_crashed");
 
   // While quarantined, every mutating command is refused.
-  const prompted = await fixture.service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId: "trn_bridge0002", epoch: 1, fingerprint: "0123456789abcde0", idempotencyKey: "idem-bridge-0002" });
+  const prompted = await fixture.service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId: "trn_bridge0002", epoch: 1, fingerprint: "0123456789abcde0", idempotencyKey: "idem-bridge-0002", promptText: null });
   assert.ok(!prompted.ok && prompted.code === "worker_recovering");
   const cancelled = await fixture.service.turnCancel({ sessionKey: SESSION, turnId: "trn_bridge0001", epoch: 2, reason: "barge_in" });
   assert.ok(!cancelled.ok && cancelled.code === "worker_recovering");
@@ -214,7 +242,7 @@ test("a worker crash quarantines the session; recovery rebuilds on reopen only",
   assert.ok(Number.isFinite(metrics.workerRecovery.maxMs));
 
   // The fresh worker serves a new turn normally.
-  const nextPrompt = await fixture.service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId: "trn_bridge0002", epoch: 1, fingerprint: "0123456789abcde0", idempotencyKey: "idem-bridge-0002" });
+  const nextPrompt = await fixture.service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId: "trn_bridge0002", epoch: 1, fingerprint: "0123456789abcde0", idempotencyKey: "idem-bridge-0002", promptText: null });
   assert.ok(nextPrompt.ok);
 });
 
@@ -262,7 +290,7 @@ test("a whenIdle that returns without a stopped agent triggers cancel_timeout qu
   service.onEvent((event) => events.push(event));
 
   assert.ok((await service.openSession({ sessionKey: SESSION, ownerActorId: OWNER, conversationId: CONVERSATION })).ok);
-  assert.ok((await service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId: "trn_bridge0001", epoch: 1, fingerprint: "0123456789abcdef", idempotencyKey: "idem-bridge-0001" })).ok);
+  assert.ok((await service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId: "trn_bridge0001", epoch: 1, fingerprint: "0123456789abcdef", idempotencyKey: "idem-bridge-0001", promptText: null })).ok);
   const cancelled = await service.turnCancel({ sessionKey: SESSION, turnId: "trn_bridge0001", epoch: 2, reason: "barge_in" });
   assert.ok(!cancelled.ok && cancelled.code === "cancel_timeout");
   const crashEvent = events.find((event) => event.kind === "event" && event.name === "runtime.error");
@@ -287,7 +315,7 @@ test("session.close disposes the handle and emits session.closed; reopen starts 
 
 test("unknown sessions are rejected on every command without echoing input", async () => {
   const fixture = createFixture();
-  assert.ok(!(await fixture.service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId: "trn_bridge0001", epoch: 1, fingerprint: "0123456789abcdef", idempotencyKey: "idem-bridge-0001" })).ok);
+  assert.ok(!(await fixture.service.turnPrompt({ sessionKey: SESSION, traceId: null, turnId: "trn_bridge0001", epoch: 1, fingerprint: "0123456789abcdef", idempotencyKey: "idem-bridge-0001", promptText: null })).ok);
   assert.ok(!(await fixture.service.turnCancel({ sessionKey: SESSION, turnId: "trn_bridge0001", epoch: 1, reason: "barge_in" })).ok);
   assert.ok(!(await fixture.service.turnStream({ sessionKey: SESSION, turnId: "trn_bridge0001", epoch: 1 })).ok);
   assert.ok(!(await fixture.service.closeSession({ sessionKey: SESSION, reason: "orchestrator_close" })).ok);

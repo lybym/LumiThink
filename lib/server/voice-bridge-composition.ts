@@ -25,8 +25,13 @@
  * session.open rebuilds the worker does the scheduler dispatch again —
  * confirmed state only, no side-effect replay.
  *
- * PRIVACY: no child audio, transcript or key material ever appears here;
- * the auth token is generated per process and never logged.
+ * PRIVACY (revised by issue #51 / E2E-01): the ONLY transcript plaintext in
+ * this composition is the authorized transient channel — `submitPrompt`
+ * holds it in the bounded in-memory prompt vault until the turn's
+ * `turn.prompt` dispatch consumes it (destroyed on use, failure, cancel or
+ * crash); it is never persisted, exported, logged or audited. No child
+ * audio or key material ever appears here; the auth token is generated per
+ * process and never logged.
  */
 
 import { randomBytes } from "node:crypto";
@@ -107,7 +112,9 @@ export interface VoiceBridgeStack {
     readonly ownerActorId: string;
   }): Promise<{ ok: true; recovered: boolean } | { ok: false; code: string }>;
   /**
-   * Submit one new prompt (new ASR). When the scheduler can dispatch
+   * Submit one new prompt (new ASR). `transientText` is REQUIRED (issue
+   * #51): a voice prompt without its transcript must never dispatch, so no
+   * digest-only model input can exist. When the scheduler can dispatch
    * immediately the Bridge commands go out; a busy session leaves the
    * turn queued (dispatched=false) until a later stop/settlement pumps it.
    */
@@ -116,6 +123,7 @@ export interface VoiceBridgeStack {
     readonly traceId?: string;
     readonly idempotencyKey?: string;
     readonly fingerprint?: string;
+    readonly transientText: string;
   }): Promise<{ ok: true; turnId: string; dispatched: boolean } | { ok: false; code: string }>;
   /**
    * The effective interruption: fence FIRST (epoch bump), then Bridge
@@ -132,6 +140,25 @@ export interface VoiceBridgeStack {
   pumpScheduler(sessionKey: string): { ok: boolean; dispatchedTurnId: string | null; busyTurnId: string | null };
   /** Merged candidate baseline metrics (never claimed as achieved SLAs). */
   baselineMetrics(): Readonly<BridgeBaselineMetrics>;
+}
+
+/**
+ * Transient prompt vault (issue #51 / E2E-01). Holds the authorized ASR
+ * transcript of a QUEUED turn between submission and dispatch. Rules:
+ * - bounded capacity (oldest entry dropped — a starved turn fails closed at
+ *   dispatch instead of growing unbounded memory);
+ * - in-memory ONLY: never exported, persisted, logged or audited;
+ * - taken (destroyed) exactly at the `turn.prompt` dispatch — success OR
+ *   failure — and destroyed at every other path where the turn can no
+ *   longer run (fence, crash, settlement);
+ * - a text-bearing turn whose entry is missing at dispatch (e.g. lost to a
+ *   process restart) fails CLOSED: the turn settles FAILED rather than
+ *   dispatching a digest-only prompt.
+ */
+const PROMPT_VAULT_MAX_ENTRIES = 64;
+
+function promptVaultKey(sessionKey: string, turnId: string): string {
+  return `${sessionKey}\u0000${turnId}`;
 }
 
 /** Create the full voice bridge stack (no sockets until start()). */
@@ -234,6 +261,35 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
 
   let started = false;
 
+  // Transient prompt vault (issue #51): see the constant block above.
+  const promptVault = new Map<string, string>();
+
+  function vaultPut(sessionKey: string, turnId: string, text: string): void {
+    const key = promptVaultKey(sessionKey, turnId);
+    if (!promptVault.has(key) && promptVault.size >= PROMPT_VAULT_MAX_ENTRIES) {
+      const oldest = promptVault.keys().next();
+      if (oldest.done !== true) {
+        promptVault.delete(oldest.value);
+      }
+    }
+    promptVault.set(key, text);
+  }
+
+  /** Take (read-once-destroy) the held transcript for one turn. */
+  function vaultTake(sessionKey: string, turnId: string): string | undefined {
+    const key = promptVaultKey(sessionKey, turnId);
+    const text = promptVault.get(key);
+    if (text !== undefined) {
+      promptVault.delete(key);
+    }
+    return text;
+  }
+
+  /** Destroy the held transcript for one turn (failure/cancel path). */
+  function vaultDestroy(sessionKey: string, turnId: string): void {
+    promptVault.delete(promptVaultKey(sessionKey, turnId));
+  }
+
   async function dispatchQueuedTurn(sessionKey: string): Promise<boolean> {
     const pumped = orchestrator.pump(sessionKey);
     if (!pumped.ok || pumped.dispatchedTurnId === null) {
@@ -256,10 +312,19 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
     if (turn === null || epoch === null) {
       return { ok: false, code: "session_unknown" };
     }
+    // The transcript is consumed exactly here, whether or not the dispatch
+    // succeeds — a destroyed-on-use invariant (issue #51 失败销毁). A
+    // text-bearing turn without a vault entry (lost to a restart) must
+    // NEVER dispatch as a digest-only prompt: fail closed.
+    const heldText = vaultTake(sessionKey, turnId);
+    if (heldText === undefined) {
+      return { ok: false, code: "prompt_text_lost" };
+    }
     const promptReply = await client.command("turn.prompt", {
       sessionKey,
       turnId,
       epoch,
+      promptText: heldText,
       ...(turn.idempotencyKey !== null ? { idempotencyKey: turn.idempotencyKey } : {}),
       ...(turn.fingerprint !== null ? { fingerprint: turn.fingerprint } : {}),
     });
@@ -305,6 +370,7 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
             outcome: "COMPLETED",
           });
           if (settled.ok) {
+            vaultDestroy(payload.sessionKey, payload.turnId);
             gate.clearTurn(payload.sessionKey, payload.turnId);
             void dispatchQueuedTurn(payload.sessionKey);
           }
@@ -316,7 +382,8 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
           // The quarantined worker's active turn can never resume: settle
           // FAILED (legal from RUNNING/CANCELLING), clear the volatile gate
           // buffer, and wait for an explicit reopen — no silent recovery,
-          // no side-effect replay.
+          // no side-effect replay. Held transcripts are destroyed (issue
+          // #51 失败销毁).
           for (const turn of orchestrator.listTurns(payload.sessionKey)) {
             if (turn.state === "RUNNING" || turn.state === "CANCELLING" || turn.state === "QUEUED") {
               orchestrator.settleTurn({
@@ -324,6 +391,7 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
                 turnId: turn.turnId,
                 outcome: "FAILED",
               });
+              vaultDestroy(payload.sessionKey, turn.turnId);
               gate.clearTurn(payload.sessionKey, turn.turnId);
             }
           }
@@ -406,6 +474,11 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
         return { ok: false, code: received.code };
       }
       const turnId = received.turn.turnId;
+      // Hold the transcript until the turn actually dispatches (bounded,
+      // in-memory, destroyed on use/failure). A same-key replay re-puts the
+      // same keyed content — same key + same fingerprint implies the same
+      // text — so the queued turn keeps its liveness.
+      vaultPut(refs.sessionKey, turnId, refs.transientText);
       const dispatched = received.dispatchedTurnId === turnId;
       if (dispatched) {
         const issued = await issueBridgeDispatch(refs.sessionKey, turnId);
@@ -430,6 +503,12 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
       });
       if (!fenced.ok) {
         return { ok: false, code: fenced.code, fenced: false };
+      }
+      // The fence revoked the target turn AND every queued sibling: their
+      // transcripts can never reach a model request — destroy them now.
+      vaultDestroy(refs.sessionKey, refs.turnId);
+      for (const fencedTurnId of fenced.fencedTurnIds) {
+        vaultDestroy(refs.sessionKey, fencedTurnId);
       }
       // STEP 2 — in-process cancel at the Bridge (source-level stop).
       const reply = await client.command("turn.cancel", {

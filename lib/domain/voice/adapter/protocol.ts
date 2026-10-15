@@ -17,13 +17,16 @@
  * device-side intent `abort` and keeps `client_abort` for the semantics the
  * issue and docs/VOICE_RUNTIME.md §4 describe.
  *
- * PRIVACY (issue #30 统一阻断规则): the ONLY content-bearing fields in the
- * whole gateway protocol are the transient `text` of `asr_partial` /
- * `asr_final`. They are consumed by the Adapter, reduced to a content-free
- * hex digest and immediately discarded — never persisted, audited, logged or
- * forwarded. No audio bytes exist anywhere in this contract: the Opus send
- * surface is frame counts + hex digests (real encode/decode is R5 hardware
- * work; everything here is pure-synthetic and replayable).
+ * PRIVACY (issue #30 统一阻断规则, revised by issue #51 / E2E-01): the ONLY
+ * content-bearing fields in the whole gateway protocol are the transient
+ * `text` of `asr_partial` / `asr_final`. A length-capped, Input-Gate-screened
+ * final transcript MAY continue into the authorized transient channel
+ * (protected single-turn call → necessary Bridge IPC → approved model
+ * request) and is destroyed at every failure/cancel point; it is NEVER
+ * persisted, audited, logged or echoed. A partial remains a candidate only.
+ * No audio bytes exist anywhere in this contract: the Opus send surface is
+ * frame counts + hex digests (real encode/decode is R5 hardware work;
+ * everything here is pure-synthetic and replayable).
  *
  * This module must stay dependency-free (no prisma, react, next, node
  * builtins) — enforced by tests/domain/boundary.spec.ts.
@@ -415,6 +418,7 @@ export const GATEWAY_REJECTION_CODES = Object.freeze([
   "no_active_playback",
   "session_unknown",
   "idempotency_conflict",
+  "input_gate_blocked",
   "worker_recovering",
   "bridge_turn_conflict",
   "stale_turn_rejected",

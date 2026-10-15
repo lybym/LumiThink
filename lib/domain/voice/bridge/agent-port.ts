@@ -90,8 +90,13 @@ export type BridgeAgentCancelResult =
 /** One live agent handle owned exclusively by the Bridge. */
 export interface BridgeAgentHandle {
   readonly sessionKey: string;
-  /** Start one attempt for a prompt. Returns the attempt id. */
-  runPrompt(input: { readonly turnId: string; readonly nonceFingerprint: string }): {
+  /**
+   * Start one attempt for a prompt. Returns the attempt id. `promptText` is
+   * the authorized transient transcript (issue #51) — the ONLY channel by
+   * which user text reaches the agent; implementations consume it for this
+   * single attempt and must not persist, log or audit it.
+   */
+  runPrompt(input: { readonly turnId: string; readonly nonceFingerprint: string; readonly promptText?: string }): {
     readonly ok: true;
     readonly attemptId: string;
   };
