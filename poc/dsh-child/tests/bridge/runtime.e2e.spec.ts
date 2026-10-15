@@ -354,9 +354,10 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
       conversationId: 'conv_e2e02hang01',
       ownerActorId: 'act_e2e02parent01',
     })
-    assert.equal(reopened.ok, true)
+    assert.equal(reopened.ok, true, `reopen refused: ${JSON.stringify(reopened)} ${fixture.forensics()}`)
     assert.equal(reopened.ok && reopened.recovered, true)
-    await submitAndAwaitCompletion(stack, sessionKey, 'E2E02-AFTER-HANG 合成转写。')
+    const recoveredTurnId = await submitAndAwaitCompletion(stack, sessionKey, 'E2E02-AFTER-HANG 合成转写。', 30_000, fixture.forensics)
+    assert.notEqual(recoveredTurnId, turnId)
   })
 
   it('records content-free structured audit evidence only', async () => {
