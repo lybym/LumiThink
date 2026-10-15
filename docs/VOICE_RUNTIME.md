@@ -122,7 +122,7 @@ Bridge IPC 不可公网直连；强制 peer 权限、schema 校验、限速和�
 | 工作包 | 状态 | 交付/明确 PASS 条件 |
 | --- | --- | --- |
 | **R1-V1** Orchestrator/Fencing | **合成 POC 已交付**（issue #28）| 模拟迟到 ASR、重复取消、旧事件/TTS/记忆的 100 次竞态；旧输出和过期写入均为 0 |
-| **R1-V2** Cordis Bridge POC | 未开始 | `prompt/cancel/stream/close` 合同、唯一所有权、真实 live Delta / 取消、进程重启、Profile 白名单与隐私门禁 |
+| **R1-V2** Cordis Bridge POC | **合成 POC 已交付**（issue #29）| `prompt/cancel/stream/close` 合同、唯一所有权、真实 live Delta / 取消、进程重启、Profile 白名单与隐私门禁 |
 | **R5-V3** 小智及 XVF3800 实机 | 未开始 | 思考中打断、播放中打断、连续抢话、服务重启、断网恢复；私有化设备激活/OTA，完整语音闭环 |
 
 **建议的初始性能目标（候选值，必须用具体云环境/设备实测校准）**：
@@ -148,3 +148,16 @@ Bridge IPC 不可公网直连；强制 peer 权限、schema 校验、限速和�
 ## 11. R1-V1 实现落点（issue #28）
 
 Turn Orchestrator 与 epoch fencing 的合成 POC 实现于 `lib/domain/voice/`（状态机/可信栅栏存储/Orchestrator/结构化审计，无依赖领域层）与 `lib/server/voice-turn-sqlite-store.ts`（同一存储端口的 SQLite `BEGIN IMMEDIATE` 事务实现，含版本化迁移门禁与重启幂等账本恢复）。§4 的严格先后关系由 `cancelTurn`（原子递增 epoch + 旧轮翻转 CANCELLING）与 `pumpScheduler`（旧任务停稳前不调度新 prompt）承载；§5 的原子条件提交由 `fenceWrite`/`fenceOutput`/`drainTtsQueue` 承载，全部携带 `session_key, turn_id, epoch, idempotency_key`，内容仅以十六进制摘要过界。确定性竞态证据（120 个种子场景、种子重放同审计同终态）见 `tests/domain/voice/race.spec.ts`。R1-V2 Bridge 之前不宣称 DSH 进程内已真取消。
+
+## 12. R1-V2 实现落点（issue #29）
+
+Cordis Runtime Bridge 的**合成 POC** 实现于 `lib/domain/voice/bridge/`（无依赖领域层）与 `lib/server/voice-bridge-ipc.ts` / `voice-bridge-composition.ts`（本地 IPC 传输与编排组合）。R0 的 `poc/dsh-child` 与既有 SDK 路线**原样保留**，根工程仍零 `@deepseek-ai/dsh-*` 依赖：
+
+- **Profile 唯一所有权**（§8）：`profile.ts` 定义独立的 `lumi-dsh-runtime-bridge` Profile 合同——工具白名单 DERIVE 自 R1-15 `SAFE_TOOL_REGISTRY` 单一事实源，telemetry/sessionLog/crashReporting 必须 `off`，egress 仅 loopback；`mock-cordis.ts` 以独占注册表承载 `ctx.agents create/resume` 语义，同 Session 二次创建在端口层被结构性拒绝（`bridge_ownership_conflict`），Bridge 服务层再拒绝一次（`session_conflict`）。
+- **IPC 合同**（§3）：`ipc-contract.ts` 以 fail-closed 解析器固化 `session.open / turn.prompt / turn.cancel / turn.stream / session.close` 五命令与 `turn.accepted / assistant.delta / attempt.ended / turn.settled / session.idle / session.closed / runtime.error` 事件词表、协议版本、鉴权 token 语法与帧长上限；除 `assistant.delta` 的瞬态 `text` 外全部字段内容无关（schema 测试断言字段 allow-list）。`voice-bridge-ipc.ts` 承载字节层：4 字节长度前缀 JSON 帧、硬性字节上限、首帧版本+鉴权握手、单连接租约、滑窗限速、POSIX UDS `0600` 文件权限（Windows 开发环境以同名协议跑命名管道，仅为开发/测试形态）。
+- **真取消与实时 Delta**（§1/§6）：`agent-port.ts` 抽象锁定版本进程内 `cancel({kind:'user'})`/`whenIdle()`/`dispose()`/`agent/assistant-stream` 面；Bridge 只转发 text 通道瞬态 chunk（绑定 `attempt_id/step_id/index/turn_id/epoch`），tool_call/thinking 通道计数丢弃，durable `assistant/message` 仅作结算通知（只带 messageId，正文永不过界）。`stream-gate.ts` 在 Orchestrator 侧对每条 delta 复核当前可信 epoch（`fenceOutput(text_delta)`），按 attempt 严格单调校验 index，短句缓冲后逐句过**真实 R1-15 儿童 Output Gate**，通过后才 `fenceOutput(tts_queue)` 准入 TTS。
+- **打断顺序**（§4）：组合层 `bargeInCancel` 严格执行 fence 先行（可信存储原子递增 epoch、旧轮全体翻转 CANCELLING）→ Bridge `turn.cancel`（进程内真取消 + `whenIdle` 复核，未停稳即隔离 Worker）→ `confirmStop` 落 CANCELLED → 同批被栅栏的排队旧轮一并 CANCELLED → 之后才调度新 turn；Bridge 侧对携带 ≤ 出轮 epoch 的 cancel 请求以 `stale_turn_rejected` 拒绝（fence-first 纵深防御）。
+- **隔离恢复**（§7）：Worker 崩溃或 `whenIdle` 返回未停稳 → quarantined（`runtime.error(worker_crashed)`，受影响 turn 终态 FAILED，绝不复活）；仅显式 `session.open` 重建 Worker（`recovered`），恢复只绑定确认的会话身份，不重放任何 Side Effect；Bridge 拒绝派发时可信侧将对应 turn 落 FAILED，保证调度器活性。
+- **候选基线**（§9，仅采集不达标）：取消 ACK、`whenIdle` 停稳、首段安全文字、Worker 回收四项延迟在 Bridge/Gate 指标快照中分别采集（`baselineMetrics()`），测试明确标注为候选值。
+- **竞态证据**：`tests/domain/voice/bridge/race.spec.ts` 100 个种子场景（抢话、重复取消、迟到 delta 风暴、崩溃恢复、非法 IPC 注入五族），不变量断言：交付 TTS 全部当前 epoch（旧 TTS 交付 = 0）、终态 turn 的栅栏写入全部拒绝（旧记忆写入 = 0）、被栅栏 delta > 0、非 text 通道丢弃 > 0、每轮取消的进程内 cancel 恰好一次；取消 ACK/idle/首段安全文字/回收耗时作为候选基线输出。真实 UDS 传输路径由 `tests/server/voice-bridge-ipc.spec.ts` 与 `voice-bridge-composition.spec.ts` 在 POSIX CI 上行使（Windows 开发沙箱禁止开 socket，规格测试在 POSIX 上运行）。
+- **边界声明**：本 POC 的"上游运行时"是合成 Mock，未接入真实 DSH 进程；live/cancel 证据针对合成 Mock 的源级语义（取消即源头停止派发、durable 消息不参与 delta），不等于实机验收。实机 R5 是单独阶段。

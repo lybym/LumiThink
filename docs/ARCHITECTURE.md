@@ -1,6 +1,6 @@
 # LumiThink 2.0 系统架构（目标架构）
 
-> 更新：2026-10-13 ｜ 状态：**已选择技术路线，语音及 Cordis Bridge 尚未实现和验收**  
+> 更新：2026-10-15 ｜ 状态：**技术路线已选择；R1-V1 Orchestrator 与 R1-V2 Bridge 合成 POC 已交付，语音实机尚未实现和验收**  
 > 产品：[PRD](./PRD.md) · [Roadmap](./ROADMAP.md) · [DSH ADR-001](./adr/0001-deepseek-harness.md) · [Voice ADR-002](./adr/0002-voice-runtime-bridge.md)  
 > 详设：[Voice Runtime](./VOICE_RUNTIME.md) · [语音硬件](./VOICE_HARDWARE.md) · [DSH R0 POC](./R0_DSH_POC.md)
 
@@ -72,7 +72,7 @@ Bridge 是已选择的架构路线，但仍需对**锁定版本和最终组合�
 
 - **R0**：保留 SDK 合成测试和权限基线，不修改上游内核。
 - **R1-V / 阶段 1**：Turn Orchestrator + Fencing；证明错误结果和记忆不会跨轮。（issue #28 已交付合成 POC：`lib/domain/voice/` + SQLite 栅栏存储，详见 [VOICE_RUNTIME §11](./VOICE_RUNTIME.md)）
-- **R1-V / 阶段 2**：自定义 Cordis Bridge `prompt/cancel/stream/close`，验证真取消、实时 Delta 和单一所有权。
+- **R1-V / 阶段 2**：自定义 Cordis Bridge `prompt/cancel/stream/close`，验证真取消、实时 Delta 和单一所有权。（issue #29 已交付合成 POC：独立 `lumi-dsh-runtime-bridge` Profile、私有本地 IPC 合同、live Delta→Output Gate→TTS 准入、进程内真取消/`whenIdle`、Worker 隔离恢复与 100 次竞态证据，实现位于 `lib/domain/voice/bridge/` + `lib/server/voice-bridge-ipc.ts`，详见 [VOICE_RUNTIME §12](./VOICE_RUNTIME.md)；真实 DSH 进程接入与实机验收仍属 R5）
 - **R5 / 实机语音**：XVF3800 + ESP32-S3 小智固件、私有化服务端、真实网络中断/设备重连、延迟和长期稳定性联调。
 
 文字端 R1 和 R1-V 设计可并行，**正式儿童语音开放必须同时满足 Bridge 生命周期与隐私门禁**。记录指标目标与故障注入计划见 [VOICE_RUNTIME](./VOICE_RUNTIME.md)。

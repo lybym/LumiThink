@@ -1,0 +1,498 @@
+/**
+ * R1-V2 Bridge composition — the Orchestrator-side integration that binds
+ * the R1-V1 Turn Orchestrator, the children Output Gate stream handling,
+ * the private IPC transport and the Bridge service into one working
+ * runtime (issue #29 实现范围 1–5; docs/VOICE_RUNTIME.md §2/§4).
+ *
+ * This is the composition the issue's acceptance scenarios drive. It owns
+ * the STRICT interruption ordering (docs/VOICE_RUNTIME.md §4):
+ *   1. `bargeInCancel` fences FIRST (R1-V1 `cancelTurn` atomically bumps
+ *      the trusted epoch and revokes the old turn's output rights),
+ *   2. only then sends `turn.cancel` to the Bridge, which performs the
+ *      in-process `agent.cancel({ kind: 'user' })` and awaits
+ *      `whenIdle()`,
+ *   3. on idle confirmation the Orchestrator settles CANCELLED and the
+ *      scheduler may dispatch the next queued turn (`whenIdle 后调度新
+ *      turn`) — never before.
+ *
+ * Live deltas flow runtime → Bridge → IPC → stream gate, where every
+ * delta is re-fenced against the CURRENT trusted epoch and every complete
+ * sentence passes the REAL R1-15 children Output Gate before TTS
+ * admission. Late deltas of a fenced epoch are rejected at the gate.
+ *
+ * Crash semantics: a worker fault quarantines the Bridge worker; the
+ * affected turn settles FAILED (never resumes), and only after a fresh
+ * session.open rebuilds the worker does the scheduler dispatch again —
+ * confirmed state only, no side-effect replay.
+ *
+ * PRIVACY: no child audio, transcript or key material ever appears here;
+ * the auth token is generated per process and never logged.
+ */
+
+import { randomBytes } from "node:crypto";
+import {
+  createBridgeStreamGate,
+  type BridgeStreamGate,
+} from "../domain/voice/bridge/stream-gate.ts";
+import {
+  createVoiceBridge,
+  type BridgeMetricsSnapshot,
+  type VoiceBridgeService,
+} from "../domain/voice/bridge/bridge.ts";
+import { createMockCordisRuntime, type MockCordisRuntime, type MockGenerationScript } from "../domain/voice/bridge/mock-cordis.ts";
+import { canonicalBridgeProfile, type BridgeCordisProfile } from "../domain/voice/bridge/profile.ts";
+import { createVoiceTurnOrchestrator, type VoiceTurnOrchestrator } from "../domain/voice/orchestrator.ts";
+import {
+  createVoiceBridgeIpcClient,
+  createVoiceBridgeIpcServer,
+  dispatchBridgeCommand,
+  resolveBridgeIpcEndpoint,
+  wireBridgeEventForwarding,
+  type BridgeIpcEndpoint,
+  type VoiceBridgeIpcClient,
+  type VoiceBridgeIpcServer,
+} from "./voice-bridge-ipc.ts";
+import { parseBridgeFrame, type BridgeCommandFrame, type BridgeFrame } from "../domain/voice/bridge/ipc-contract.ts";
+
+// ---------------------------------------------------------------------------
+// Stack
+// ---------------------------------------------------------------------------
+
+export interface VoiceBridgeStackOptions {
+  /** Deterministic per-turn generation script (synthetic samples only). */
+  readonly scriptFor: (sessionKey: string, turnId: string) => MockGenerationScript;
+  readonly profile?: Readonly<BridgeCordisProfile>;
+  readonly socketDir?: string;
+  readonly endpointName?: string;
+  /**
+   * `ipc` (default) runs the REAL local-socket transport (UDS on the POSIX
+   * production target / named pipe on Windows dev). `in_process` runs the
+   * same frame protocol and dispatch order over an in-memory queue — used
+   * where the sandbox forbids opening sockets; it is a test/analysis mode,
+   * never the deployment shape.
+   */
+  readonly transport?: "ipc" | "in_process";
+  /** Injectable wall clock (ms) shared by orchestrator/gate/bridge. */
+  readonly clock?: () => number;
+  /** Injectable turn-id factory for deterministic tests. */
+  readonly turnIdFactory?: () => string;
+}
+
+export interface BridgeBaselineMetrics {
+  /** 取消命令 ACK（受理，非停稳）— candidate baseline. */
+  readonly cancelAckMs: { readonly count: number; readonly maxMs: number };
+  /** Agent `whenIdle()` 停稳 — candidate baseline. */
+  readonly whenIdleMs: { readonly count: number; readonly maxMs: number };
+  /** 首段安全文字（首个通过 Output Gate 的 TTS 准入）— candidate baseline. */
+  readonly firstSafeTextMs: { readonly count: number; readonly maxMs: number };
+  /** 异常 Worker 回收重建 — candidate baseline. */
+  readonly workerRecoveryMs: { readonly count: number; readonly maxMs: number };
+}
+
+export interface VoiceBridgeStack {
+  readonly orchestrator: VoiceTurnOrchestrator;
+  readonly gate: BridgeStreamGate;
+  readonly service: VoiceBridgeService;
+  readonly runtime: MockCordisRuntime;
+  /** Null in `in_process` transport mode (no socket exists). */
+  readonly server: VoiceBridgeIpcServer | null;
+  readonly client: VoiceBridgeIpcClient;
+  readonly endpoint: BridgeIpcEndpoint;
+  readonly transportMode: "ipc" | "in_process";
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  openSession(refs: {
+    readonly sessionKey: string;
+    readonly conversationId: string;
+    readonly ownerActorId: string;
+  }): Promise<{ ok: true; recovered: boolean } | { ok: false; code: string }>;
+  /**
+   * Submit one new prompt (new ASR). When the scheduler can dispatch
+   * immediately the Bridge commands go out; a busy session leaves the
+   * turn queued (dispatched=false) until a later stop/settlement pumps it.
+   */
+  submitPrompt(refs: {
+    readonly sessionKey: string;
+    readonly traceId?: string;
+    readonly idempotencyKey?: string;
+    readonly fingerprint?: string;
+  }): Promise<{ ok: true; turnId: string; dispatched: boolean } | { ok: false; code: string }>;
+  /**
+   * The effective interruption: fence FIRST (epoch bump), then Bridge
+   * cancel + whenIdle, then CANCELLED settlement, then scheduler pump.
+   */
+  bargeInCancel(refs: {
+    readonly sessionKey: string;
+    readonly turnId: string;
+    readonly reason: "device_abort" | "barge_in" | "system_policy";
+  }): Promise<{ ok: true } | { ok: false; code: string; fenced: boolean }>;
+  /** Drive the synthetic runtime's generation (deterministic dispatch). */
+  pumpRuntime(sessionKey: string, max?: number): number;
+  /** Drive the orchestrator scheduler pump. */
+  pumpScheduler(sessionKey: string): { ok: boolean; dispatchedTurnId: string | null; busyTurnId: string | null };
+  /** Merged candidate baseline metrics (never claimed as achieved SLAs). */
+  baselineMetrics(): Readonly<BridgeBaselineMetrics>;
+}
+
+/** Create the full voice bridge stack (no sockets until start()). */
+export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceBridgeStack {
+  if (options === null || typeof options !== "object" || typeof options.scriptFor !== "function") {
+    throw new Error("voice bridge stack requires a scriptFor function.");
+  }
+  const clock = options.clock ?? (() => Date.now());
+  const profile = options.profile ?? canonicalBridgeProfile();
+
+  const orchestrator = createVoiceTurnOrchestrator({
+    clock,
+    ...(options.turnIdFactory !== undefined ? { turnIdFactory: options.turnIdFactory } : {}),
+  });
+  const runtime = createMockCordisRuntime({ scriptFor: options.scriptFor });
+  const service = createVoiceBridge({ profile, agentPort: runtime, clock });
+  runtime.onFault((info) => service.handleAgentCrash(info.sessionKey));
+  const gate = createBridgeStreamGate({ orchestrator, clock });
+
+  const endpointName = options.endpointName ?? `lumithink-bridge-${process.pid}-${Math.floor(Math.random() * 0xffffff).toString(16)}`;
+  const endpoint = resolveBridgeIpcEndpoint({ ...(options.socketDir !== undefined ? { socketDir: options.socketDir } : {}), name: endpointName });
+  // Per-process lease secret; never logged, never persisted.
+  const authToken = randomBytes(48).toString("hex");
+  const transportMode = options.transport ?? "ipc";
+  const server = transportMode === "ipc" ? createVoiceBridgeIpcServer({ endpoint, authToken, service }) : null;
+
+  /**
+   * In-process transport: the SAME frame protocol (round-tripped through
+   * the real parser) and the SAME dispatch function as the socket server,
+   * delivered over an ordered async queue. No sockets are opened.
+   */
+  function createInProcessClient(): VoiceBridgeIpcClient {
+    const eventListeners: ((frame: BridgeFrame) => void)[] = [];
+    let connected = false;
+    let nextSeq = 1;
+    let processQueue: Promise<void> = Promise.resolve();
+    // Same shared event wiring as the socket server (single source).
+    wireBridgeEventForwarding(service, (event) => {
+      const raw = JSON.stringify(event);
+      try {
+        const parsed = parseBridgeFrame(raw);
+        processQueue = processQueue
+          .then(() => {
+            for (const listener of [...eventListeners]) {
+              listener(parsed);
+            }
+          })
+          .catch(() => undefined);
+      } catch {
+        // An unserviceable event frame must never leak past the boundary.
+      }
+    });
+    return {
+      async connect() {
+        connected = true;
+      },
+      async command(name, payload) {
+        if (!connected) {
+          return { ok: false, code: "protocol_violation" };
+        }
+        const seq = nextSeq;
+        nextSeq += 1;
+        let frame: BridgeFrame;
+        try {
+          const raw = JSON.stringify({ kind: "command", name, seq, payload });
+          frame = parseBridgeFrame(raw);
+          if (frame.kind !== "command") {
+            return { ok: false, code: "protocol_violation" };
+          }
+        } catch {
+          return { ok: false, code: "protocol_violation" };
+        }
+        const reply = await dispatchBridgeCommand(service, frame as BridgeCommandFrame);
+        if (reply.kind !== "reply") {
+          return { ok: false, code: "protocol_violation" };
+        }
+        return reply.ok ? { ok: true, payload: reply.payload } : { ok: false, code: reply.code };
+      },
+      onEvent(listener) {
+        eventListeners.push(listener);
+      },
+      sendRaw() {
+        // Raw-frame injection is a socket-transport test affordance only.
+      },
+      sendBytes() {
+        // Raw-byte injection is a socket-transport test affordance only.
+      },
+      isConnected() {
+        return connected;
+      },
+      async close() {
+        connected = false;
+        eventListeners.length = 0;
+      },
+    };
+  }
+
+  const client: VoiceBridgeIpcClient =
+    transportMode === "ipc" ? createVoiceBridgeIpcClient({ endpoint, authToken }) : createInProcessClient();
+
+  let started = false;
+
+  async function dispatchQueuedTurn(sessionKey: string): Promise<boolean> {
+    const pumped = orchestrator.pump(sessionKey);
+    if (!pumped.ok || pumped.dispatchedTurnId === null) {
+      return false;
+    }
+    const issued = await issueBridgeDispatch(sessionKey, pumped.dispatchedTurnId);
+    if (!issued.ok) {
+      // The Bridge refused the dispatch (e.g. quarantined worker): the
+      // trusted turn can never run — settle it FAILED so the scheduler
+      // stays live instead of holding a stuck RUNNING turn.
+      orchestrator.settleTurn({ sessionKey, turnId: pumped.dispatchedTurnId, outcome: "FAILED" });
+      gate.clearTurn(sessionKey, pumped.dispatchedTurnId);
+    }
+    return issued.ok;
+  }
+
+  async function issueBridgeDispatch(sessionKey: string, turnId: string): Promise<{ ok: true } | { ok: false; code: string }> {
+    const epoch = orchestrator.currentEpoch(sessionKey);
+    const turn = orchestrator.describeTurn(sessionKey, turnId);
+    if (turn === null || epoch === null) {
+      return { ok: false, code: "session_unknown" };
+    }
+    const promptReply = await client.command("turn.prompt", {
+      sessionKey,
+      turnId,
+      epoch,
+      ...(turn.idempotencyKey !== null ? { idempotencyKey: turn.idempotencyKey } : {}),
+      ...(turn.fingerprint !== null ? { fingerprint: turn.fingerprint } : {}),
+    });
+    if (!promptReply.ok) {
+      return { ok: false, code: promptReply.code };
+    }
+    const streamReply = await client.command("turn.stream", { sessionKey, turnId, epoch });
+    if (!streamReply.ok) {
+      return { ok: false, code: streamReply.code };
+    }
+    return { ok: true };
+  }
+
+  function handleBridgeEvent(frame: unknown): void {
+    if (frame === null || typeof frame !== "object") {
+      return;
+    }
+    const event = frame as { readonly kind?: string; readonly name?: string; readonly payload?: unknown };
+    if (event.kind !== "event") {
+      return;
+    }
+    const payload = (event.payload ?? {}) as Record<string, unknown>;
+    switch (event.name) {
+      case "assistant.delta": {
+        gate.handleDelta(payload as unknown as Parameters<BridgeStreamGate["handleDelta"]>[0]);
+        return;
+      }
+      case "attempt.ended": {
+        if (typeof payload.sessionKey === "string") {
+          gate.flushSession(payload.sessionKey);
+        }
+        return;
+      }
+      case "turn.settled": {
+        if (
+          typeof payload.sessionKey === "string" &&
+          typeof payload.turnId === "string" &&
+          payload.finalState === "COMPLETED"
+        ) {
+          const settled = orchestrator.settleTurn({
+            sessionKey: payload.sessionKey,
+            turnId: payload.turnId,
+            outcome: "COMPLETED",
+          });
+          if (settled.ok) {
+            gate.clearTurn(payload.sessionKey, payload.turnId);
+            void dispatchQueuedTurn(payload.sessionKey);
+          }
+        }
+        return;
+      }
+      case "runtime.error": {
+        if (payload.code === "worker_crashed" && typeof payload.sessionKey === "string") {
+          // The quarantined worker's active turn can never resume: settle
+          // FAILED (legal from RUNNING/CANCELLING), clear the volatile gate
+          // buffer, and wait for an explicit reopen — no silent recovery,
+          // no side-effect replay.
+          for (const turn of orchestrator.listTurns(payload.sessionKey)) {
+            if (turn.state === "RUNNING" || turn.state === "CANCELLING" || turn.state === "QUEUED") {
+              orchestrator.settleTurn({
+                sessionKey: payload.sessionKey,
+                turnId: turn.turnId,
+                outcome: "FAILED",
+              });
+              gate.clearTurn(payload.sessionKey, turn.turnId);
+            }
+          }
+          return;
+        }
+        if (payload.code === "recovered" && typeof payload.sessionKey === "string") {
+          void dispatchQueuedTurn(payload.sessionKey);
+        }
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  const stack: VoiceBridgeStack = {
+    orchestrator,
+    gate,
+    service,
+    runtime,
+    server,
+    client,
+    endpoint,
+    transportMode,
+
+    async start() {
+      if (started) {
+        return;
+      }
+      client.onEvent(handleBridgeEvent);
+      if (server !== null) {
+        await server.start();
+      }
+      await client.connect();
+      started = true;
+    },
+
+    async stop() {
+      if (!started) {
+        return;
+      }
+      await client.close();
+      if (server !== null) {
+        await server.stop();
+      }
+      started = false;
+    },
+
+    async openSession(refs) {
+      const opened = orchestrator.openSession({
+        sessionKey: refs.sessionKey,
+        conversationId: refs.conversationId,
+        ownerActorId: refs.ownerActorId,
+      });
+      if (!opened.ok) {
+        return { ok: false, code: opened.code };
+      }
+      const reply = await client.command("session.open", {
+        sessionKey: refs.sessionKey,
+        ownerActorId: refs.ownerActorId,
+        conversationId: refs.conversationId,
+      });
+      if (!reply.ok) {
+        return { ok: false, code: reply.code };
+      }
+      await dispatchQueuedTurn(refs.sessionKey);
+      const value = (reply.payload ?? {}) as { recovered?: boolean };
+      return { ok: true, recovered: value.recovered === true };
+    },
+
+    async submitPrompt(refs) {
+      const received = orchestrator.receivePrompt({
+        sessionKey: refs.sessionKey,
+        traceId: refs.traceId ?? null,
+        ...(refs.idempotencyKey !== undefined && refs.fingerprint !== undefined
+          ? { idempotencyKey: refs.idempotencyKey, fingerprint: refs.fingerprint }
+          : {}),
+      });
+      if (!received.ok) {
+        return { ok: false, code: received.code };
+      }
+      const turnId = received.turn.turnId;
+      const dispatched = received.dispatchedTurnId === turnId;
+      if (dispatched) {
+        const issued = await issueBridgeDispatch(refs.sessionKey, turnId);
+        if (!issued.ok) {
+          // Same rollback as dispatchQueuedTurn: a refused dispatch means
+          // the trusted turn can never run; settle FAILED (liveness).
+          orchestrator.settleTurn({ sessionKey: refs.sessionKey, turnId, outcome: "FAILED" });
+          gate.clearTurn(refs.sessionKey, turnId);
+          return { ok: false, code: issued.code };
+        }
+      }
+      return { ok: true, turnId, dispatched };
+    },
+
+    async bargeInCancel(refs) {
+      // STEP 1 — fence FIRST: the R1-V1 store atomically bumps the trusted
+      // epoch and revokes the old turn's text/TTS/audio/write permissions.
+      const fenced = orchestrator.cancelTurn({
+        sessionKey: refs.sessionKey,
+        turnId: refs.turnId,
+        reason: refs.reason,
+      });
+      if (!fenced.ok) {
+        return { ok: false, code: fenced.code, fenced: false };
+      }
+      // STEP 2 — in-process cancel at the Bridge (source-level stop).
+      const reply = await client.command("turn.cancel", {
+        sessionKey: refs.sessionKey,
+        turnId: refs.turnId,
+        epoch: orchestrator.currentEpoch(refs.sessionKey),
+        reason: refs.reason,
+      });
+      // `cancel_unknown_turn` means the fenced turn was still QUEUED and
+      // had never been dispatched to the Bridge: there is no in-process
+      // attempt to stop, so the fence alone already revoked it — settling
+      // CANCELLED is correct (and only for that code; a real Bridge
+      // failure such as cancel_timeout must NOT be papered over).
+      if (!reply.ok && reply.code !== "cancel_unknown_turn") {
+        return { ok: false, code: reply.code, fenced: true };
+      }
+      // STEP 3 — idle confirmed: CANCELLING → CANCELLED in the trusted store.
+      const confirmed = orchestrator.confirmStop({ sessionKey: refs.sessionKey, turnId: refs.turnId });
+      if (!confirmed.ok) {
+        return { ok: false, code: confirmed.code, fenced: true };
+      }
+      gate.clearTurn(refs.sessionKey, refs.turnId);
+      // The SAME atomic fence flipped every old-epoch non-terminal turn to
+      // CANCELLING (queued siblings included). None of them can ever run:
+      // settle each CANCELLED alongside the target, so the scheduler stays
+      // live and no turn resurrects.
+      for (const fencedTurnId of fenced.fencedTurnIds) {
+        if (fencedTurnId === refs.turnId) {
+          continue;
+        }
+        const settled = orchestrator.confirmStop({ sessionKey: refs.sessionKey, turnId: fencedTurnId });
+        if (settled.ok) {
+          gate.clearTurn(refs.sessionKey, fencedTurnId);
+        }
+      }
+      // STEP 4 — only now may a queued turn be dispatched.
+      await dispatchQueuedTurn(refs.sessionKey);
+      return { ok: true };
+    },
+
+    pumpRuntime(sessionKey, max) {
+      return runtime.pump(sessionKey, max);
+    },
+
+    pumpScheduler(sessionKey) {
+      const pumped = orchestrator.pump(sessionKey);
+      return {
+        ok: pumped.ok,
+        dispatchedTurnId: pumped.ok ? pumped.dispatchedTurnId : null,
+        busyTurnId: pumped.ok ? pumped.busyTurnId : null,
+      };
+    },
+
+    baselineMetrics() {
+      const bridge: BridgeMetricsSnapshot = service.metricsSnapshot();
+      const gateMetrics = gate.metricsSnapshot();
+      return {
+        cancelAckMs: bridge.cancelAck,
+        whenIdleMs: bridge.whenIdle,
+        firstSafeTextMs: gateMetrics.firstSafeText,
+        workerRecoveryMs: bridge.workerRecovery,
+      };
+    },
+  };
+  return stack;
+}

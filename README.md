@@ -10,7 +10,7 @@ LumiThink 目标不是无限陪聊或代写作业，而是帮助儿童理解困�
 | 层 | 当前方案 | 状态 |
 | --- | --- | --- |
 | AI Runtime | [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) + 最小权限 Cordis Profile | **R0 SDK 合成 POC 已验证** |
-| 实时语音控制 | **自定义 Cordis Runtime Bridge** + LumiThink Turn Orchestrator | **目标架构，尚未 POC** |
+| 实时语音控制 | **自定义 Cordis Runtime Bridge** + LumiThink Turn Orchestrator | **合成 POC 已交付（R1-V2，issue #29）；实机未验** |
 | 语音硬件 | **XMOS XVF3800 四麦阵列 + ESP32-S3** | **最终硬件选型，实机未验** |
 | 设备固件 | [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) + XVF3800 板级移植 | 待移植/锁版本 |
 | 语音平台 | [xinnan-tech/xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server)，Linux 云服务器私有化 | 选型确定，未联调 |
@@ -36,13 +36,13 @@ XVF3800 (DSP / AEC) + ESP32-S3 (xiaozhi firmware)
 Next.js Web / 触屏 → 同一 LumiThink API / Domain Services
 ```
 
-**打断三项强制条件**：**撤销旧轮次输出权限**、**尽可能取消 DSH 计算**、**阻止旧轮次产生新的业务副作用**。DSH 在固定的 `0.2.0-rc.2` 版本内部已有 `agent.cancel()`、`whenIdle()` 与 `agent/assistant-stream`；TypeScript SDK 尚无轮次内取消接口。因此采用自定义 Cordis Bridge，而不是长期依赖销毁整个进程；但 Bridge **还没有编写/验收**。参阅 [ADR-002](docs/adr/0002-voice-runtime-bridge.md)。
+**打断三项强制条件**：**撤销旧轮次输出权限**、**尽可能取消 DSH 计算**、**阻止旧轮次产生新的业务副作用**。DSH 在固定的 `0.2.0-rc.2` 版本内部已有 `agent.cancel()`、`whenIdle()` 与 `agent/assistant-stream`；TypeScript SDK 尚无轮次内取消接口。因此采用自定义 Cordis Bridge，而不是长期依赖销毁整个进程；Bridge 的**合成 POC 已按 ADR-002 交付**（独立 Profile、私有 IPC、真取消/实时 Delta/隔离恢复的合同与竞态证据，issue #29），但**未接入真实 DSH 进程、未做实机验收**——生产语音仍受 R1-V/R5 联合门禁限制。参阅 [ADR-002](docs/adr/0002-voice-runtime-bridge.md) 与 [VOICE_RUNTIME](docs/VOICE_RUNTIME.md)。
 
 ## 研发进度（区分已完成与计划）
 
 - **已完成的 R0 技术证据**：`poc/dsh-child` 的隔离最小权限 Profile，固定 DSH `dsh-v0.2.0-rc.2`，合成多轮 SDK 事件流、关闭、安全和隐私回归；R0-02 记录 35/35 PASS、0 SKIP（Windows/Linux CI）。这**不等于**真实儿童或实时语音生产验收。
 - **R1 文字端（进行中/待开发）**：统一请求接口、儿童 Persona、经证据约束的日常情绪和困难作业启动双 Skill、受控记忆与家长治理。
-- **R1-V 语音运行时先导（计划）**：Turn Fencing、Cordis Bridge 真取消与实时 Delta、IPC 协议合同、故障注入和安全回归；不提前宣称已可用。
+- **R1-V 语音运行时先导（进行中）**：R1-V1 Turn Fencing 已交付（issue #28）；R1-V2 Cordis Bridge 真取消与实时 Delta 合成 POC 已交付（issue #29）：独立最小权限 Profile、私有本地 IPC 合同、live Delta→儿童 Output Gate→TTS 准入、进程内真取消/whenIdle、Worker 隔离恢复与 100 次竞态证据；实机联调与真实 DSH 进程接入仍未开始。
 - **R5 实机语音（计划）**：XVF3800 + ESP32-S3 小智板级固件、自建服务端、Bridge 与 DSH 完整闭环、断网/多次打断/延迟验收。
 - **后续**：Evidence/Skills 扩展、Web 交互场景与可审计的持续改进。
 
