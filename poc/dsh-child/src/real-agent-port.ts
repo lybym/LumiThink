@@ -188,6 +188,8 @@ interface PendingRequest {
 
 interface WorkerState {
   readonly sessionKey: string
+  /** The fresh DSH-side session identity this worker's agent was created under. */
+  dshSessionId: string
   child: ChildProcess | null
   ready: boolean
   exited: boolean
@@ -259,6 +261,8 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
 
   const workers = new Map<string, WorkerState>()
   const faultListeners: ((info: WorkerFaultInfo) => void)[] = []
+  /** Fresh DSH session identity per worker rebuild (issue #52 recovery: bind confirmed identity only, never replay). */
+  let workerCounter = 0
 
   function fireFault(info: WorkerFaultInfo): void {
     for (const listener of [...faultListeners]) {
@@ -477,6 +481,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
     }
     const state: WorkerState = {
       sessionKey,
+      dshSessionId: sessionKey,
       child: null,
       ready: false,
       exited: false,
@@ -579,7 +584,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
         handleState.cancelRequested = false
         handleState.idleConfirmed = false
         handleState.nextStreamIndex = 0
-        void request(state, 'followup', { sessionId: handleState.sessionKey, text: input.promptText }).then((reply) => {
+        void request(state, 'followup', { sessionId: state.dshSessionId, text: input.promptText }).then((reply) => {
           if (!reply.ok && !handleState.crashed && !handleState.disposed) {
             // The wake itself failed inside the real runtime: worker fault.
             handleState.crashed = true
@@ -588,7 +593,9 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
               code: 'worker_crashed',
               detail: 'request_failed',
               exitCode: state.exitCode,
-              ...(reply.code !== undefined ? { message: reply.code.slice(0, 200) } : {}),
+              ...(reply.code !== undefined || reply.message !== undefined
+                ? { message: `${reply.code ?? ''}:${reply.message ?? ''.slice(0, 120)}`.slice(0, 160) }
+                : {}),
             })
           }
         })
@@ -606,7 +613,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
         }
         handleState.cancelRequested = true
         handleState.idleConfirmed = false
-        void request(state, 'cancel', { sessionId: handleState.sessionKey }).then((reply) => {
+        void request(state, 'cancel', { sessionId: state.dshSessionId }).then((reply) => {
           if (!reply.ok && !handleState.crashed && !handleState.disposed) {
             handleState.crashed = true
             fireFault({ sessionKey: handleState.sessionKey, code: 'worker_crashed', detail: 'control_timeout', exitCode: state.exitCode })
@@ -622,7 +629,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
           handleState.idleConfirmed = true
           return { ok: true, attemptId: null }
         }
-        const reply = await request(state, 'whenIdle', { sessionId: handleState.sessionKey }, whenIdleTimeoutMs)
+        const reply = await request(state, 'whenIdle', { sessionId: state.dshSessionId }, whenIdleTimeoutMs)
         if (reply.ok) {
           // The REAL agent reached quiescence: verified stop. Close the
           // attempt so a late interrupted settlement can never become a
@@ -644,7 +651,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
         handleState.durableListeners.length = 0
         if (state.child !== null && !state.exited) {
           state.disposedByRequest = true
-          await request(state, 'dispose', { sessionId: handleState.sessionKey }, disposeTimeoutMs)
+          await request(state, 'dispose', { sessionId: state.dshSessionId }, disposeTimeoutMs)
           await request(state, 'shutdown', {}, disposeTimeoutMs)
           const child = state.child
           if (child !== null && !state.exited) {
@@ -701,7 +708,14 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       // Register the agent inside the child BEFORE any followup can arrive:
       // the worker processes control requests strictly in order, so a
       // runPrompt issued right after this call still handles after `create`.
-      void request(state, 'create', { sessionId: sessionKey }).then((reply) => {
+      // The DSH-side session identity is FRESH per worker rebuild: a rebuilt
+      // worker must not collide with the persisted identity of the previous
+      // worker's runtime (docs/VOICE_RUNTIME.md §7 — recovery binds the
+      // confirmed logical session only, replays nothing).
+      workerCounter += 1
+      const dshSessionId = `${sessionKey}#w${workerCounter}`
+      state.dshSessionId = dshSessionId
+      void request(state, 'create', { sessionId: dshSessionId }).then((reply) => {
         if (!reply.ok && !state.handle.state.crashed && !state.handle.state.disposed) {
           state.handle.state.crashed = true
           fireFault({
@@ -709,7 +723,8 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
             code: 'worker_crashed',
             detail: 'request_failed',
             exitCode: state.exitCode,
-            ...(reply.code !== undefined ? { message: reply.code.slice(0, 200) } : {}),
+            ...(reply.code !== undefined ? { message: reply.code.slice(0, 100) } : {}),
+            ...(reply.message !== undefined ? { message: `${reply.code ?? ''}:${reply.message.slice(0, 120)}` } : {}),
           })
         }
       })
