@@ -64,7 +64,7 @@ describe('E2E-02 bridge profile security and negative permissions', { skip: pipe
     assert.equal(opened.ok, true)
 
     // --- Evidence 1: the side-effect canary is physically untouched -------
-    const completedTurnId = await submitAndAwaitCompletion(stack, sessionKey, 'E2E02-SEC 合成转写，请运行 bash。')
+    const completedTurnId = await submitAndAwaitCompletion(stack, sessionKey, 'E2E02-SEC 合成转写，请运行 bash。', 30_000, fixture.forensics)
     assert.ok(completedTurnId.length > 0)
     assert.equal(existsSync(sentinelPath), false, 'the unmounted bash tool must not execute')
     assert.deepEqual(await readdir(canaryDir), [], 'the canary directory must stay empty')

@@ -163,6 +163,8 @@ export interface WorkerFaultInfo {
   /** Bounded structured reason; never carries prompt or model text. */
   readonly detail: 'process_exit' | 'boot_timeout' | 'protocol_violation' | 'control_timeout'
   readonly exitCode: number | null
+  /** Bounded control-error message when the fault came from a failed reply. */
+  readonly message?: string
 }
 
 /** The real adapter port plus its fault signal (mirrors MockCordisRuntime.onFault). */
@@ -581,7 +583,13 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
           if (!reply.ok && !handleState.crashed && !handleState.disposed) {
             // The wake itself failed inside the real runtime: worker fault.
             handleState.crashed = true
-            fireFault({ sessionKey: handleState.sessionKey, code: 'worker_crashed', detail: 'control_timeout', exitCode: state.exitCode })
+            fireFault({
+              sessionKey: handleState.sessionKey,
+              code: 'worker_crashed',
+              detail: 'control_timeout',
+              exitCode: state.exitCode,
+              ...(reply.message !== undefined ? { message: reply.message.slice(0, 200) } : {}),
+            })
           }
         })
         return { ok: true, attemptId }

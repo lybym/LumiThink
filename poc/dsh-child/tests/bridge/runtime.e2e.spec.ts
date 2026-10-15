@@ -74,6 +74,9 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
         () =>
           stack.gate.metricsSnapshot().ttsAdmissions > admissionsBefore &&
           stack.orchestrator.describeTurn(sessionKey, turnId)?.state === 'RUNNING',
+        15_000,
+        25,
+        fixture.forensics,
       )
       const state = await waitForTerminalTurn(stack, sessionKey, turnId)
       assert.equal(state, 'COMPLETED', `round ${round} settled ${state}`)
@@ -143,7 +146,7 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
     const submitted = await submitSynthetic(stack, sessionKey, 'E2E02-CANCEL 合成转写，请开始播报。')
     assert.equal(submitted.ok, true)
     const turnId = submitted.ok ? submitted.turnId : ''
-    await waitFor('the first safe-text admission of the streaming turn', () => stack.gate.metricsSnapshot().ttsAdmissions > 0)
+    await waitFor('the first safe-text admission of the streaming turn', () => stack.gate.metricsSnapshot().ttsAdmissions > 0, 15_000, 25, fixture.forensics)
 
     // The effective interruption: fence FIRST (epoch bump), then the real
     // in-process cancel + whenIdle, then CANCELLED settlement.
@@ -207,7 +210,7 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
       })
       assert.equal(opened.ok, true)
       const droppedBefore = stack.service.metricsSnapshot().deltasDroppedNonText
-      await submitAndAwaitCompletion(stack, sessionKey, 'E2E02-THINK 合成转写。')
+      await submitAndAwaitCompletion(stack, sessionKey, 'E2E02-THINK 合成转写。', 30_000, thinkingFixture.forensics)
       const metrics = stack.service.metricsSnapshot()
       assert.ok(
         metrics.deltasDroppedNonText > droppedBefore,
@@ -241,7 +244,7 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
       assert.equal(opened.ok, true)
       const droppedBefore = stack.service.metricsSnapshot().deltasDroppedNonText
       const admittedBefore = stack.gate.metricsSnapshot().ttsAdmissions
-      await submitAndAwaitCompletion(stack, sessionKey, 'E2E02-TOOL 合成转写。')
+      await submitAndAwaitCompletion(stack, sessionKey, 'E2E02-TOOL 合成转写。', 30_000, toolFixture.forensics)
       const metrics = stack.service.metricsSnapshot()
       assert.ok(
         metrics.deltasDroppedNonText > droppedBefore,
@@ -270,7 +273,7 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
     const submitted = await submitSynthetic(stack, sessionKey, 'E2E02-CRASH 合成转写。')
     assert.equal(submitted.ok, true)
     const turnId = submitted.ok ? submitted.turnId : ''
-    await waitFor('the worker to start streaming', () => stack.gate.metricsSnapshot().ttsAdmissions > 0)
+    await waitFor('the worker to start streaming', () => stack.gate.metricsSnapshot().ttsAdmissions > 0, 15_000, 25, fixture.forensics)
     assert.equal(port.hasLiveWorker(sessionKey), true, 'the worker process must be live before the crash')
 
     // Real process kill (SIGKILL) — the crash is physical, not simulated.
@@ -323,7 +326,7 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
     const submitted = await submitSynthetic(stack, sessionKey, 'E2E02-HANG 合成转写。')
     assert.equal(submitted.ok, true)
     const turnId = submitted.ok ? submitted.turnId : ''
-    await waitFor('the first safe-text admission', () => stack.gate.metricsSnapshot().ttsAdmissions > 0)
+    await waitFor('the first safe-text admission', () => stack.gate.metricsSnapshot().ttsAdmissions > 0, 15_000, 25, fixture.forensics)
 
     const startedAt = Date.now()
     const barge = await stack.bargeInCancel({ sessionKey, turnId, reason: 'device_abort' })
@@ -368,7 +371,7 @@ describe('E2E-02 real DSH runtime over the voice bridge stack', { skip: pipedOk 
     })
     assert.equal(opened.ok, true)
     const promptMarker = 'E2E02-AUDIT-MARKER 合成转写。'
-    await submitAndAwaitCompletion(stack, sessionKey, promptMarker)
+    await submitAndAwaitCompletion(stack, sessionKey, promptMarker, 30_000, fixture.forensics)
 
     const allowedKeys = new Set(['seq', 'atMs', 'action', 'sessionKey', 'turnId', 'epoch', 'resultCode', 'count'])
     const audit = stack.service.auditSnapshot()

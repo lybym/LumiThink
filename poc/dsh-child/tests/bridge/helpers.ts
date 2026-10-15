@@ -52,7 +52,11 @@ export interface BridgeFixture {
   readonly sessionKey: string
   /** Observed bridge event frames (assistant.delta carries the transient text). */
   readonly frames: { readonly name: string; readonly payload: Record<string, unknown> }[]
+  /** Worker fault records (structured, bounded) for failure diagnostics. */
+  readonly faults: { readonly sessionKey: string; readonly detail: string; readonly message: string }[]
   readonly childEnv: Record<string, string | undefined>
+  /** Bounded failure forensics: faults + worker stderr tail + last runtime events. */
+  readonly forensics: () => string
   dispose(): Promise<void>
 }
 
@@ -85,6 +89,14 @@ export async function startBridgeFixture(options: BridgeFixtureOptions): Promise
     ...(options.whenIdleTimeoutMs !== undefined ? { whenIdleTimeoutMs: options.whenIdleTimeoutMs } : {}),
   })
   const frames: { name: string; payload: Record<string, unknown> }[] = []
+  const faults: { sessionKey: string; detail: string; message: string }[] = []
+  port.onFault((info) => {
+    faults.push({
+      sessionKey: info.sessionKey,
+      detail: `${info.code}:${info.detail}:exit=${String(info.exitCode)}`,
+      message: info.message ?? '',
+    })
+  })
   const transport = options.transport ?? (SOCKETS_AVAILABLE ? 'ipc' : 'in_process')
   const stack = createVoiceBridgeStack({
     scriptFor: () => [],
@@ -106,7 +118,17 @@ export async function startBridgeFixture(options: BridgeFixtureOptions): Promise
     dshHome,
     sessionKey,
     frames,
+    faults,
     childEnv: buildChildEnv({ dshHome, mockBaseUrl }),
+    forensics() {
+      const lastEvents = frames.slice(-6).map((frame) => `${frame.name}:${JSON.stringify(frame.payload).slice(0, 120)}`)
+      return [
+        `faults=${JSON.stringify(faults)}`,
+        `stderrTail=${JSON.stringify(port.stderrTailSnapshot(sessionKey).slice(-700))}`,
+        `mockRequests=${mock.requestRecords.length}`,
+        `lastEvents=${JSON.stringify(lastEvents)}`,
+      ].join(' | ')
+    },
     async dispose() {
       await stack.stop().catch(() => undefined)
       await port.disposeAll().catch(() => undefined)
@@ -135,17 +157,15 @@ export async function waitFor(
   predicate: () => boolean,
   timeoutMs = 15_000,
   stepMs = 25,
+  forensics?: () => string,
 ): Promise<void> {
   const startedAt = Date.now()
   for (;;) {
     if (predicate()) return
     if (Date.now() - startedAt > timeoutMs) {
-      assert.fail(`timed out after ${timeoutMs}ms waiting for ${describe}`)
+      assert.fail(`timed out after ${timeoutMs}ms waiting for ${describe} ${forensics?.() ?? ''}`)
     }
-    await new Promise((resolve) => {
-      const timer = setTimeout(resolve, stepMs)
-      timer.unref?.()
-    })
+    await sleep(stepMs)
   }
 }
 
@@ -155,18 +175,29 @@ export async function waitForTerminalTurn(
   sessionKey: string,
   turnId: string,
   timeoutMs = 30_000,
+  forensics?: () => string,
 ): Promise<string> {
+  const startedAt = Date.now()
   let observed = 'unknown'
-  await waitFor(
-    `turn ${turnId} to reach a terminal state (last: ${observed})`,
-    () => {
-      const turn = stack.orchestrator.describeTurn(sessionKey, turnId)
-      observed = turn?.state ?? 'unknown'
-      return ['COMPLETED', 'CANCELLED', 'FAILED', 'TIMED_OUT'].includes(observed)
-    },
-    timeoutMs,
-  )
-  return observed
+  for (;;) {
+    const turn = stack.orchestrator.describeTurn(sessionKey, turnId)
+    observed = turn?.state ?? 'unknown'
+    if (['COMPLETED', 'CANCELLED', 'FAILED', 'TIMED_OUT'].includes(observed)) return observed
+    if (Date.now() - startedAt > timeoutMs) {
+      assert.fail(
+        `timed out after ${timeoutMs}ms waiting for turn ${turnId} to reach a terminal state (last: ${observed}) ${forensics?.() ?? ''}`,
+      )
+    }
+    await sleep(25)
+  }
+}
+
+/** A poll step that never holds the event loop. */
+async function sleep(stepMs: number): Promise<void> {
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, stepMs)
+    timer.unref?.()
+  })
 }
 
 /**
@@ -200,6 +231,7 @@ export async function submitAndAwaitCompletion(
   sessionKey: string,
   text: string,
   timeoutMs = 30_000,
+  forensics?: () => string,
 ): Promise<string> {
   const digest = createHash('sha256').update(text, 'utf8').digest('hex')
   const submitted = await stack.submitPrompt({
@@ -208,10 +240,10 @@ export async function submitAndAwaitCompletion(
     fingerprint: digest,
     transientText: text,
   })
-  assert.equal(submitted.ok, true, `submitPrompt refused: ${JSON.stringify(submitted)}`)
+  assert.equal(submitted.ok, true, `submitPrompt refused: ${JSON.stringify(submitted)} ${forensics?.() ?? ''}`)
   if (!submitted.ok) throw new Error('unreachable')
-  const state = await waitForTerminalTurn(stack, sessionKey, submitted.turnId, timeoutMs)
-  assert.equal(state, 'COMPLETED', `turn ${submitted.turnId} settled ${state}, expected COMPLETED`)
+  const state = await waitForTerminalTurn(stack, sessionKey, submitted.turnId, timeoutMs, forensics)
+  assert.equal(state, 'COMPLETED', `turn ${submitted.turnId} settled ${state}, expected COMPLETED ${forensics?.() ?? ''}`)
   return submitted.turnId
 }
 

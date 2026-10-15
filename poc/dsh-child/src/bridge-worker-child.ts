@@ -138,6 +138,16 @@ export type WorkerEvent =
 const IDLE_HANG_INJECTION = process.env.DSH_BRIDGE_INJECT_IDLE_HANG === '1'
 const BRIDGE_PROFILE = 'lumi-dsh-runtime-bridge'
 
+// Bounded crash diagnostics: anything escaping the request handlers lands on
+// stderr (captured by the parent adapter's bounded tail), never on the
+// control-protocol stdout.
+process.on('uncaughtException', (error) => {
+  process.stderr.write(`[child-uncaught] ${String(error?.stack ?? error).slice(0, 400)}\n`)
+})
+process.on('unhandledRejection', (reason) => {
+  process.stderr.write(`[child-unhandled] ${String(reason).slice(0, 400)}\n`)
+})
+
 function emit(event: WorkerEvent): void {
   process.stdout.write(`${JSON.stringify(event)}\n`)
 }
