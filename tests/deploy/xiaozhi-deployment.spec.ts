@@ -67,7 +67,7 @@ test("gateway-minimal requirements are fully pinned and keep the upstream-critic
   assert.ok(pinned.has("jinja2"), "jinja2 pin missing (prompt manager top-level import)");
   assert.ok(pinned.has("cryptography"), "cryptography pin missing (auth util top-level import)");
   // The heavy model stack must NOT leak into the gateway-minimal profile.
-  for (const forbidden of ["torch", "torchaudio", "funasr", "modelscope", "sherpa_onnx", "mem0ai"]) {
+  for (const forbidden of ["torch", "torchaudio", "funasr", "modelscope", "sherpa_onnx", "mem0ai", "powermem"]) {
     assert.ok(!pinned.has(forbidden), `${forbidden} must stay out of gateway-minimal`);
   }
   // Traceability: the file must name the upstream commit its pins were copied from.

@@ -8,9 +8,12 @@
 #
 # 为什么是子集：gateway-minimal 档位（deploy/xiaozhi/config/gateway-minimal.yaml）
 # 只启用 SileroVAD + 纯协议面（hello/OTA/auth/abort），ASR/LLM/TTS/Intent/Memory
-# 显式缺省 = 明确禁用（不接任何外部服务）；上游对这些模块是懒加载（选中才
-# import），因此 torch/funasr/sherpa_onnx/mem0ai 等。连接入口对二进制音频
+# 显式缺省 = 明确禁用（不接任何外部服务）。排除项 = 上游的重量级模型栈：
+# torch/torchaudio/funasr（fun_local ASR）、modelscope、sherpa_onnx（本地 ASR
+# 模型推理）、mem0ai/powermem（云端/向量记忆）——上游对这些 Provider 是懒加载
+# （selected_module 选中才 import），本档位不选中。连接入口对二进制音频
 # fail-closed 丢弃（core/connection.py: vad/asr 为 None 直接 return）。
+# 若 CI 冒烟再报模块缺失，对照上游 requirements.txt 补对应轻量 pin。
 
 # --------- 上游 pin（与上游 requirements.txt 逐字一致）------------------------
 # cozepy0.20.0 要求 websockets<15.0.0，上游注释：暂时不推荐升级
@@ -40,6 +43,16 @@ ruamel.yaml==0.18.16
 # portalocker：上游注释"暂留 3.x：4.x 与 qdrant-client<1.20 的 portalocker<4.0
 # 约束冲突 (PR #3360)"
 portalocker==3.2.0
+# --- 以下同为上游 pin；本档位虽不选中对应 Provider/插件，但上游在启动可达的
+# --- 导入链中存在对它们的无条件顶层 import（CI 冒烟 traceback 实证 openai），
+# --- 因此必须随进程安装。排除的只有重量级模型栈（文件末尾注释）。
+openai==2.8.1
+edge_tts==7.2.8
+dashscope==1.25.2
+baidu-aip==4.16.13
+vosk==0.3.45
+ormsgpack==1.12.0
+google-generativeai==0.8.5
 
 # --------- 部署补齐（上游经传递依赖获得，gateway-minimal 档位需显式声明）------
 # Jinja2：core/utils/prompt_manager.py 顶层 import（连接链路启动即加载）。
