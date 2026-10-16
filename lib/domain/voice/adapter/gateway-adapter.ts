@@ -44,6 +44,15 @@
  *   snapshot (docs/VOICE_RUNTIME.md §16; the pinned server's wire carries
  *   transcript text only — provider confidence is structurally not exposed
  *   and is recorded as such, never synthesized).
+ * - Content-independent TTS metrics (E2E-06, issue #56): turns played,
+ *   sentences/frames delivered, first-audio latency (accepted final → first
+ *   frame batch of that turn), inter-sentence gaps, stop-effective latency
+ *   (abort arrival → device stop directive) and stale-audio suppression are
+ *   recorded content-free for the evidence snapshot, alongside the
+ *   hello-negotiated downlink sample rate per device. No audio bytes exist
+ *   on this contract surface (frame counts + hex digests only); the real
+ *   vendor TTS runs inside the pinned xiaozhi server (deploy tier
+ *   gateway-tts-real, lib/server/real-tts-composition.ts activation record).
  * - client_abort (wire `abort`): the ONLY device signal that fences. Order
  *   is fence-first (VOICE_RUNTIME §4): the core barge-in atomically bumps
  *   the trusted epoch, then the Adapter issues the device playback-stop
@@ -169,6 +178,24 @@ export interface GatewayMetricsSnapshot {
    * Candidate baseline (virtual-clock measurable), never an SLA claim.
    */
   readonly asrFinalAcceptMs: { readonly count: number; readonly maxMs: number };
+  /** E2E-06: turns whose TTS reached the device sink (first frame batch sent). */
+  readonly ttsTurnsPlayed: number;
+  /** E2E-06: TTS sentence items delivered to the device sink (frame batches). */
+  readonly ttsSentencesSent: number;
+  /** E2E-06: raw frame count delivered (synthetic framing; no audio bytes exist). */
+  readonly ttsFramesSent: number;
+  /**
+   * E2E-06: stale TTS queue items suppressed after cancel/fence (fenced
+   * batches + dropped-stale queue items) — the "取消后残余音频" counter; the
+   * old-epoch audio DELIVERED count is structurally 0 (drainTts + re-fence).
+   */
+  readonly ttsStaleAudioSuppressed: number;
+  /** E2E-06: accepted final → first frame batch of that turn (ms; candidate). */
+  readonly ttsFirstAudioMs: { readonly count: number; readonly maxMs: number };
+  /** E2E-06: gap between consecutive frame batches in one turn (ms; candidate). */
+  readonly ttsInterSentenceGapMs: { readonly count: number; readonly maxMs: number };
+  /** E2E-06: abort arrival → device stop directive issued (ms; candidate). */
+  readonly ttsStopEffectiveMs: { readonly count: number; readonly maxMs: number };
 }
 
 export interface GatewayAuditEntry {
@@ -205,13 +232,15 @@ export interface GatewayMappingSnapshotEntry {
   readonly connected: boolean;
   readonly playbackTurnId: string | null;
   readonly playbackEpoch: number | null;
+  /** E2E-06: sample rate negotiated at hello (content-free; 16/24 kHz). */
+  readonly downlinkSampleRate: number | null;
 }
 
 // ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
 
-export const GATEWAY_ADAPTER_VERSION = "1.2" as const;
+export const GATEWAY_ADAPTER_VERSION = "1.3" as const;
 
 /** Synthetic frames per admitted TTS sentence (POC stand-in for Opus framing). */
 export const GATEWAY_FRAMES_PER_SENTENCE_DEFAULT = 4;
@@ -282,6 +311,21 @@ interface DeviceState {
    * is the injected keyed digest, 64 hex.
    */
   lastAcceptedFinal: { readonly fingerprint: string; readonly atMs: number } | null;
+  /**
+   * E2E-06: sample rate negotiated at hello (content-free number). The
+   * pinned server may negotiate the downlink to 24 kHz (docs §1); the
+   * pinned TTS provider request carries `sample_rate: conn.sample_rate` —
+   * the negotiated value, never a provider-side override.
+   */
+  downlinkSampleRate: number | null;
+  /**
+   * E2E-06: the last ACCEPTED final's turn + accept-completion time — the
+   * anchor for the first-audio latency measure. Cleared once measured for
+   * its turn (or overwritten by the next accepted final).
+   */
+  lastAcceptedTurn: { readonly turnId: string; readonly acceptedAtMs: number } | null;
+  /** E2E-06: clock time of the last frames batch sent within the current playback turn. */
+  lastFramesAtMs: number | null;
 }
 
 function failAdapterInput(path: string, message: string): never {
@@ -375,6 +419,13 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
     asrEndpointWindows: 0,
     asrDuplicateFinalsSuppressed: 0,
     asrFinalAcceptMs: { count: 0, maxMs: 0 },
+    ttsTurnsPlayed: 0,
+    ttsSentencesSent: 0,
+    ttsFramesSent: 0,
+    ttsStaleAudioSuppressed: 0,
+    ttsFirstAudioMs: { count: 0, maxMs: 0 },
+    ttsInterSentenceGapMs: { count: 0, maxMs: 0 },
+    ttsStopEffectiveMs: { count: 0, maxMs: 0 },
   };
 
   function pushAudit(entry: Omit<GatewayAuditEntry, "seq" | "atMs">): void {
@@ -525,6 +576,9 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
             stopsIssued: new Set<string>(),
             turnCounter: 0,
             lastAcceptedFinal: null,
+            downlinkSampleRate: event.audioParams?.sampleRate ?? null,
+            lastAcceptedTurn: null,
+            lastFramesAtMs: null,
           };
           devices.set(deviceId, state);
         } else {
@@ -532,6 +586,9 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
           // bridge worker may need recovery, which session.open handles.
           state.connectionId = connectionId;
           state.xiaozhiSessionId = null;
+          // E2E-06: the hello renegotiates the audio shape every connection —
+          // record the (content-free) sample rate for the evidence snapshot.
+          state.downlinkSampleRate = event.audioParams?.sampleRate ?? null;
           // E2E-05: the duplicate-dedup memory is PER DEVICE and survives a
           // reconnect: a final the server re-delivers right after a
           // drop/restart (same keyed fingerprint, inside the bounded window)
@@ -562,6 +619,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
           state.xiaozhiSessionId = null;
           if (state.playback !== null) {
             state.playback = null;
+            state.lastFramesAtMs = null;
             metrics.suspensions += 1;
             pushAudit({
               action: "gateway.playback_suspended",
@@ -588,6 +646,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
             state.xiaozhiSessionId = null;
             if (state.playback !== null) {
               state.playback = null;
+              state.lastFramesAtMs = null;
               metrics.suspensions += 1;
               pushAudit({
                 action: "gateway.playback_suspended",
@@ -739,6 +798,8 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
           // Seed the dedup memory only on ACCEPTED submissions: a rejected
           // submit (e.g. scheduler refusal) must stay retryable.
           state.lastAcceptedFinal = { fingerprint, atMs: nowMs };
+          // E2E-06: anchor the first-audio latency measure for this turn.
+          state.lastAcceptedTurn = { turnId: submitted.turnId, acceptedAtMs: clock() };
           metrics.asrFinalsAccepted += 1;
           metrics.eventsAccepted += 1;
           pushAudit({
@@ -769,6 +830,10 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
             // Accepted but a no-op: no epoch bump, no stop (连续抢话 safety).
             return { ok: true, kind: event.kind, sessionKey: state.sessionKey };
           }
+          // E2E-06: the stop-effective latency anchor — abort event arrival
+          // → device stop directive issued (includes the fence time; the
+          // honest device-edge measure, candidate baseline only).
+          const abortArrivalMs = clock();
           const fenced = await core.bargeIn({
             sessionKey: state.sessionKey,
             turnId: playback.turnId,
@@ -800,6 +865,11 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
                     described.state === "COMPLETED" ? "completed" : described.state === "CANCELLED" ? "interrupted" : "failed";
                   issuePlaybackStop(state, playback.turnId, reason, playback.epoch);
                   state.playback = null;
+                  state.lastFramesAtMs = null;
+                  metrics.ttsStopEffectiveMs = {
+                    count: metrics.ttsStopEffectiveMs.count + 1,
+                    maxMs: Math.max(metrics.ttsStopEffectiveMs.maxMs, Math.max(0, clock() - abortArrivalMs)),
+                  };
                 }
               }
               metrics.abortsWithoutPlayback += 1;
@@ -810,9 +880,14 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
           }
           metrics.abortsFenced += 1;
           issuePlaybackStop(state, playback.turnId, "interrupted", playback.epoch);
+          metrics.ttsStopEffectiveMs = {
+            count: metrics.ttsStopEffectiveMs.count + 1,
+            maxMs: Math.max(metrics.ttsStopEffectiveMs.maxMs, Math.max(0, clock() - abortArrivalMs)),
+          };
           const cleared = core.drainTts(state.sessionKey);
           if (cleared.ok && cleared.droppedStale > 0) {
             metrics.queueClears += 1;
+            metrics.ttsStaleAudioSuppressed += cleared.droppedStale;
             pushAudit({
               action: "gateway.queue_cleared",
               sessionKey: state.sessionKey,
@@ -829,6 +904,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
             });
           }
           state.playback = null;
+          state.lastFramesAtMs = null;
           metrics.eventsAccepted += 1;
           return { ok: true, kind: event.kind, sessionKey: state.sessionKey };
         }
@@ -861,6 +937,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
         if (!fenced.ok) {
           staleRejected += 1;
           metrics.staleFramesRejected += 1;
+          metrics.ttsStaleAudioSuppressed += 1;
           pushAudit({
             action: "gateway.frames_fenced",
             sessionKey,
@@ -873,6 +950,33 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
         }
         sent += 1;
         metrics.framesSent += framesPerSentence;
+        metrics.ttsSentencesSent += 1;
+        metrics.ttsFramesSent += framesPerSentence;
+        // E2E-06 content-free TTS metrics (candidate baselines; virtual-clock
+        // measurable): first-audio latency per turn and inter-sentence gaps.
+        const nowMs = clock();
+        const continuingTurn = state.playback !== null && state.playback.turnId === item.turnId;
+        if (continuingTurn) {
+          if (state.lastFramesAtMs !== null) {
+            const gapMs = Math.max(0, nowMs - state.lastFramesAtMs);
+            metrics.ttsInterSentenceGapMs = {
+              count: metrics.ttsInterSentenceGapMs.count + 1,
+              maxMs: Math.max(metrics.ttsInterSentenceGapMs.maxMs, gapMs),
+            };
+          }
+        } else {
+          metrics.ttsTurnsPlayed += 1;
+          const accepted = state.lastAcceptedTurn;
+          if (accepted !== null && accepted.turnId === item.turnId) {
+            const firstMs = Math.max(0, nowMs - accepted.acceptedAtMs);
+            metrics.ttsFirstAudioMs = {
+              count: metrics.ttsFirstAudioMs.count + 1,
+              maxMs: Math.max(metrics.ttsFirstAudioMs.maxMs, firstMs),
+            };
+            state.lastAcceptedTurn = null;
+          }
+        }
+        state.lastFramesAtMs = nowMs;
         const audioDigest = gatewayContentDigest(item.itemId);
         pushAudit({
           action: "gateway.frames_sent",
@@ -897,6 +1001,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
       }
       if (drained.droppedStale > 0) {
         metrics.queueClears += 1;
+        metrics.ttsStaleAudioSuppressed += drained.droppedStale;
         pushAudit({
           action: "gateway.queue_cleared",
           sessionKey,
@@ -920,6 +1025,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
         finalState === "COMPLETED" ? "completed" : finalState === "CANCELLED" ? "interrupted" : "failed";
       issuePlaybackStop(state, turnId, reason, epoch);
       state.playback = null;
+      state.lastFramesAtMs = null;
     },
 
     noteWorkerFault(sessionKey) {
@@ -930,6 +1036,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
       const playback = state.playback;
       issuePlaybackStop(state, playback.turnId, "failed", playback.epoch);
       state.playback = null;
+      state.lastFramesAtMs = null;
     },
 
     sweep(sessionKey) {
@@ -970,6 +1077,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
           connected: state.connectionId !== null && binding.hasOpenConnection(state.deviceId),
           playbackTurnId: state.playback?.turnId ?? null,
           playbackEpoch: state.playback?.epoch ?? null,
+          downlinkSampleRate: state.downlinkSampleRate,
         });
       }
       return Object.freeze(entries);
