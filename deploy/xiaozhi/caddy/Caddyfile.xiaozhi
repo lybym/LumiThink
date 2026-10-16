@@ -1,0 +1,49 @@
+# E2E-04 (issue #54) — 小智私有服务端公网入口（独立站点块，不改 R1-08 主 Caddyfile）
+#
+# 与 deploy/caddy/Caddyfile（R1-08，issue #20）并存：两个域名、
+# 两份站点配置，同一台 Caddy 持有 80/443。本文件只声明小智服务端的站点块，
+# 由运维合并进 /etc/caddy/Caddyfile（runbook §2 步骤 6）——不动
+# deploy/caddy/Caddyfile 原文件（release manifest 锁定其 SHA-256）。
+#
+# 端口面（全部回环，公网只有 443/80）：
+#   127.0.0.1:8000  设备 WebSocket（v2.5.2 线协议，Opus 流式帧）
+#   127.0.0.1:8003  OTA HTTP（固件检查 / websocket+token 下发 / 固件下载）
+#
+# 诚实披露：本文件在 CI 中只做语法与结构断言（templates gate）；
+# 真实域名 ACME/HSTS/WSS 握手属运维验证项（runbook §9）。
+#
+# Replace xiaozhi.example.com with the operator's real domain.
+
+xiaozhi.example.com {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	# 设备 WebSocket：流式 Opus 帧，禁止缓冲。
+	@devicews path /xiaozhi/v1/*
+	reverse_proxy @devicews 127.0.0.1:8000 {
+		flush_interval -1
+	}
+
+	# OTA 面：设备引导（固件版本检查 + websocket/token 下发）与固件下载。
+	# POST /xiaozhi/ota/ 是设备激活配置的入口（v2.5.2 ota.cc 契约）。
+	@ota path /xiaozhi/ota/*
+	reverse_proxy @ota 127.0.0.1:8003
+
+	# fail-closed：/mcp/vision/explain 不代理 —— gateway-minimal 档位未配置
+	# VLLM，公网不存在该路由；启用视觉分析 = 档位变更 + 评审后显式加路径。
+
+	log {
+		output file /var/log/caddy/xiaozhi-access.log {
+			roll_size 10MiB
+			roll_keep 10
+		}
+		# JSON 访问日志包含 query string；OTA POST 无敏感 query（设备凭据走
+		# device-id/client-id 头与 HMAC token 响应体），儿童内容不经过小智服务端。
+		format json
+	}
+}

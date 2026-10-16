@@ -12,6 +12,7 @@
 | 上行音频 | Opus，16 kHz，单声道，60 ms 帧（firmware hello `audio_params`） | 同上协议文档 §1/§8 |
 | 下行音频 | Opus，**由服务端 hello 协商**（文档注明服务端可用 24 kHz）——适配层不写死采样率 | 同上协议文档 §8.3 |
 | 代码内钉死 | `XIAOZHI_GATEWAY_BASELINE`（`lib/domain/voice/adapter/protocol.ts`），schema 测试断言版本/提交不可漂移 | `tests/domain/voice/adapter/protocol.spec.ts` |
+| 私有部署钉死（E2E-04，issue #54） | 服务端部署钉死单一事实源 `deploy/xiaozhi/version.env`（与 `XIAOZHI_GATEWAY_BASELINE` 一致性由 `tests/deploy/xiaozhi-deployment.spec.ts` 强制）；部署 runbook 见 [deploy/xiaozhi/runbook.md](../deploy/xiaozhi/runbook.md) | [Issue #54](https://github.com/lybym/LumiThink/issues/54) |
 
 **术语澄清（来源间差异，如实记录）**：Issue 与 [VOICE_RUNTIME §4](./VOICE_RUNTIME.md) 所称 `client_abort` 在 v2.5.2 **线协议中的报文名是 `{"type":"abort","reason":…}`**；`client_abort` 是自建服务端处理 abort 报文时置位的**内部状态标志**（`abortHandle.py`：`conn.client_abort = True` → `clear_queues()` → 下发 `{"type":"tts","state":"stop"}`）。本合同以线名 `abort` 为入站事件、以 `client_abort` 语义命名打断行为。
 
@@ -159,7 +160,7 @@ node --experimental-strip-types --test-isolation=none --test \
 
 **Linux 自建服务端 / ASR / TTS / OTA（R5 前置）**
 
-- [ ] 单模块服务端部署与版本钉死（评估基线 `27399a2`，升级需重跑本矩阵）。
+- [x] 单模块服务端部署与版本钉死（评估基线 `27399a2`，升级需重跑本矩阵）——**E2E-04（issue #54）已交付部署面**：钉死 checkout、gateway-minimal 档位（VAD 仅本地、ASR/LLM/TTS 显式缺省）、healthcheck + 模拟设备 hello/abort 探针、鉴权/重启/损坏配置负例与干净环境 CI 冒烟（`deploy/xiaozhi/`、`e2e-04-xiaozhi-deployment-gate.yml`）。**口径：私有服务端已验证，真实设备仍待 #E2E-08**；本行不标注供应商接入与实机 OTA 完成。
 - [ ] 第三方 ASR/TTS/LLM 供应商安全与保留评估、告知同意流程（[VOICE_HARDWARE §3](./VOICE_HARDWARE.md)）。
 - [ ] 私有 OTA 激活/升级/回滚演练；断网-重连-重激活全链路。
 - [ ] 真实无线环境下断线重连、重复连接、session_id 轮换行为复核（对照 §5 合成结论）。

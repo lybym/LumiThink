@@ -1,0 +1,82 @@
+# E2E-04 (issue #54) — 小智私有服务端 gateway-minimal 档位配置模板
+#
+# 渲染目标：<server-dir>/main/xiaozhi-server/data/.config.yaml（上游的覆盖层，
+# 只覆盖 deploy 需要的键；其余值来自上游仓库内 config.yaml 原文件）。
+# 由 deploy/xiaozhi/render_config.py 从本模板 + 受控 env 文件渲染：
+#   - 所有 ${VAR} 必须由 env 注入，缺失/占位值 → fail-closed 拒绝渲染；
+#   - Secret 值永不回显、不进 Git/日志/CI（渲染产物 0600）。
+#
+# 档位语义（明确的"禁用"而非"静默接外部服务"）：
+#   - selected_module 只含 VAD：ASR/LLM/TTS/VLLM/Intent/Memory 全部缺省；
+#   - 设备二进制音频在连接入口被丢弃（上游 core/connection.py 对
+#     vad/asr 为 None 的连接直接 return），不转发、不外发、不落盘；
+#   - 文本面仅 hello / abort / ping 等协议报文可响应（CI 冒烟断言）；
+#   - 启用真实 ASR/TTS/LLM = 更换档位 = 供应商安全与保留评审
+#     （docs/VOICE_HARDWARE.md §3）+ 兼容矩阵重跑后的显式配置变更。
+
+server:
+  # 仅回环监听；公网暴露只经 Caddy（deploy/xiaozhi/caddy/Caddyfile.xiaozhi）。
+  # 负例由 healthcheck.sh 的 ss -ltn 断言强制。
+  ip: 127.0.0.1
+  port: 8000
+  # OTA/固件下载 HTTP 口（同样仅回环，经 Caddy /xiaozhi/ota/* 暴露）。
+  http_port: 8003
+  # 设备拿到的 WebSocket 地址：经 Caddy 的 WSS 公网面（单机回环冒烟时
+  # 由 env 注入 ws://127.0.0.1:8000/xiaozhi/v1/）。
+  websocket: ${XIAOZHI_DEVICE_WS_URL}
+  # 视觉分析接口地址：gateway-minimal 档位未配置 VLLM，该路径不由 Caddy
+  # 代理（fail-closed 无路由）；此处仅为满足上游配置形状。
+  vision_explain: http://${XIAOZHI_PUBLIC_DOMAIN}:8003/mcp/vision/explain
+  timezone_offset: +8
+  auth:
+    # 强制开启：设备必须持 HMAC-SHA256 token（server.auth_key 签名）连接，
+    # 无 token 白名单旁路（allowed_devices 为空 = 最小权限）。
+    enabled: true
+    allowed_devices: []
+    # token 有效期 7 天；设备重新 POST /xiaozhi/ota/ 换取新 token。
+    expire_seconds: 604800
+  # JWT/OTA/websocket 认证共用密钥（受控 env 注入，绝不写死）。
+  auth_key: ${XIAOZHI_AUTH_KEY}
+
+# 单模块模式（无 manager-api/智控台）：设备差异化配置不走远端 API。
+read_config_from_api: false
+
+log:
+  log_level: INFO
+  log_dir: tmp
+  log_file: server.log
+  data_dir: data
+
+delete_audio: true
+# 无语音输入 120s 断开（上游默认；设备侧重连按协议处理）。
+close_connection_no_voice_time: 120
+# gateway-minimal 档位关闭问候语/唤醒词缓存（二者依赖 TTS 生成音频）。
+enable_wakeup_words_response_cache: false
+enable_greeting: false
+enable_stop_tts_notify: false
+# 关闭 WS 心跳保活（与 v2.5.2 设备默认行为一致，避免多余协议面）。
+enable_websocket_ping: false
+
+xiaozhi:
+  type: hello
+  version: 1
+  transport: websocket
+  audio_params:
+    format: opus
+    # 下行采样率：与 VOICE_GATEWAY_PROTOCOL.md §1 一致（服务端可协商至 24k）。
+    sample_rate: 24000
+    channels: 1
+    frame_duration: 60
+
+# 唯一启用模块：SileroVAD（纯本地：模型随上游仓库内
+# models/snakers4_silero-vad 提供，onnxruntime CPU 推理，零外发）。
+selected_module:
+  VAD: SileroVAD
+
+VAD:
+  SileroVAD:
+    type: silero
+    threshold: 0.5
+    threshold_low: 0.3
+    model_dir: models/snakers4_silero-vad
+    min_silence_duration_ms: 200

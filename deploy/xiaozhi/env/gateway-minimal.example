@@ -1,0 +1,17 @@
+# E2E-04 (issue #54) — gateway-minimal 档位受控 env 模板（shapes only，零真实值）
+#
+# 安装到 /etc/xiaozhi/xiaozhi.env（root:root 0600）后由
+# deploy/xiaozhi/render_config.py 消费；Secret 不入 Git、不入普通日志。
+# CI 冒烟在 runner 上现场生成等价文件（openssl rand），同样不提交。
+
+# --- 必填 Secret ---------------------------------------------------------------
+# HMAC 认证密钥（32 字节 hex）。轮换：改值 → 重渲染 data/.config.yaml → 重启。
+# 生成：openssl rand -hex 32
+# XIAOZHI_AUTH_KEY=<generate: openssl rand -hex 32>
+
+# --- 设备可见地址 --------------------------------------------------------------
+# 设备从 OTA 拿到的 WebSocket 地址（经 Caddy 的 WSS 公网面）。
+# 单机回环冒烟（CI）注入 ws://127.0.0.1:8000/xiaozhi/v1/。
+# XIAOZHI_DEVICE_WS_URL=wss://xiaozhi.example.com/xiaozhi/v1/
+# 用于拼接 vision_explain 形状值（gateway-minimal 档位不代理该路径）。
+# XIAOZHI_PUBLIC_DOMAIN=xiaozhi.example.com
