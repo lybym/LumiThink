@@ -43,6 +43,8 @@
 
 私有部署不表示所有数据留在本机：向云端 ASR/TTS/LLM 请求前必须做告知、同意、供应商安全与数据保留评估。对音频默认不落盘，日志最小化。
 
+**首个真实流式 ASR 供应商已随 E2E-05（issue #55）交付配置/评审门禁面**（[ADR-0009](./adr/0009-real-asr-provider-transient-channel.md)、runbook §3.5）：`gateway-asr-real` 档位在钉死 commit 的 `selected_module.ASR` 扩展点接入阿里云百炼 Paraformer 实时（duplex WebSocket，评审锚点端点逐字校验；上行 Opus 16 kHz → PCM 16 kHz）；转写不落盘三闸（`delete_audio: true` / 上报队列结构性关闭 / `log_level: WARNING` 抑制转写日志）与"服务端可禁用 ASR 外发"（重渲染 gateway-minimal 档位）由模板/CI 强制。**口径：配置面与合成证据已验证；供应商告知同意流程、真实数据评审与实机行为未完成，儿童数据外发保持 `not_performed` 常量闸门。**
+
 ## 4. 必须完成的实机验收
 
 | 类别 | 检查点 |
