@@ -191,7 +191,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          source xiaozhi-smoke.env
+          # set -a: healthcheck.sh is a CHILD process — the sourced smoke env
+          # must be EXPORTED or XIAOZHI_AUTH_KEY never reaches it.
+          set -a; source xiaozhi-smoke.env; set +a
           XIAOZHI_PYTHON="$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" \
             bash deploy/xiaozhi/healthcheck.sh
 
