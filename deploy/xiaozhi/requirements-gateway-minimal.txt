@@ -42,6 +42,11 @@ ruamel.yaml==0.18.16
 portalocker==3.2.0
 
 # --------- 部署补齐（上游经传递依赖获得，gateway-minimal 档位需显式声明）------
+# Jinja2：core/utils/prompt_manager.py 顶层 import（连接链路启动即加载）。
+Jinja2==3.1.6
+# cryptography：core/utils/auth.py（vision_handler → auth 顶层 import）使用
+# hazmat 对称加密；上游由 cozepy 传递引入，此处显式 pin 防传递漂移。
+cryptography==44.0.1
 # SileroVAD 直接 import onnxruntime 加载仓库内模型
 # models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx；
 # 上游的 onnxruntime 由 funasr 传递引入，本档位不装 funasr，故显式 pin。
