@@ -128,6 +128,44 @@ sudo XIAOZHI_AUTH_KEY="$(sudo grep -oP '(?<=^XIAOZHI_AUTH_KEY=).*' /etc/xiaozhi/
 
 **诚实边界**：私有服务端配置面已验证（CI 渲染/合并后扫描），**真实供应商转写质量、实机打断/重连行为未实机验证**；供应商置信度不在钉死 commit 的设备线协议上暴露（`stt` 只带文本），证据记录如实标注 `confidence.onWire=false`，不合成数值。
 
+## 3.6 gateway-tts-real 档位：真实 TTS 供应商（E2E-06，issue #56）
+
+> 启用本档位 = 在小智已钉版本（§1，`27399a2f…`）的 Provider 扩展点（`selected_module.TTS`）接入**一个评审过的真实 TTS 供应商**。本节与 [docs/adr/0010-real-tts-provider-dual-stream.md](../../docs/adr/0010-real-tts-provider-dual-stream.md)、[VOICE_HARDWARE §3](../../docs/VOICE_HARDWARE.md) 共同构成启用前提；**未完成评审 = 保持 gateway-minimal 档位**（fail-closed：模板/env 缺任何一项渲染即拒绝）。
+
+**首供应商（唯一评审路径）**：`TTS: AliBLStreamTTS`（`type: alibl_stream`，阿里云百炼 CosyVoice 双流 TTS，上游标注 `InterfaceType.DUAL_STREAM`；与 §3.5 的真实 ASR 同供应商族——安全/保留/外发评审、dashscope 锚点与 API-Key 生命周期同源）。模板刻意省略 `ws_url`：钉死 commit 的 `core/utils/alibl_endpoint.py` 默认 `wss://dashscope.aliyuncs.com/api-ws/v1/inference/`（尾斜杠为钉死默认值原样；`resolve_ws_url` fail-closed 只接受阿里云官方 WSS 推理端点）——**该端点是外发评审锚点，任何模板覆盖 `ws_url` = 重跑评审**（CI/测试断言模板无覆盖）。供应商事实逐字核验 @ pinned commit：`model: cosyvoice-v2`、`voice: longxiaochun_v2`、`format: pcm`、`api_key` 缺失即 raise（fail-loud）、请求携带 `sample_rate: conn.sample_rate`（下行协商值，永不供应商侧改写）。合成、Opus 编码与流式下发全部由钉死服务端完成；LumiThink 协议面不变（帧数+摘要，无音频字节）。**ASR/LLM 保持回环占位：TTS 评审不隐含 ASR/LLM 评审**（真实 ASR 用 §3.5 档位；组合档位留待后续 Issue 显式评审）。
+
+| 政策面 | 值 | 载体（模板强制，CI/测试断言） |
+| --- | --- | --- |
+| 鉴权 | API Key 渲染期注入 `${XIAOZHI_TTS_API_KEY}`；systemd 单元不注入进程环境 | `env/gateway-tts-real.example`（0600）+ `render_config.py` fail-closed |
+| 数据外发 | 仅 TTS 合成请求/音频流 → dashscope（评审锚点端点）；ASR/LLM/VLLM 零外发不变 | 模板活跃面扫描 + 合并后有效配置扫描 |
+| 保留（本机） | `delete_audio: true` + 双流路径：上游 TTS base 不写任何 tmp 音频文件；`read_config_from_api: false`（**ASR/TTS 上报队列结构性 never enqueue**，合成正文/音频不进消息队列） | 上游 `tts/base.py` / `reportHandle.py` @ pinned commit；模板断言 |
+| 保留（日志） | `log_level: WARNING`：钉死 commit 以 INFO 打印"句子语音生成成功： {tts_text}"（`tts/alibl_stream.py`），WARNING 全部抑制 | 上游 `config/logger.py` 按 `log.log_level` 过滤 |
+| 残留（如实披露） | WARNING 以上异常路径可能携带供应商侧错误详情（连接/鉴权失败等，不含合成正文）；上游 `loguru` 文件 handler `diagnose=True` 为钉死代码，异常堆栈可能含变量值——日志按敏感面对待（journald 权限 + 轮转 + 运维 vantage），合成正文不进常规日志 | 本节；ADR-0010"约束/后果" |
+| 供应商侧保留 | 由运营者在激活时的外发评审记录中登记（reviewer/reason；LumiThink 侧激活记录 `LUMITHINK_TTS_*` 校验锚点端点一致）；儿童数据闸门 = `CHILD_DATA_EGRESS_REVIEW_STATUS = not_performed` 常量，本档位仅覆盖**成人合成样例对照路径** | `lib/server/real-tts-composition.ts`（fail-closed） |
+
+**激活步骤**（在 §2 完成的基础上）：
+
+```bash
+# 1. env 追加供应商键（模板 shapes 见 deploy/xiaozhi/env/gateway-tts-real.example）
+sudo vi /etc/xiaozhi/xiaozhi.env          # + XIAOZHI_TTS_API_KEY=<百炼 API-KEY>
+
+# 2. 以真实 TTS 档位重渲染（--template 显式选档，相对 deploy/xiaozhi/ 解析；缺省仍是 gateway-minimal）
+sudo env "PATH=$PATH" bash deploy/xiaozhi/bootstrap.sh \
+  --target /opt/xiaozhi-esp32-server --env-file /etc/xiaozhi/xiaozhi.env \
+  --skip-clone --template config/gateway-tts-real.yaml
+
+# 3. 重启并复核
+sudo systemctl restart xiaozhi-server
+sudo XIAOZHI_AUTH_KEY="$(sudo grep -oP '(?<=^XIAOZHI_AUTH_KEY=).*' /etc/xiaozhi/xiaozhi.env)" \
+  deploy/xiaozhi/healthcheck.sh
+```
+
+**禁用开关（服务端可禁用 TTS 外发）**：重渲染缺省档位即回到零外发形态——`bootstrap.sh --skip-clone`（不带 `--template`）→ 重启。运营商侧还可直接停用百炼 Key（fail-loud：TTS 请求失败，协议面存活；上游缺 key 时 provider 实例化即 raise）。
+
+**对照样例与证据流程（DoD 1/3）**：仓库内证据 = 合成流式源驱动真实 LumiThink 组合栈（`tests/domain/voice/adapter/real-tts-stream.spec.ts`：Gate 短句按序送达设备 sink + 首音/句间/停止生效/残余抑制等**内容无关指标** + 零泄漏扫描；Mock 路由不调用任何外部 TTS）；**"真实 TTS→Opus 可解码/播放、音色清楚"的服务器端实测为运营者 opt-in**：以成人合成样例文本经服务端触发合成，激活时登记 reviewer/reason，证据只保留内容无关事实（时延、成功/失败、帧统计）与人工确认记录；`voice-tts-real/1` 证据记录如实标注 `serverPlaybackVerification.performed=false`——**CI 与证据记录永不代领该项验收**。**真实儿童语音不在本档位授权范围内**（儿童数据闸门为常量），实机验收归 #E2E-08/#E2E-09 且需独立评审。
+
+**诚实边界**：私有服务端配置面已验证（CI 渲染/合并后扫描），**真实供应商合成质量、服务器端解码播放、实机打断/慢 TTS/解码错误行为未实机验证**；首音/句间间隙/停止生效时延为候选基线（非 SLA）。
+
 ## 4. gateway-minimal 档位：明确的"禁用"语义（AC 2）
 
 `deploy/xiaozhi/config/gateway-minimal.yaml`（渲染进 `data/.config.yaml`）。
@@ -162,6 +200,8 @@ sudo XIAOZHI_AUTH_KEY="$(sudo grep -oP '(?<=^XIAOZHI_AUTH_KEY=).*' /etc/xiaozhi/
 | 连接被拒 `认证失败` | 无/过期/签名不符 token | 设备重新 POST `/xiaozhi/ota/` 换 token；近期轮换过 auth_key 则全部设备需重取 |
 | 每连接日志 `connect call failed`（10096/11434/9 回环拒绝） | gateway-minimal 档位预期（认知层回环占位 fail-loud） | 非故障（§4）；消除它 = 启用对应真实模块 = 档位变更 + 评审 |
 | `ASR识别失败`/上游 `任务失败`（仅 WARNING+，含供应商错误码） | gateway-asr-real 档位：供应商连接/鉴权/配额失败（fail-loud，协议面存活） | 核对 `XIAOZHI_ASR_API_KEY` 与百炼控制台状态；轮换 = 改值 → 重渲染 → 重启（§3.5）；设备侧重连按协议处理 |
+| `TTS` 合成失败/`api_key is required for CosyVoice TTS`（仅 WARNING+，含供应商错误码） | gateway-tts-real 档位：供应商连接/鉴权/配额失败或 env 漏注入 Key（fail-loud，协议面存活；慢 TTS 超时由上游 `tts_timeout: 15` 结算） | 核对 `XIAOZHI_TTS_API_KEY` 与百炼控制台状态；轮换 = 改值 → 重渲染 → 重启（§3.6）；取消路径旧 epoch 音频 0 送出（fence + 队列清空），设备侧重连按协议处理 |
+| 真实 TTS 档位下日志出现"句子语音生成"字样 | `log_level` 被改回 INFO（模板被手改/旧渲染产物） | **不得**手工改渲染产物；用 §3.6 命令重渲染（WARNING 抑制合成句日志面） |
 | 真实 ASR 档位下日志出现"识别文本"字样 | `log_level` 被改回 INFO（模板被手改/旧渲染产物） | **不得**手工改渲染产物；用 §3.5 命令重渲染（WARNING 抑制转写日志面） |
 | OTA 200 但设备连不上 WSS | `XIAOZHI_DEVICE_WS_URL` 与真实域名/TLS 不符（上游注释亦警告 docker/公网部署需手工核对） | 核对 Caddy 站点块域名与该值逐字符一致；`curl -sSI https://<domain>/xiaozhi/ota/` 复核 |
 | `healthcheck` 报端口越界 | 8000/8003 绑定了非回环地址 | 配置被改（模板外覆盖）；恢复 `server.ip: 127.0.0.1` |
