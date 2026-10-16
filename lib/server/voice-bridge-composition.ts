@@ -44,6 +44,7 @@ import {
   type BridgeMetricsSnapshot,
   type VoiceBridgeService,
 } from "../domain/voice/bridge/bridge.ts";
+import type { BridgeAgentPort } from "../domain/voice/bridge/agent-port.ts";
 import { createMockCordisRuntime, type MockCordisRuntime, type MockGenerationScript } from "../domain/voice/bridge/mock-cordis.ts";
 import { canonicalBridgeProfile, type BridgeCordisProfile } from "../domain/voice/bridge/profile.ts";
 import { createVoiceTurnOrchestrator, type VoiceTurnOrchestrator } from "../domain/voice/orchestrator.ts";
@@ -78,6 +79,19 @@ export interface VoiceBridgeStackOptions {
    * never the deployment shape.
    */
   readonly transport?: "ipc" | "in_process";
+  /**
+   * E2E-02 (issue #52): an injected REAL agent port (the locked-version
+   * DSH Cordis adapter from `poc/dsh-child`) replaces the synthetic mock
+   * runtime as the Bridge's upstream. The composition semantics — one
+   * handle per session, fence-first cancel, quarantine/recovery — are
+   * identical for both. Default (omitted) keeps the synthetic mock.
+   */
+  readonly agentPort?: BridgeAgentPort;
+  /**
+   * Fault signal of an injected agent port (wired to the Bridge's worker
+   * quarantine). The default mock runtime's fault channel is pre-wired.
+   */
+  readonly onAgentFault?: (listener: (info: { readonly sessionKey: string; readonly code: "worker_crashed" }) => void) => void;
   /** Injectable wall clock (ms) shared by orchestrator/gate/bridge. */
   readonly clock?: () => number;
   /** Injectable turn-id factory for deterministic tests. */
@@ -100,6 +114,8 @@ export interface VoiceBridgeStack {
   readonly gate: BridgeStreamGate;
   readonly service: VoiceBridgeService;
   readonly runtime: MockCordisRuntime;
+  /** The agent port actually serving the Bridge (mock by default; the injected real adapter when provided, issue #52). */
+  readonly agentPort: BridgeAgentPort;
   /** Null in `in_process` transport mode (no socket exists). */
   readonly server: VoiceBridgeIpcServer | null;
   readonly client: VoiceBridgeIpcClient;
@@ -174,9 +190,14 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
     clock,
     ...(options.turnIdFactory !== undefined ? { turnIdFactory: options.turnIdFactory } : {}),
   });
-  const runtime = createMockCordisRuntime({ scriptFor: options.scriptFor });
-  const service = createVoiceBridge({ profile, agentPort: runtime, clock });
-  runtime.onFault((info) => service.handleAgentCrash(info.sessionKey));
+  const mockRuntime = createMockCordisRuntime({ scriptFor: options.scriptFor });
+  // E2E-02 (issue #52): an injected port (the real locked-version DSH Cordis
+  // adapter) takes the Bridge's upstream seat; the synthetic mock remains the
+  // default and keeps its deterministic pump surface (`runtime` field).
+  const agentPort: BridgeAgentPort = options.agentPort ?? mockRuntime;
+  const service = createVoiceBridge({ profile, agentPort, clock });
+  mockRuntime.onFault((info) => service.handleAgentCrash(info.sessionKey));
+  options.onAgentFault?.((info) => service.handleAgentCrash(info.sessionKey));
   const gate = createBridgeStreamGate({ orchestrator, clock });
 
   const endpointName = options.endpointName ?? `lumithink-bridge-${process.pid}-${Math.floor(Math.random() * 0xffffff).toString(16)}`;
@@ -419,7 +440,8 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
     orchestrator,
     gate,
     service,
-    runtime,
+    runtime: mockRuntime,
+    agentPort,
     server,
     client,
     endpoint,
@@ -567,7 +589,7 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
     },
 
     pumpRuntime(sessionKey, max) {
-      return runtime.pump(sessionKey, max);
+      return mockRuntime.pump(sessionKey, max);
     },
 
     pumpScheduler(sessionKey) {

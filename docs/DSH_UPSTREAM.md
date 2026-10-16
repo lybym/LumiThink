@@ -1,7 +1,7 @@
 # DeepSeek Harness 上游版本管理与升级策略
 
 > 生效日期：2026-10-12 ｜ 状态：已采用（需要 R0 技术验证和后续细化）  
-> 适用：LumiThink DSH Runtime、`lumithink-child` Profile、Cordis 插件、SDK/依赖、会话数据。
+> 适用：LumiThink DSH Runtime、`lumithink-child` Profile、`lumi-dsh-runtime-bridge` Profile（E2E-02，issue #52）、Cordis 插件、SDK/依赖、会话数据。
 >
 > 相关：[ADR-001](./adr/0001-deepseek-harness.md) · [ROADMAP](./ROADMAP.md)
 

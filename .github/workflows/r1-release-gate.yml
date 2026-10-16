@@ -619,10 +619,25 @@ jobs:
             echo "::error::root package.json dependency surface (dependencies/devDependencies/engines/packageManager) drifted between N and N+1; a release with dependency drift requires the acknowledged release-manifest update and a reviewed drill"
             exit 1
           fi
+          # The PoC dependency SURFACE (deps, devDeps, engines) must be
+          # identical between N and N+1; script-only package.json edits
+          # (e.g. test registration) do not change the dependency surface and
+          # must not block the drill — the same rule the root check above
+          # already documents. The PoC lockfile stays byte-compared, so any
+          # resolved-dependency change still blocks unacknowledged drift.
+          poc_surface() {
+            node -e "const p=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(JSON.stringify([p.dependencies??null,p.devDependencies??null,p.engines??null]))" "$1"
+          }
+          git show "${DRILL_BASE_SHA}:poc/dsh-child/package.json" > /tmp/poc-pkg-n.json
+          git show "${DRILL_HEAD_SHA}:poc/dsh-child/package.json" > /tmp/poc-pkg-n1.json
           if ! git diff --exit-code "$DRILL_BASE_SHA" "$DRILL_HEAD_SHA" -- \
             pnpm-lock.yaml pnpm-workspace.yaml \
-            poc/dsh-child/package.json poc/dsh-child/pnpm-lock.yaml; then
-            echo "::error::dependency lockfiles or the PoC package manifest drifted between N and N+1; a release with dependency drift requires the acknowledged release-manifest update and a reviewed drill"
+            poc/dsh-child/pnpm-lock.yaml; then
+            echo "::error::dependency lockfiles drifted between N and N+1; a release with dependency drift requires the acknowledged release-manifest update and a reviewed drill"
+            exit 1
+          fi
+          if [ "$(poc_surface /tmp/poc-pkg-n.json)" != "$(poc_surface /tmp/poc-pkg-n1.json)" ]; then
+            echo "::error::PoC package.json dependency surface drifted between N and N+1; a release with dependency drift requires the acknowledged release-manifest update and a reviewed drill"
             exit 1
           fi
           echo "dependency surface identical between N and N+1 (lockfiles byte-identical; package.json script-only edits allowed)"

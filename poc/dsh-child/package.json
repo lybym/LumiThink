@@ -12,7 +12,11 @@
     "test:r0:gate-tests": "node --experimental-strip-types --test-isolation=none --test tests/gate/report-gate.spec.ts",
     "test:r0:egress": "node --experimental-strip-types src/egress-cli.ts",
     "test:r0:sanitize": "node --experimental-strip-types src/sanitize-artifact.ts reports/r0-01-acceptance.xml reports/r0-01-acceptance.sanitized.xml",
-    "test:r0": "pnpm run test:r0:run && pnpm run test:r0:gate && pnpm run test:r0:gate-tests && pnpm run test:r0:egress && pnpm run test:r0:sanitize"
+    "test:r0": "pnpm run test:r0:run && pnpm run test:r0:gate && pnpm run test:r0:gate-tests && pnpm run test:r0:egress && pnpm run test:r0:sanitize",
+    "test:e2e02:run": "node -e \"fs.mkdirSync('reports',{recursive:true})\" && node --experimental-strip-types --test-isolation=none --test --test-reporter=junit --test-reporter-destination=reports/e2e02-bridge.xml --test-reporter=spec --test-reporter-destination=stdout tests/bridge/runtime.e2e.spec.ts tests/bridge/security.spec.ts tests/bridge/e2e02-gate.spec.ts",
+    "test:e2e02:gate": "node --experimental-strip-types src/e2e02-gate-cli.ts summarize reports/e2e02-bridge.xml && node --experimental-strip-types src/e2e02-gate-cli.ts check reports/e2e02-bridge.xml",
+    "test:e2e02:sanitize": "node --experimental-strip-types src/sanitize-artifact.ts reports/e2e02-bridge.xml reports/e2e02-bridge.sanitized.xml",
+    "test:e2e02": "pnpm run test:e2e02:run && pnpm run test:e2e02:gate && pnpm run test:e2e02:sanitize"
   },
   "engines": {
     "node": "24.x"
