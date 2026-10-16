@@ -239,7 +239,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          source xiaozhi-smoke.env
+          # set -a: the probe reads XIAOZHI_AUTH_KEY from its process env.
+          set -a; source xiaozhi-smoke.env; set +a
           "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" deploy/xiaozhi/probe_hello.py \
             --url ws://127.0.0.1:8000/xiaozhi/v1/ \
             --device-id aa:bb:cc:dd:ee:02 --client-id negative-probe \
