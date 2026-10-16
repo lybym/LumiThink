@@ -45,7 +45,7 @@ PATCHES = [
             '    try:',
             '        _lumi_provider = getattr(conn, "llm", None)',
             '        if _lumi_provider is not None and hasattr(_lumi_provider, "lumi_on_hello"):',
-            '            _lumi_provider.lumi_on_hello(conn, "conn-" + str(getattr(conn, "device_id", "unknown")).replace(":", ""))',
+            '            _lumi_provider.lumi_on_hello(conn, "conn-" + str(getattr(conn, "device_id", "unknown")).replace(":", "") + "-" + str(getattr(conn, "session_id", "x"))[:8])',
             '    except Exception:',
             '        pass',
         ],

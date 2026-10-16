@@ -24,7 +24,7 @@
 
 | # | 文件（pinned commit 内路径） | 锚点（逐字） | 注入内容 | 语义 |
 | --- | --- | --- | --- | --- |
-| 1/5 | `core/handle/helloHandle.py` | `    await conn.websocket.send(json.dumps(conn.welcome_msg))` | `lumi_on_hello(conn, "conn-"+device_id去冒号)` | 设备 WS 连接注册到网关桥（网关侧由此发起真实 `Device-Id/Client-Id/Authorization` 的鉴权映射与租约）；放置在 welcome 发送之后（session_id 已铸造） |
+| 1/5 | `core/handle/helloHandle.py` | `    await conn.websocket.send(json.dumps(conn.welcome_msg))` | `lumi_on_hello(conn, "conn-"+device_id去冒号+"-"+session_id前8位)` | 设备 WS 连接注册到网关桥（网关侧由此发起真实 `Device-Id/Client-Id/Authorization` 的鉴权映射与租约）；connId 按**设备+连接级 session_id** 唯一派生（同一设备的第二条连接必须拿到不同 connId——租约拒绝与 `device_drop` 才能精确关闭第二条而不是第一条）；放置在 welcome 发送之后（session_id 已铸造） |
 | 2/5 | `core/handle/abortHandle.py` | `    conn.clearSpeakStatus()` | `lumi_on_abort(conn)` | 设备 abort（线协议 `abort` → 内部 `client_abort=True` → `clear_queues()` → 端侧 `tts stop`）完成后通知网关：epoch 栅栏提升 + 计账冲销。放置在 native 清理之后，网关通知失败不影响设备侧打断 |
 | 3/5 | `core/handle/sendAudioHandle.py` | `    flow_control["packet_count"] = packet_index + 1\n    flow_control["sequence"] = sequence + 1`（`_do_send_audio` 内） | `lumi_on_audio_frame(conn, opus_packet)` | **真实音频到账记账**：每个实际发往设备的 Opus 包计数 + SHA-256 摘要（内容无关）。解决 Adapter 合同只有 `frameCount/audioDigest` 占位的问题——网关侧 Adapter v1.4 记录真实帧数与真实字节摘要 |
 | 4/5 | `core/handle/sendAudioHandle.py` | `    # 发送消息到客户端\n    await conn.websocket.send(json.dumps(message))`（`send_tts_message` 内） | `lumi_on_tts_state(conn, state)` | 话语停止（`state=="stop"`）时冲销音频记账（合成 `audio_delivered` 上报帧数+摘要） |
