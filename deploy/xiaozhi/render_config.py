@@ -65,11 +65,15 @@ def refuse_placeholder(key, value):
 
 
 def apply_owner(path, owner):
-    """Chown the rendered output to USER[:GROUP]; fail closed, never half-done.
+    """Chown the rendered output to USER[:GROUP]; fail closed (non-zero exit).
 
     A 0600 config owned by the wrong user is an unbootable deployment (the
     service user gets EACCES), so an unsatisfiable --owner must abort the
-    render instead of leaving a root-owned file behind.
+    render. Scope note (review R2 P2-4): this covers the render itself; if
+    the chown fails AFTER the atomic replace already succeeded, the rendered
+    file does remain on disk with the wrong owner until the next successful
+    re-render replaces it — the exit code still fails the run, but the write
+    is not "never half-done".
     """
     if not owner:
         return

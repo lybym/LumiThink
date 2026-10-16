@@ -99,9 +99,9 @@ sudo systemctl reload caddy
 - `VAD: SileroVAD`——唯一真实启用的模块（纯本地：模型随上游仓库内 `models/snakers4_silero-vad/` 提供，onnxruntime CPU 推理，零外发）。
 - `ASR: FunASRServer`、`LLM: OllamaLLM`、`TTS: CustomTTS`——认知层全部显式指向**回环死端口**（`127.0.0.1:10096` / `:11434` / `:9`）：初始化仅建对象（服务可正常启动、协议面可用），任何真实音频/推理/合成请求连接即拒绝——**大声失败，零外发、零供应商、零模型下载**。
 - `Memory: nomem`、`Intent: nointent`——记忆与意图识别显式关闭。
-- `VLLM: ""`——视觉模块**显式禁用**（review R1 P2-1）：上游 `config.yaml` 默认 `VLLM: ChatGLMVLLM{url: https://open.bigmodel.cn/...}`，递归合并下省略即存活；`""` 为 falsy，上游 `core/api/vision_handler.py` 在实例化 provider、读取任何请求体之前直接 raise"您还未设置默认的视觉分析模块"（fail-loud、零外发）。合并后有效配置不存在任何 VLLM 供应段（CI 扫描合并后有效配置断言）。
+- `VLLM: ""`——视觉模块**显式禁用**（review R1 P2-1；R2 P1-1 措辞订正）：上游 `config.yaml` 自带**外部** VLLM 供应段（`ChatGLMVLLM{url: https://open.bigmodel.cn/api/paas/v4/}`、`QwenVLVLLM{url: https://dashscope.aliyuncs.com/...}` 等，@pinned commit L746 起），递归合并后这些段在合并后有效配置中**仍然存在但绝不被选中**——`""` 为 falsy，`selected_module.VLLM` 不指向任何供应段，上游 `core/api/vision_handler.py` 在实例化任何 provider（即任何外发）之前直接 raise"您还未设置默认的视觉分析模块"（multipart 请求体读取发生在 raise 之前，但读取本身不产生外发；fail-loud、零外发）。若改写为上游默认 ChatGLMVLLM，视觉请求体会出网。CI 合并后有效配置扫描断言的是：selection 面无 VLLM + **活跃 provider 面**全回环 + 上游默认外部 VLLM 段形状钉死（防未来 pin 变更使本安全动机失义）。
 - 鉴权强制开启且 `allowed_devices: []`（无 token 旁路），HMAC token 7 天。
-- "未启用供应商 ASR/TTS 时悄然接外部服务"被两层否定：配置层所有具体 URL 均为回环（模板结构断言 + **合并后有效配置**扫描 + Node 回归测试三重断言，非回环主机即测试失败）；行为层回环端点不存在，任何外发语义都退化为本地 fail-loud。
+- "未启用供应商 ASR/TTS 时悄然接外部服务"被两层否定：本模板自身所有具体 URL 均为回环（模板结构断言 + Node 回归测试，活跃行级）；**合并后有效配置**扫描另断言活跃 provider 面全回环（未选中的上游默认段可合法携带外部 URL——永不实例化，见上条 R2 P1-1 订正）；行为层回环端点不存在，任何外发语义都退化为本地 fail-loud。
 - 畸形/垃圾二进制音频：入口按协议拒绝（无内容回显、服务端不崩溃——CI 负例断言 OTA 健康随后复验）。
 - 上游 `config.yaml` 的第三方占位（qweather key、Home Assistant 等）位于上游文件的 `plugins` 段且只在对应插件被意图调用时使用；本档位 `Intent: nointent` 且无 LLM 链路。CI 泄漏扫描断言**本仓库**模板零真实凭据。
 
@@ -110,7 +110,7 @@ sudo systemctl reload caddy
 在干净 ubuntu runner 上执行（即 AC 1 的"干净 Linux/独立环境"自动化面）：
 
 1. **artifacts**：`bash -n` 全部脚本、`python -m py_compile` 全部 python、`systemd-analyze verify`（沿用 R1-08 的 denylist 仲裁）、模板 YAML 解析、模板/env 零真实凭据、`version.env` 与 `XIAOZHI_GATEWAY_BASELINE` 钉死一致性（由 Node 回归测试承担）。
-2. **deployment smoke**：读取 `version.env` → 浅克隆 pinned commit（SHA 校验）→ venv + gateway-minimal 依赖（含 `libopus0`/`ffmpeg` 系统依赖核验）→ 渲染配置 → **合并后有效配置扫描**（镜像上游 `merge_configs` 递归合并上游 `config.yaml` + 渲染层，断言 `selected_module` 七键显式且 `VLLM: ""`、活跃 provider 面全部回环）→ 启动服务端 → `healthcheck.sh`（OTA POST 200 + websocket 下发面 + **OTA 签发 token 重放 WSS 被接受** + `ss` 回环断言 + hello/abort 探针）→ **负例**：无 token 连接被明文拒绝并关闭（`--expect-auth-failure`）、无 ASR 时二进制音频被静默丢弃且协议面存活（`--expect-silent-binary`）→ **重启恢复**：TERM 后重启，OTA 200，**同一 device-id** 重连 hello 重新成功且 session_id 变化（per-connection 会话，排除设备映射复用）→ **损坏配置负例**：写入非法 YAML 后进程必须非零退出（fail-fast，不得带病启动）→ **重渲染幂等**：`--skip-clone` 重跑 bootstrap 修复损坏配置（§6 补救回路的机器面）且产物恢复合法 YAML。
+2. **deployment smoke**：读取 `version.env` → 浅克隆 pinned commit（SHA 校验）→ venv + gateway-minimal 依赖（含 `libopus0`/`ffmpeg` 系统依赖核验）→ 渲染配置 → **合并后有效配置扫描**（镜像上游 `merge_configs` 递归合并上游 `config.yaml` + 渲染层，断言 `selected_module` 七键显式且 `VLLM: ""`、活跃 provider 面全部回环、上游默认外部 VLLM 段形状钉死——R2 P1-1 自校验）→ 启动服务端 → `healthcheck.sh`（OTA POST 200 + websocket 下发面 + **OTA 签发 token 重放 WSS 被接受** + `ss` 回环断言 + hello/abort 探针）→ **负例**：无 token 连接被明文拒绝并关闭（`--expect-auth-failure`）、无 ASR 时二进制音频被静默丢弃且协议面存活（`--expect-silent-binary`）→ **重启恢复**：TERM 后重启，OTA 200，**同一 device-id** 重连 hello 重新成功且 session_id 变化（per-connection 会话，排除设备映射复用）→ **损坏配置负例**：写入非法 YAML 后进程必须非零退出（fail-fast，不得带病启动）→ **重渲染幂等**：`--skip-clone` 重跑 bootstrap 修复损坏配置（§6 补救回路的机器面）且产物恢复合法 YAML。
 
 本地等价复现（Linux）：`bash deploy/xiaozhi/bootstrap.sh --target <dir> --env-file <env>` → 手动启动 → `deploy/xiaozhi/healthcheck.sh`。冒烟失败时日志只保留终态摘要（不进 artifact，避免存储配额类失败）。
 
@@ -119,7 +119,7 @@ sudo systemctl reload caddy
 | 症状 | 语义 | 处置 |
 | --- | --- | --- |
 | 启动即退（非零退出 + YAML 解析错误） | `data/.config.yaml` 损坏/半渲染 | 重新渲染再启动：`sudo env "PATH=$PATH" bash deploy/xiaozhi/bootstrap.sh --target /opt/xiaozhi-esp32-server --env-file /etc/xiaozhi/xiaozhi.env --skip-clone`；**不得**手工改渲染产物了事 |
-| 启动即退，日志含读取 `data/.config.yaml` 的 `Permission denied`/EACCES | 渲染产物属主不是 `xiaozhi-server`（root 渲染未回填属主即 crash-loop，review R1 P1-1） | 用当前版本 bootstrap 重新渲染（命令同上，`--owner` 自动回填属主并保持）；CI artifacts job 有"二次渲染后属主/可读性"回归防复发；勿以手工 chown 渲染产物替代 |
+| 启动即退，日志含读取 `data/.config.yaml` 的 `Permission denied`/EACCES | 渲染产物属主不是 `xiaozhi-server`（root 渲染未回填属主即 crash-loop，review R1 P1-1） | 用当前版本 bootstrap 重新渲染（命令同上，`--owner` 自动回填属主并保持；R2 P2-1 修复后，root 直跑与"目标父级不可写→内部逐条 sudo"两条调用路径都会回填属主）；CI artifacts job 有"二次渲染后属主/可读性"回归防复发；勿以手工 chown 渲染产物替代 |
 | `render_config.py` 拒绝：missing/placeholder | env 缺 key 或占位值 | 补真实值；报错只含变量名（无值回显） |
 | 连接被拒 `认证失败` | 无/过期/签名不符 token | 设备重新 POST `/xiaozhi/ota/` 换 token；近期轮换过 auth_key 则全部设备需重取 |
 | 每连接日志 `connect call failed`（10096/11434/9 回环拒绝） | gateway-minimal 档位预期（认知层回环占位 fail-loud） | 非故障（§4）；消除它 = 启用对应真实模块 = 档位变更 + 评审 |
@@ -146,10 +146,11 @@ sudo systemctl reload caddy
 
 - 真实公网 vantage 的端口扫描（§2 步骤 6）、真实域名 ACME/HSTS/WSS 握手（Caddyfile 仅语法/结构断言）；
 - systemd 沙箱在真实内核上的拦截效果（建议 `systemd-analyze security xiaozhi-server` 复核）；
+- systemd 单元**运行时面**（`User=xiaozhi-server` + 沙箱指令的启动/拦截效果）不在 CI 中启动（CI 仅 `systemd-analyze verify` 语法面）：运维首次 `systemctl start xiaozhi-server` 后应**立即**执行 §2 步骤 4 的 healthcheck 并留存输出作为运行时证据（R2 review test-gap）；
 - OTA **固件下载面**（`data/bin`）的真实升级流：本档位只验证接口契约（200 + 版本协商形状），不放置真实固件；
 - **真实设备接入**（hello 实发、激活、OTA 指向私有服务端、打断/重连）：全部归 #E2E-08；本项验收标注为 **"私有服务端已验证，真实设备仍待 #E2E-08"**。
 
-**上游旁路与接受理由（review R1 P2-1 披露）**：钉死 commit 的上游 `core/api/vision_handler.py` 存在 `client_id == "web_test_client"` 的**免 token 旁路**（上游内置测试客户端语义，L37）。本部署对该旁路的收口是双重的：① `/mcp/vision/explain` 端点只绑 `127.0.0.1:8003` 且 Caddy 刻意不代理（远程不可达，触发面仅限本机回环进程）；② 模板 `VLLM: ""` 使视觉路径在任何请求体读取/外发之前 fail-loud（合并后有效配置无 VLLM 供应段，CI 扫描断言）。接受理由 = 端点网络边界 + 模块显式禁用；两者任一失效即需重新评审。
+**上游旁路与接受理由（review R1 P2-1 披露；R2 P1-1 措辞订正）**：钉死 commit 的上游 `core/api/vision_handler.py` 存在 `client_id == "web_test_client"` 的**免 token 旁路**（上游内置测试客户端语义，L37）。本部署对该旁路的收口是双重的：① `/mcp/vision/explain` 端点只绑 `127.0.0.1:8003` 且 Caddy 刻意不代理（远程不可达，触发面仅限本机回环进程）；② 模板 `VLLM: ""` 使视觉路径在实例化任何 provider/任何外发之前 fail-loud（multipart 请求体读取发生在 raise 之前，但读取不产生外发；合并后有效配置仍含上游默认外部 VLLM 供应段但绝不被选中——CI 扫描断言 selection 无 VLLM + 活跃面回环 + 上游默认形状钉死）。接受理由 = 端点网络边界 + 模块显式禁用；两者任一失效即需重新评审。
 
 ## 10. 测试固件差异记录（实施范围 4：只记录，不改写固件）
 

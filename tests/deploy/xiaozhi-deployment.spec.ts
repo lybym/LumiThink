@@ -101,9 +101,12 @@ test("gateway-minimal config template: loopback-only, auth forced on, ASR/TTS/LL
   assert.match(block, /^  Memory: nomem$/m);
   assert.match(block, /^  Intent: nointent$/m);
   // VLLM is EXPLICITLY disabled ("" is falsy: upstream vision_handler raises
-  // before instantiating any provider or reading any request body — review
-  // R1 P2-1). The upstream default ChatGLMVLLM would keep
-  // https://open.bigmodel.cn alive in the merged effective config.
+  // before instantiating any provider — i.e. before any egress; the multipart
+  // request-body read happens BEFORE that raise, but reading produces no
+  // egress — review R2 P1-1 wording fix). Upstream ships external VLLM
+  // segments (ChatGLMVLLM etc.): the recursive merge keeps them alive but
+  // UNSELECTED in the effective config; selecting the upstream default would
+  // send vision requests to https://open.bigmodel.cn (review R1 P2-1).
   assert.match(block, /^  VLLM: ""$/m);
 
   // Zero-egress assertion: every concrete URL on an active line is either an
@@ -260,4 +263,18 @@ test("the CI deployment gate proves the DoD negatives and triggers on the xiaozh
   }
   // Corrupted-config negative: the boot must be asserted to fail.
   assert.match(workflow, /corrupt/i);
+  // Review R2 P1-1 (enhancement adopted): the effective-config scan must pin
+  // the upstream default shape — external VLLM segments exist but stay
+  // unselected — so a future pin bump cannot silently void the
+  // explicit-disable rationale while CI stays green.
+  for (const upstreamDefault of ["open.bigmodel.cn", "dashscope.aliyuncs.com"]) {
+    assert.ok(
+      workflow.includes(upstreamDefault),
+      `effective-config scan lacks the upstream VLLM default pin: ${upstreamDefault}`,
+    );
+  }
+  // Review R2 P2-2: the corrupted-config negative must poll the process exit
+  // (no blind sleep race) and must NOT rely on a bare `error` signature.
+  assert.ok(workflow.includes("did not exit within 20s of TERM"), "corrupted-config negative lacks the exit poll");
+  assert.doesNotMatch(workflow, /grep -qiE 'yaml\|scanner\|parser\|error'/, "corrupted-config negative still uses the bare-error signature");
 });

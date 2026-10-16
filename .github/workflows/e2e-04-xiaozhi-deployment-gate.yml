@@ -15,7 +15,8 @@ name: E2E-04 xiaozhi deployment gate
 #      restart recovery with the same device-id, corrupted-config fail-fast
 #      negative, and --skip-clone re-render idempotency.
 # No real credentials, no real device, no external egress: the gateway-minimal
-# profile configures no ASR/LLM/TTS/VLLM providers at all.
+# profile selects only loopback placeholder ASR/LLM/TTS providers and
+# explicitly disables VLLM (selected_module.VLLM="").
 on:
   pull_request:
     paths:
@@ -108,10 +109,11 @@ jobs:
           assert set(sm.keys()) == {"VAD", "ASR", "LLM", "TTS", "VLLM", "Memory", "Intent"}, sm
           assert sm["Memory"] == "nomem" and sm["Intent"] == "nointent"
           # VLLM must be explicitly DISABLED ("" is falsy: upstream
-          # vision_handler raises before instantiating any provider or reading
-          # any request body). Leaving the upstream default ChatGLMVLLM in
-          # place would keep https://open.bigmodel.cn alive in the merged
-          # effective config (review R1 P2-1).
+          # vision_handler raises before instantiating any provider — i.e.
+          # before any egress; the multipart request-body read happens BEFORE
+          # that raise, but reading produces no egress — review R2 P1-1
+          # wording fix). Selecting the upstream default ChatGLMVLLM would
+          # send vision requests to https://open.bigmodel.cn (review R1 P2-1).
           assert sm["VLLM"] == "", sm
           assert cfg["ASR"]["FunASRServer"]["host"] == "127.0.0.1"
           assert cfg["LLM"]["OllamaLLM"]["base_url"].startswith("http://127.0.0.1")
@@ -261,7 +263,10 @@ jobs:
 
           def merge(defaults, overlay):
               # Mirrors upstream config_loader.merge_configs exactly: recursive
-              # dict merge, the custom (overlay) side wins on conflicts.
+              # dict merge, the custom (overlay) side wins on conflicts. The
+              # mirror is anchored at the pinned upstream commit (27399a2…,
+              # see deploy/xiaozhi/version.env) — re-verify it verbatim on any
+              # future pin bump (review R2 test-gap).
               if not isinstance(defaults, dict) or not isinstance(overlay, dict):
                   return overlay
               merged = dict(defaults)
@@ -290,6 +295,27 @@ jobs:
           assert effective["selected_module"] == expected, effective["selected_module"]
           assert not effective["selected_module"]["VLLM"]
 
+          # Review R2 P1-1 (enhancement adopted): pin the UPSTREAM default
+          # shape this profile's safety rationale depends on. Upstream
+          # config.yaml ships EXTERNAL VLLM provider segments — the recursive
+          # merge keeps them alive in the EFFECTIVE config; only
+          # selected_module.VLLM="" keeps them uninstantiated. If a future pin
+          # bump changes/removes these defaults, fail here (and force a
+          # re-review of the gateway-minimal rationale) instead of letting
+          # the "must explicitly disable VLLM" comments silently lose their
+          # meaning while CI stays green. Public hosts only — no secrets.
+          vllm_defaults = effective.get("VLLM") or {}
+          for name, external_host in (
+              ("ChatGLMVLLM", "open.bigmodel.cn"),
+              ("QwenVLVLLM", "dashscope.aliyuncs.com"),
+          ):
+              url = (vllm_defaults.get(name) or {}).get("url", "")
+              assert external_host in url, (
+                  f"upstream default VLLM.{name}.url missing/changed — the "
+                  f"explicit-disable rationale must be re-reviewed: "
+                  f"{url or '<absent>'}"
+              )
+
           url_re = re.compile(r"https?://([^/\s\"']+)")
           loopback_re = re.compile(r"^(127\.0\.0\.1|localhost)(:\d+)?$")
           hosts = []
@@ -311,7 +337,7 @@ jobs:
               collect(effective[module][effective["selected_module"][module]])
           bad = [h for h in hosts if not loopback_re.match(h)]
           assert not bad, f"active provider surface has non-loopback endpoints: {bad}"
-          print("effective merged config OK (explicit map, VLLM disabled, loopback-only active surface)")
+          print("effective merged config OK (explicit map, VLLM unselected, loopback-only active surface, upstream external VLLM defaults pinned)")
           PY
 
       - name: Boot the gateway-minimal server (foreground, smoke env)
@@ -413,7 +439,20 @@ jobs:
           set -euo pipefail
           PIDFILE="$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server/server.pid"
           kill -TERM "$(cat "$PIDFILE")" 2>/dev/null || true
-          sleep 2
+          # Review R2 P2-2: poll for the process to exit instead of a blind
+          # `sleep 2` — a slow shutdown could leave server2 holding port 8000
+          # when server3 boots, so ANY later failure trace (e.g. port-in-use)
+          # would be misattributable. After this loop the ONLY possible boot
+          # failure cause is the corrupted config itself.
+          for _ in $(seq 1 20); do
+            kill -0 "$(cat "$PIDFILE")" 2>/dev/null || break
+            sleep 1
+          done
+          if kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+            echo "::error::server did not exit within 20s of TERM"
+            tail -30 "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server/server2.log" || true
+            exit 1
+          fi
           CFG="$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server/data/.config.yaml"
           printf '\n:::: corrupted ::::\n' >> "${CFG}"
           cd "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server"
@@ -422,7 +461,11 @@ jobs:
           code=$?
           set -e
           [ "${code}" -ne 0 ] || { echo "::error::corrupted config did not fail the boot"; tail -30 server3.log; exit 1; }
-          tail -30 server3.log | grep -qiE 'yaml|scanner|parser|error' || {
+          # Signature tightened (review R2 P2-2): no bare `error` — an
+          # unrelated traceback (e.g. OSError port-in-use) must NOT pass this
+          # negative. PyYAML failures surface as yaml.scanner/yaml.parser
+          # errors (or name the .config.yaml path), so these tokens suffice.
+          tail -30 server3.log | grep -qiE 'yaml|scanner|parser' || {
             echo "::error::boot failed without a config-parse error trace"; tail -30 server3.log; exit 1; }
           echo "corrupted-config negative OK (non-zero exit with parse error)"
 

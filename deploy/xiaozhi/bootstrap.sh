@@ -103,11 +103,15 @@ echo "[xiaozhi:bootstrap] system deps OK (libopus0, ffmpeg)"
 # Ownership contract (review R1 P1-1): os.replace does NOT preserve the
 # replaced file's owner, so a root re-render would otherwise leave a
 # root:root 0600 config the service user cannot read (crash-loop on the
-# SECOND config change). When running as root — the systemd path — every
-# render re-applies the service-user owner to the file AND the data/tmp dirs
-# (the unit also writes tmp/server.log and data/bin as that user).
+# SECOND config change). Whenever the render runs as root — the plain root
+# path AND the internal-sudo path (caller uid≠0 but the target parent is not
+# writable, so every step incl. the render is escalated; review R2 P2-1) —
+# every render re-applies the service-user owner to the file AND the
+# data/tmp dirs (the unit also writes tmp/server.log and data/bin as that
+# user). The chown below already carries the ${SUDO} prefix, which is what
+# makes the internal-sudo path work.
 RENDER_OWNER_ARGS=()
-if [ "$(id -u)" -eq 0 ]; then
+if [ -n "${SUDO}" ] || [ "$(id -u)" -eq 0 ]; then
   getent passwd "${SERVICE_USER}" >/dev/null 2>&1 || {
     echo "[xiaozhi:bootstrap] service user ${SERVICE_USER} missing (runbook §2 step 0)" >&2
     exit 1
@@ -121,7 +125,7 @@ ${SUDO} "${VENV_DIR}/bin/python" "${REPO_ROOT}/deploy/xiaozhi/render_config.py" 
   --output "${SERVER_DIR}/data/.config.yaml" \
   "${RENDER_OWNER_ARGS[@]+${RENDER_OWNER_ARGS[@]}}"
 ${SUDO} chmod 755 "${SERVER_DIR}/data" "${SERVER_DIR}/tmp"
-if [ "$(id -u)" -eq 0 ]; then
+if [ -n "${SUDO}" ] || [ "$(id -u)" -eq 0 ]; then
   ${SUDO} chown -R "${SERVICE_USER}:${SERVICE_USER}" \
     "${SERVER_DIR}/data" "${SERVER_DIR}/tmp"
 fi
