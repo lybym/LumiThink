@@ -185,6 +185,27 @@ function requestCarriesNonTextBlock(payload: Record<string, unknown>): boolean {
   });
 }
 
+/**
+ * Fail-closed role guard (issue #53 review r2 P2-1): the gateway context is a
+ * user/assistant text exchange (the `system` record is built from the
+ * top-level `system` field, not from a messages element). A messages element
+ * with any other role — or a malformed element — can never be represented in
+ * that context, and silently skipping it would shrink the model's context
+ * with zero audit trace (the same fabricated-semantics class the r1 review
+ * fixed for non-text blocks). The proxy rejects the request statically BEFORE
+ * the gateway: value-free 400, `rejected` counter, no vendor contact.
+ */
+function requestCarriesUnexpectedMessageRole(payload: Record<string, unknown>): boolean {
+  const rawMessages = Array.isArray(payload.messages) ? payload.messages : [];
+  return rawMessages.some((raw) => {
+    if (raw === null || typeof raw !== "object") {
+      return true; // malformed element: not a representable message
+    }
+    const role = (raw as { role?: unknown }).role;
+    return role !== "user" && role !== "assistant";
+  });
+}
+
 /** Server-minted contract id (`req_`/`trc_`/`trn_` + 24 hex). */
 function mintId(kind: "requestId" | "traceId" | "turnId"): string {
   return `${CONTRACT_ID_PREFIXES[kind]}${randomBytes(12).toString("hex")}`;
@@ -319,6 +340,15 @@ export function createGatewayEgressProxy(options: GatewayEgressProxyOptions): Ga
       // The submitted block types/values are never echoed.
       stats.rejected += 1;
       writeError(res, { status: 400, type: "invalid_request_error", message: "request carries content blocks this route does not serve (text-only route)" });
+      return;
+    }
+    if (requestCarriesUnexpectedMessageRole(payload)) {
+      // Fail closed on message shapes the user/assistant context cannot
+      // represent (issue #53 review r2 P2-1): silently skipping an unexpected
+      // role would shrink the model's context with zero audit trace. The
+      // submitted role values are never echoed.
+      stats.rejected += 1;
+      writeError(res, { status: 400, type: "invalid_request_error", message: "request carries message roles this route does not serve (user/assistant only)" });
       return;
     }
 

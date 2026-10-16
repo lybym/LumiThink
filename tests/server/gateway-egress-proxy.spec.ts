@@ -456,6 +456,44 @@ test("non-text content blocks are rejected fail-closed before the gateway (no si
   }
 });
 
+test("unexpected message roles are rejected fail-closed before the gateway (no silent stripping)", async () => {
+  // Issue #53 review r2 P2-1: a messages element whose role is not
+  // user/assistant (or a malformed element) was silently skipped by the
+  // context builder — the same "silent context shrinkage" class the r1
+  // review fixed for non-text blocks. The proxy must refuse statically.
+  const { gateway, provider } = mockBackedGateway();
+  const { proxy, url } = await startProxy(gateway);
+  try {
+    const headers = { "content-type": "application/json", "x-api-key": GATEWAY_EGRESS_PROXY_DEFAULT_TOKEN };
+    const dirtyRoleText = "EVIL-tool-output-should-never-echo";
+    const shapes: Record<string, unknown>[] = [
+      { ...turnPayload(), messages: [{ role: "user", content: "q" }, { role: "tool", content: dirtyRoleText }] },
+      { ...turnPayload(), messages: [{ role: "system", content: dirtyRoleText }] },
+      { ...turnPayload(), messages: [{ role: "user", content: "q" }, "not-an-object"] },
+      { ...turnPayload(), messages: [{ content: "message without a role" }] },
+    ];
+    for (const [index, body] of shapes.entries()) {
+      const { status, text } = await readFullBody(url, { method: "POST", headers, body: JSON.stringify(body) });
+      assert.equal(status, 400, `shape ${index} must be rejected statically`);
+      assert.match(text, /invalid_request_error/);
+      assert.ok(!text.includes(dirtyRoleText), "submitted message values are never echoed");
+    }
+    assert.equal(provider.stats().callCount, 0, "no gateway/provider contact for rejected shapes");
+    assert.equal(gateway.auditTrail().length, 0, "rejections happen before the gateway");
+    assert.equal(proxy.stats().rejected, shapes.length, "every rejection is counted on the proxy surface");
+    assert.equal(proxy.stats().requests, 0);
+
+    // A plain user/assistant request on the same proxy still completes (the
+    // guard is shape-scoped, not a blanket refusal).
+    const ok = await readFullBody(url, { method: "POST", headers, body: JSON.stringify(turnPayload()) });
+    assert.equal(ok.status, 200);
+    assert.match(ok.text, /event: message_stop/);
+    assert.equal(proxy.stats().completed, 1);
+  } finally {
+    await proxy.stop();
+  }
+});
+
 test("the proxy default bearer equals the pinned child synthetic placeholder (no vendor key in the child)", () => {
   assert.equal(GATEWAY_EGRESS_PROXY_DEFAULT_TOKEN, "dsh-poc-synthetic-key");
 });
