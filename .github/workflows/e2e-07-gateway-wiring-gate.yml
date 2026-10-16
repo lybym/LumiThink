@@ -212,8 +212,12 @@ jobs:
           set -euo pipefail
           RUN_DIR="$RUNNER_TEMP/lumithink-gw"
           mkdir -p "$RUN_DIR"
+          AUTH_KEY="$(openssl rand -hex 32)"
           {
-            echo "XIAOZHI_AUTH_KEY=$(openssl rand -hex 32)"
+            echo "XIAOZHI_AUTH_KEY=${AUTH_KEY}"
+            # The gateway host re-verifies the device token scheme with the
+            # SAME deployment key under its own env name.
+            echo "LUMITHINK_GATEWAY_AUTH_KEY=${AUTH_KEY}"
             echo "XIAOZHI_DEVICE_WS_URL=ws://127.0.0.1:8000/xiaozhi/v1/"
             echo "XIAOZHI_PUBLIC_DOMAIN=127.0.0.1"
             echo "LUMITHINK_GATEWAY_SOCKET=$RUN_DIR/voice-gateway.sock"
