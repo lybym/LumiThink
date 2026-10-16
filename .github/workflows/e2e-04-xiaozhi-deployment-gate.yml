@@ -250,17 +250,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          source xiaozhi-smoke.env
+          set -a; source xiaozhi-smoke.env; set +a
           PIDFILE="$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server/server.pid"
           kill -TERM "$(cat "$PIDFILE")"
           for _ in $(seq 1 20); do kill -0 "$(cat "$PIDFILE")" 2>/dev/null || break; sleep 1; done
           cd "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server"
           "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" app.py > server2.log 2>&1 &
           echo $! > server.pid
-          session2="$("$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" "$GITHUB_WORKSPACE/deploy/xiaozhi/probe_hello.py" \
-            --url ws://127.0.0.1:8000/xiaozhi/v1/ \
-            --device-id aa:bb:cc:dd:ee:03 --client-id restart-probe --without-abort \
-            --auth-key "${XIAOZHI_AUTH_KEY}" | tee /tmp/session2.log | grep -oP '(?<=session_id=)[0-9a-f-]+')"
+          # Readiness poll: server2 takes a few seconds to import + bind; probe
+          # until the hello succeeds (max ~45s) instead of racing the boot.
+          rm -f /tmp/session2.log
+          ready=""
+          for _ in $(seq 1 45); do
+            if "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" "$GITHUB_WORKSPACE/deploy/xiaozhi/probe_hello.py" \
+              --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+              --device-id aa:bb:cc:dd:ee:03 --client-id restart-probe --without-abort \
+              --auth-key "${XIAOZHI_AUTH_KEY}" > /tmp/session2.log 2>&1; then
+              ready="1"
+              break
+            fi
+            sleep 1
+          done
+          [ -n "${ready}" ] || { echo "::error::server2 never became ready after restart"; tail -30 server2.log; exit 1; }
+          cat /tmp/session2.log
+          session2="$(grep -oP '(?<=session_id=)[0-9a-f-]+' /tmp/session2.log | head -1)"
           [ -n "${session2}" ] || { echo "::error::no session after restart"; exit 1; }
           session1="$(cat "$GITHUB_WORKSPACE/session1.id")"
           if [ "${session2}" = "${session1}" ]; then
