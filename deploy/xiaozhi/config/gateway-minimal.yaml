@@ -77,7 +77,12 @@ selected_module:
   ASR: FunASRServer
   LLM: OllamaLLM
   TTS: CustomTTS
-  VLLM: ChatGLMVLLM
+  # 显式禁用视觉模块（review R1 P2-1）："" 为 falsy，上游 vision_handler 在
+  # 实例化任何 provider / 读取任何请求体之前直接 raise"您还未设置默认的视觉
+  # 分析模块"（fail-loud、零外发）。若写上游默认 ChatGLMVLLM，递归合并会让
+  # 上游 VLLM.ChatGLMVLLM{url: https://open.bigmodel.cn/...} 在有效配置中
+  # 存活——视觉请求体会出网。启用视觉 = 档位变更 + 供应商评审。
+  VLLM: ""
   Memory: nomem
   Intent: nointent
 

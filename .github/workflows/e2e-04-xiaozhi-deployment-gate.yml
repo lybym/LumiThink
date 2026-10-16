@@ -3,14 +3,19 @@ name: E2E-04 xiaozhi deployment gate
 # E2E-04 (issue #54): the pinned xiaozhi-esp32-server private deployment must be
 # provable on a clean Linux runner WITHOUT claiming real-device readiness
 # (#E2E-08 owns device acceptance). Two jobs:
-#   1. artifacts — syntax + template/pin integrity of deploy/xiaozhi/**;
+#   1. artifacts — syntax + template/pin integrity of deploy/xiaozhi/**,
+#      plus a runtime regression for the render ownership contract (0600
+#      atomic write, --owner survives a root re-render; review R1 P1-1);
 #   2. deployment-smoke — bootstrap the pinned commit from scratch
 #      (clone-by-SHA -> venv -> gateway-minimal deps -> rendered config),
-#      boot it, and prove: OTA grant, loopback-only binding, simulated-device
-#      hello ack + abort->tts stop, auth refusal negative, silent binary drop
-#      negative, restart recovery, corrupted-config fail-fast negative.
+#      scan the EFFECTIVE merged config (upstream defaults + overlay;
+#      review R1 P2-1), boot it, and prove: OTA grant, OTA-issued token
+#      replayed over WSS, loopback-only binding, simulated-device hello ack +
+#      abort->tts stop, auth refusal negative, silent binary drop negative,
+#      restart recovery with the same device-id, corrupted-config fail-fast
+#      negative, and --skip-clone re-render idempotency.
 # No real credentials, no real device, no external egress: the gateway-minimal
-# profile configures no ASR/LLM/TTS providers at all.
+# profile configures no ASR/LLM/TTS/VLLM providers at all.
 on:
   pull_request:
     paths:
@@ -102,6 +107,12 @@ jobs:
           sm = cfg["selected_module"]
           assert set(sm.keys()) == {"VAD", "ASR", "LLM", "TTS", "VLLM", "Memory", "Intent"}, sm
           assert sm["Memory"] == "nomem" and sm["Intent"] == "nointent"
+          # VLLM must be explicitly DISABLED ("" is falsy: upstream
+          # vision_handler raises before instantiating any provider or reading
+          # any request body). Leaving the upstream default ChatGLMVLLM in
+          # place would keep https://open.bigmodel.cn alive in the merged
+          # effective config (review R1 P2-1).
+          assert sm["VLLM"] == "", sm
           assert cfg["ASR"]["FunASRServer"]["host"] == "127.0.0.1"
           assert cfg["LLM"]["OllamaLLM"]["base_url"].startswith("http://127.0.0.1")
           assert cfg["TTS"]["CustomTTS"]["url"].startswith("http://127.0.0.1")
@@ -115,6 +126,41 @@ jobs:
                   assert re.match(r"^(\$\{[A-Z_][A-Z0-9_]*\}|127\.0\.0\.1|localhost)(:\d+)?$", host), line
           print("gateway-minimal template OK (loopback, auth on, explicit-disabled map)")
           PY
+
+      - name: render_config.py — 0600 atomic write, owner survives a root re-render
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Regression for review R1 P1-1: os.replace does NOT preserve the
+          # replaced file's owner, so the SECOND root render must re-apply
+          # --owner or the service user loses read access to its 0600 config
+          # (crash-loop on every documented rotation/rollback flow). The tool
+          # is stdlib-only, so this runs without the upstream checkout.
+          sudo groupadd -f render-owner-test
+          sudo useradd -g render-owner-test render-owner-test
+          work="$(mktemp -d)"
+          chmod 755 "${work}"
+          mkdir -p "${work}/out" && chmod 755 "${work}/out"
+          printf 'k: ${XIAOZHI_TEST_ONLY}\n' > "${work}/template.yaml"
+          printf 'XIAOZHI_TEST_ONLY=first\n' > "${work}/first.env"
+          printf 'XIAOZHI_TEST_ONLY=second\n' > "${work}/second.env"
+          render() {
+            sudo python3 deploy/xiaozhi/render_config.py \
+              --template "${work}/template.yaml" --env-file "$1" \
+              --output "${work}/out/.config.yaml" --owner render-owner-test
+          }
+          render "${work}/first.env"
+          render "${work}/second.env"   # the re-render from the defect report
+          # Owner, group, mode and content must all be service-user usable.
+          stat_out="$(stat -c '%U:%G %a' "${work}/out/.config.yaml")"
+          [ "${stat_out}" = "render-owner-test:render-owner-test 600" ] || {
+            echo "::error::re-render lost service-user ownership/mode: ${stat_out}"; exit 1; }
+          sudo -u render-owner-test cat "${work}/out/.config.yaml" | grep -q 'second' || {
+            echo "::error::service user cannot read the re-rendered config"; exit 1; }
+          # Atomic replace must leave no temp file droppings behind.
+          leftovers="$(ls -A "${work}/out" | grep -v '^\.config\.yaml$' || true)"
+          [ -z "${leftovers}" ] || { echo "::error::temp files left behind: ${leftovers}"; exit 1; }
+          echo "render ownership regression OK (0600, owner preserved across re-render)"
 
       - name: Env template carries no real secrets
         shell: bash
@@ -194,6 +240,80 @@ jobs:
             --target "$RUNNER_TEMP/xiaozhi-esp32-server" \
             --env-file "$(pwd)/xiaozhi-smoke.env"
 
+      - name: Effective merged config — explicit module map, loopback-only active surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Review R1 P2-1: scanning only the repo template misses what is
+          # actually EFFECTIVE at runtime — upstream config.yaml defaults
+          # merged (recursively, custom wins) with the rendered overlay by
+          # upstream config_loader.load_config. Mirror that merge and assert
+          # the real surface. Never prints secret values (hosts/module names
+          # only).
+          "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" - <<'PY'
+          import os
+          import re
+          import yaml
+
+          server_root = os.path.join(
+              os.environ["RUNNER_TEMP"], "xiaozhi-esp32-server", "main", "xiaozhi-server"
+          )
+
+          def merge(defaults, overlay):
+              # Mirrors upstream config_loader.merge_configs exactly: recursive
+              # dict merge, the custom (overlay) side wins on conflicts.
+              if not isinstance(defaults, dict) or not isinstance(overlay, dict):
+                  return overlay
+              merged = dict(defaults)
+              for key, value in overlay.items():
+                  if isinstance(merged.get(key), dict) and isinstance(value, dict):
+                      merged[key] = merge(merged[key], value)
+                  else:
+                      merged[key] = value
+              return merged
+
+          with open(os.path.join(server_root, "config.yaml"), encoding="utf-8") as fh:
+              upstream = yaml.safe_load(fh)
+          with open(os.path.join(server_root, "data", ".config.yaml"), encoding="utf-8") as fh:
+              overlay = yaml.safe_load(fh)
+          effective = merge(upstream, overlay)
+
+          expected = {
+              "VAD": "SileroVAD",
+              "ASR": "FunASRServer",
+              "LLM": "OllamaLLM",
+              "TTS": "CustomTTS",
+              "VLLM": "",  # falsy: upstream vision_handler raises before any egress
+              "Memory": "nomem",
+              "Intent": "nointent",
+          }
+          assert effective["selected_module"] == expected, effective["selected_module"]
+          assert not effective["selected_module"]["VLLM"]
+
+          url_re = re.compile(r"https?://([^/\s\"']+)")
+          loopback_re = re.compile(r"^(127\.0\.0\.1|localhost)(:\d+)?$")
+          hosts = []
+
+          def collect(node):
+              if isinstance(node, dict):
+                  for value in node.values():
+                      collect(value)
+              elif isinstance(node, list):
+                  for value in node:
+                      collect(value)
+              elif isinstance(node, str):
+                  hosts.extend(url_re.findall(node))
+
+          # Only the ACTIVE provider surface: the selected module instance of
+          # each cognitive layer. Inactive upstream defaults may legitimately
+          # carry external URLs — they are never instantiated.
+          for module in ("VAD", "ASR", "LLM", "TTS"):
+              collect(effective[module][effective["selected_module"][module]])
+          bad = [h for h in hosts if not loopback_re.match(h)]
+          assert not bad, f"active provider surface has non-loopback endpoints: {bad}"
+          print("effective merged config OK (explicit map, VLLM disabled, loopback-only active surface)")
+          PY
+
       - name: Boot the gateway-minimal server (foreground, smoke env)
         shell: bash
         run: |
@@ -246,7 +366,7 @@ jobs:
             --device-id aa:bb:cc:dd:ee:02 --client-id negative-probe \
             --expect-silent-binary
 
-      - name: Restart recovery — same pinned config, fresh session
+      - name: Restart recovery — same pinned config, same device, fresh session
         shell: bash
         run: |
           set -euo pipefail
@@ -259,12 +379,17 @@ jobs:
           echo $! > server.pid
           # Readiness poll: server2 takes a few seconds to import + bind; probe
           # until the hello succeeds (max ~45s) instead of racing the boot.
+          # Review R1 P2-2: the SAME device-id reconnects across the restart —
+          # under upstream's per-connection uuid4 session_id the id MUST change
+          # even for the same device, so this discriminates against a
+          # per-device session mapping being reused (two different device-ids
+          # would make the inequality a tautology).
           rm -f /tmp/session2.log
           ready=""
           for _ in $(seq 1 45); do
             if "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" "$GITHUB_WORKSPACE/deploy/xiaozhi/probe_hello.py" \
               --url ws://127.0.0.1:8000/xiaozhi/v1/ \
-              --device-id aa:bb:cc:dd:ee:03 --client-id restart-probe --without-abort \
+              --device-id aa:bb:cc:dd:ee:04 --client-id restart-probe --without-abort \
               --auth-key "${XIAOZHI_AUTH_KEY}" > /tmp/session2.log 2>&1; then
               ready="1"
               break
@@ -277,10 +402,10 @@ jobs:
           [ -n "${session2}" ] || { echo "::error::no session after restart"; exit 1; }
           session1="$(cat "$GITHUB_WORKSPACE/session1.id")"
           if [ "${session2}" = "${session1}" ]; then
-            echo "::error::session_id did not rotate across restart (mapping stale?)"
+            echo "::error::same device reconnected after restart but session_id did not change (per-device mapping reused?)"
             exit 1
           fi
-          echo "restart recovery OK (fresh session_id minted)"
+          echo "restart recovery OK (same device-id, fresh per-connection session_id)"
 
       - name: Corrupted-config negative — the boot must fail fast, not limp
         shell: bash
@@ -300,6 +425,34 @@ jobs:
           tail -30 server3.log | grep -qiE 'yaml|scanner|parser|error' || {
             echo "::error::boot failed without a config-parse error trace"; tail -30 server3.log; exit 1; }
           echo "corrupted-config negative OK (non-zero exit with parse error)"
+
+      - name: Re-render idempotency — --skip-clone repairs the corrupted config
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Review R1 test-gap 3 + runbook §6 remedy as machine evidence: the
+          # documented recovery loop (bootstrap --skip-clone re-render) must
+          # be idempotent and must turn the corrupted config back into valid
+          # YAML (the previous step appended garbage). Unprivileged CI path:
+          # no chown happens here (runner user owns the tree and boots it).
+          bash deploy/xiaozhi/bootstrap.sh \
+            --target "$RUNNER_TEMP/xiaozhi-esp32-server" \
+            --env-file "$(pwd)/xiaozhi-smoke.env" \
+            --skip-clone
+          CFG="$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server/data/.config.yaml"
+          stat -c '%a' "${CFG}" | grep -qx '600' || { echo "::error::re-rendered config is not 0600"; exit 1; }
+          "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" - <<'PY'
+          import os
+          import yaml
+          cfg_path = os.path.join(
+              os.environ["RUNNER_TEMP"], "xiaozhi-esp32-server", "main", "xiaozhi-server",
+              "data", ".config.yaml",
+          )
+          with open(cfg_path, encoding="utf-8") as fh:
+              cfg = yaml.safe_load(fh)
+          assert isinstance(cfg, dict) and cfg["server"]["ip"] == "127.0.0.1"
+          print("re-render idempotency OK (--skip-clone restored a valid 0600 config)")
+          PY
 
       - name: Failure evidence (small tails only)
         if: failure()

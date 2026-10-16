@@ -24,9 +24,11 @@ Type=simple
 User=xiaozhi-server
 Group=xiaozhi-server
 WorkingDirectory=/opt/xiaozhi-esp32-server/main/xiaozhi-server
-# 可选运维覆盖（root:root 0600；前缀 '-' = 缺失不阻断）。渲染配置在
-# data/.config.yaml（0600，由 bootstrap.sh + render_config.py 生成）。
-EnvironmentFile=-/etc/xiaozhi/xiaozhi.env
+# 渲染配置在 data/.config.yaml（0600，属主 xiaozhi-server，由 bootstrap.sh +
+# render_config.py 生成并在每次渲染后回填属主）。上游运行时只读该配置文件
+# （config_loader 无 env 插值），因此【不】用 EnvironmentFile 把
+# XIAOZHI_AUTH_KEY 等注入进程环境：env 文件只是渲染期输入，注入只会扩大
+# /proc/<pid>/environ 的 secret 暴露面（review R1 P2-3）。
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/xiaozhi-esp32-server/venv/bin/python app.py
 TimeoutStopSec=30

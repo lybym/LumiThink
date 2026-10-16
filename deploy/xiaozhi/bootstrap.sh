@@ -21,19 +21,22 @@ source "${REPO_ROOT}/deploy/xiaozhi/version.env"
 TARGET="/opt/xiaozhi-esp32-server"
 ENV_FILE=""
 SKIP_CLONE=0
+SERVICE_USER="xiaozhi-server"
 while [ $# -gt 0 ]; do
   case "$1" in
     --target) TARGET="$2"; shift 2 ;;
     --env-file) ENV_FILE="$2"; shift 2 ;;
     --skip-clone) SKIP_CLONE=1; shift ;;
+    --service-user) SERVICE_USER="$2"; shift 2 ;;
     *) echo "[xiaozhi:bootstrap] unknown arg: $1" >&2; exit 1 ;;
   esac
 done
 
 [ -n "${XIAOZHI_SERVER_COMMIT}" ] || { echo "[xiaozhi:bootstrap] version.env pin missing" >&2; exit 1; }
-if [ "${SKIP_CLONE}" -eq 0 ]; then
-  [ -n "${ENV_FILE}" ] || { echo "[xiaozhi:bootstrap] --env-file required" >&2; exit 1; }
-fi
+# The render step is unconditional (also on --skip-clone re-renders), so the
+# env file is always required — fail here with a clear message, not inside
+# render_config with an empty path.
+[ -n "${ENV_FILE}" ] || { echo "[xiaozhi:bootstrap] --env-file required" >&2; exit 1; }
 
 # Privilege: only escalate when the target location is not writable by us.
 SUDO=""
@@ -96,12 +99,31 @@ command -v ffmpeg >/dev/null 2>&1 || {
 }
 echo "[xiaozhi:bootstrap] system deps OK (libopus0, ffmpeg)"
 
-# --- 4. 渲染配置（fail-closed；0600；归属修正由 runbook §2 步骤 3 完成）---------
+# --- 4. 渲染配置（fail-closed；0600；root 执行时产物/目录归属 = 服务用户）------
+# Ownership contract (review R1 P1-1): os.replace does NOT preserve the
+# replaced file's owner, so a root re-render would otherwise leave a
+# root:root 0600 config the service user cannot read (crash-loop on the
+# SECOND config change). When running as root — the systemd path — every
+# render re-applies the service-user owner to the file AND the data/tmp dirs
+# (the unit also writes tmp/server.log and data/bin as that user).
+RENDER_OWNER_ARGS=()
+if [ "$(id -u)" -eq 0 ]; then
+  getent passwd "${SERVICE_USER}" >/dev/null 2>&1 || {
+    echo "[xiaozhi:bootstrap] service user ${SERVICE_USER} missing (runbook §2 step 0)" >&2
+    exit 1
+  }
+  RENDER_OWNER_ARGS=(--owner "${SERVICE_USER}")
+fi
 ${SUDO} mkdir -p "${SERVER_DIR}/data" "${SERVER_DIR}/tmp"
 ${SUDO} "${VENV_DIR}/bin/python" "${REPO_ROOT}/deploy/xiaozhi/render_config.py" \
   --template "${REPO_ROOT}/deploy/xiaozhi/config/gateway-minimal.yaml" \
   --env-file "${ENV_FILE}" \
-  --output "${SERVER_DIR}/data/.config.yaml"
+  --output "${SERVER_DIR}/data/.config.yaml" \
+  "${RENDER_OWNER_ARGS[@]+${RENDER_OWNER_ARGS[@]}}"
 ${SUDO} chmod 755 "${SERVER_DIR}/data" "${SERVER_DIR}/tmp"
+if [ "$(id -u)" -eq 0 ]; then
+  ${SUDO} chown -R "${SERVICE_USER}:${SERVICE_USER}" \
+    "${SERVER_DIR}/data" "${SERVER_DIR}/tmp"
+fi
 
 echo "[xiaozhi:bootstrap] done. next: runbook §2 (systemd install) or §5 (CI-style foreground start)"

@@ -37,7 +37,7 @@ Internet
 | 8003/tcp | **仅 127.0.0.1** | OTA HTTP；同上 |
 | 3000/tcp | 仅 127.0.0.1 | LumiThink（R1-08 既有，未改动） |
 
-`/mcp/vision/explain`（8003）**不由 Caddy 代理**：gateway-minimal 档位无 VLLM，公网不存在该路由（fail-closed）。
+`/mcp/vision/explain`（8003）**不由 Caddy 代理**：gateway-minimal 档位显式禁用视觉模块（模板 `VLLM: ""`，上游 vision_handler 对 falsy 模块名请求即 raise），公网不存在该路由（fail-closed）。
 
 ## 2. 首次部署（干净 Linux 主机）
 
@@ -61,9 +61,9 @@ sudo env "PATH=$PATH" bash deploy/xiaozhi/bootstrap.sh \
 
 # 3. 服务（受限进程单元）
 sudo cp deploy/xiaozhi/xiaozhi-server.service /etc/systemd/system/xiaozhi-server.service
-sudo chown -R xiaozhi-server:xiaozhi-server \
-  /opt/xiaozhi-esp32-server/main/xiaozhi-server/data \
-  /opt/xiaozhi-esp32-server/main/xiaozhi-server/tmp
+#    data/、tmp/ 与渲染产物的属主由 bootstrap.sh 以 root 执行时自动回填
+#    （render_config.py --owner + chown -R xiaozhi-server），每次重渲染都保持，
+#    无需手工 chown（review R1 P1-1）。
 sudo systemctl daemon-reload && sudo systemctl enable --now xiaozhi-server
 
 # 4. 健康检查（OTA + 回环绑定 + 模拟设备 hello/abort）
@@ -83,12 +83,12 @@ sudo systemctl reload caddy
 
 | Slot | 注入 | 语义 |
 | --- | --- | --- |
-| `XIAOZHI_AUTH_KEY` | `/etc/xiaozhi/xiaozhi.env`（0600） | HMAC-SHA256 设备 token 签名密钥（上游 `core/auth.py`）；轮换 = 改值 → 重渲染 → 重启，期间旧 token 全部失效（fail-closed） |
+| `XIAOZHI_AUTH_KEY` | `/etc/xiaozhi/xiaozhi.env`（0600） | HMAC-SHA256 设备 token 签名密钥（上游 `core/auth.py`）；轮换 = 改值 → 重渲染 → 重启（重渲染用 §6 的 bootstrap 命令，属主自动回填给服务用户），期间旧 token 全部失效（fail-closed）。env 文件只是渲染期输入：systemd 单元**不**把它注入进程环境（上游运行时无 env 插值，review R1 P2-3） |
 | 设备 token | 设备 POST `/xiaozhi/ota/` 换取 | 7 天有效（`expire_seconds: 604800`）；含签名+时间戳，不含明文设备标识 |
 | 设备白名单 | 模板固定 `allowed_devices: []` | **无 token 旁路**：白名单机制存在但保持为空（最小权限；上游默认示例含白名单，本部署显式关闭） |
 | 供应商 ASR/TTS/LLM Key | **不存在于本档位** | 启用 = 档位变更 + `docs/VOICE_HARDWARE.md §3` 供应商评审；Key 永不入 Git/普通日志 |
 
-纪律：渲染由 `render_config.py` 执行——缺 key/占位值拒绝（报错只给变量名）、产物 0600、值永不回显。审计面：小智服务端是**领域外发边界之前**的语音入口，儿童会话正文不经过它（gateway-minimal 档位连 ASR 都未配置）。
+纪律：渲染由 `render_config.py` 执行——缺 key/占位值拒绝（报错只给变量名）、产物 0600、值永不回显、root 执行时属主回填服务用户（`--owner`，每次渲染都保持）。审计面：小智服务端是**领域外发边界之前**的语音入口，儿童会话正文不经过它（gateway-minimal 档位连 ASR 都未配置）。
 
 ## 4. gateway-minimal 档位：明确的"禁用"语义（AC 2）
 
@@ -99,9 +99,9 @@ sudo systemctl reload caddy
 - `VAD: SileroVAD`——唯一真实启用的模块（纯本地：模型随上游仓库内 `models/snakers4_silero-vad/` 提供，onnxruntime CPU 推理，零外发）。
 - `ASR: FunASRServer`、`LLM: OllamaLLM`、`TTS: CustomTTS`——认知层全部显式指向**回环死端口**（`127.0.0.1:10096` / `:11434` / `:9`）：初始化仅建对象（服务可正常启动、协议面可用），任何真实音频/推理/合成请求连接即拒绝——**大声失败，零外发、零供应商、零模型下载**。
 - `Memory: nomem`、`Intent: nointent`——记忆与意图识别显式关闭。
-- `VLLM` 保持上游默认（视觉路径不经 Caddy，公网无路由）。
+- `VLLM: ""`——视觉模块**显式禁用**（review R1 P2-1）：上游 `config.yaml` 默认 `VLLM: ChatGLMVLLM{url: https://open.bigmodel.cn/...}`，递归合并下省略即存活；`""` 为 falsy，上游 `core/api/vision_handler.py` 在实例化 provider、读取任何请求体之前直接 raise"您还未设置默认的视觉分析模块"（fail-loud、零外发）。合并后有效配置不存在任何 VLLM 供应段（CI 扫描合并后有效配置断言）。
 - 鉴权强制开启且 `allowed_devices: []`（无 token 旁路），HMAC token 7 天。
-- "未启用供应商 ASR/TTS 时悄然接外部服务"被两层否定：配置层所有具体 URL 均为回环（回归测试 + CI 双断言，非回环主机即测试失败）；行为层回环端点不存在，任何外发语义都退化为本地 fail-loud。
+- "未启用供应商 ASR/TTS 时悄然接外部服务"被两层否定：配置层所有具体 URL 均为回环（模板结构断言 + **合并后有效配置**扫描 + Node 回归测试三重断言，非回环主机即测试失败）；行为层回环端点不存在，任何外发语义都退化为本地 fail-loud。
 - 畸形/垃圾二进制音频：入口按协议拒绝（无内容回显、服务端不崩溃——CI 负例断言 OTA 健康随后复验）。
 - 上游 `config.yaml` 的第三方占位（qweather key、Home Assistant 等）位于上游文件的 `plugins` 段且只在对应插件被意图调用时使用；本档位 `Intent: nointent` 且无 LLM 链路。CI 泄漏扫描断言**本仓库**模板零真实凭据。
 
@@ -110,7 +110,7 @@ sudo systemctl reload caddy
 在干净 ubuntu runner 上执行（即 AC 1 的"干净 Linux/独立环境"自动化面）：
 
 1. **artifacts**：`bash -n` 全部脚本、`python -m py_compile` 全部 python、`systemd-analyze verify`（沿用 R1-08 的 denylist 仲裁）、模板 YAML 解析、模板/env 零真实凭据、`version.env` 与 `XIAOZHI_GATEWAY_BASELINE` 钉死一致性（由 Node 回归测试承担）。
-2. **deployment smoke**：读取 `version.env` → 浅克隆 pinned commit（SHA 校验）→ venv + gateway-minimal 依赖（含 `libopus0`/`ffmpeg` 系统依赖核验）→ 渲染配置 → 启动服务端 → `healthcheck.sh`（OTA POST 200 + websocket 下发面 + `ss` 回环断言 + hello/abort 探针）→ **负例**：无 token 连接被明文拒绝并关闭（`--expect-auth-failure`）、无 ASR 时二进制音频被静默丢弃且协议面存活（`--expect-silent-binary`）→ **重启恢复**：TERM 后重启，OTA 200 且新 hello 拿到**不同 session_id** → **损坏配置负例**：写入非法 YAML 后进程必须非零退出（fail-fast，不得带病启动）。
+2. **deployment smoke**：读取 `version.env` → 浅克隆 pinned commit（SHA 校验）→ venv + gateway-minimal 依赖（含 `libopus0`/`ffmpeg` 系统依赖核验）→ 渲染配置 → **合并后有效配置扫描**（镜像上游 `merge_configs` 递归合并上游 `config.yaml` + 渲染层，断言 `selected_module` 七键显式且 `VLLM: ""`、活跃 provider 面全部回环）→ 启动服务端 → `healthcheck.sh`（OTA POST 200 + websocket 下发面 + **OTA 签发 token 重放 WSS 被接受** + `ss` 回环断言 + hello/abort 探针）→ **负例**：无 token 连接被明文拒绝并关闭（`--expect-auth-failure`）、无 ASR 时二进制音频被静默丢弃且协议面存活（`--expect-silent-binary`）→ **重启恢复**：TERM 后重启，OTA 200，**同一 device-id** 重连 hello 重新成功且 session_id 变化（per-connection 会话，排除设备映射复用）→ **损坏配置负例**：写入非法 YAML 后进程必须非零退出（fail-fast，不得带病启动）→ **重渲染幂等**：`--skip-clone` 重跑 bootstrap 修复损坏配置（§6 补救回路的机器面）且产物恢复合法 YAML。
 
 本地等价复现（Linux）：`bash deploy/xiaozhi/bootstrap.sh --target <dir> --env-file <env>` → 手动启动 → `deploy/xiaozhi/healthcheck.sh`。冒烟失败时日志只保留终态摘要（不进 artifact，避免存储配额类失败）。
 
@@ -118,7 +118,8 @@ sudo systemctl reload caddy
 
 | 症状 | 语义 | 处置 |
 | --- | --- | --- |
-| 启动即退（非零退出 + YAML 解析错误） | `data/.config.yaml` 损坏/半渲染 | 重新渲染（修 env）再启动；**不得**手工改渲染产物了事 |
+| 启动即退（非零退出 + YAML 解析错误） | `data/.config.yaml` 损坏/半渲染 | 重新渲染再启动：`sudo env "PATH=$PATH" bash deploy/xiaozhi/bootstrap.sh --target /opt/xiaozhi-esp32-server --env-file /etc/xiaozhi/xiaozhi.env --skip-clone`；**不得**手工改渲染产物了事 |
+| 启动即退，日志含读取 `data/.config.yaml` 的 `Permission denied`/EACCES | 渲染产物属主不是 `xiaozhi-server`（root 渲染未回填属主即 crash-loop，review R1 P1-1） | 用当前版本 bootstrap 重新渲染（命令同上，`--owner` 自动回填属主并保持）；CI artifacts job 有"二次渲染后属主/可读性"回归防复发；勿以手工 chown 渲染产物替代 |
 | `render_config.py` 拒绝：missing/placeholder | env 缺 key 或占位值 | 补真实值；报错只含变量名（无值回显） |
 | 连接被拒 `认证失败` | 无/过期/签名不符 token | 设备重新 POST `/xiaozhi/ota/` 换 token；近期轮换过 auth_key 则全部设备需重取 |
 | 每连接日志 `connect call failed`（10096/11434/9 回环拒绝） | gateway-minimal 档位预期（认知层回环占位 fail-loud） | 非故障（§4）；消除它 = 启用对应真实模块 = 档位变更 + 评审 |
@@ -136,10 +137,10 @@ sudo systemctl reload caddy
 
 ## 8. 回滚
 
-1. **版本回滚**：`/opt/xiaozhi-esp32-server` 是 pinned checkout（detached HEAD）；回滚 = `git fetch origin <旧 SHA> && git checkout --detach <旧 SHA>` → 重渲染（模板随 LumiThink 仓库版本走）→ 重启 → healthcheck。**换 SHA 必须先过兼容矩阵评审**（§1），紧急回滚后补评审记录。
-2. **配置回滚**：渲染前留存 `/etc/xiaozhi/xiaozhi.env`（`cp` 0600）；恢复上一份 env → 重渲染 → 重启。
+1. **版本回滚**：`/opt/xiaozhi-esp32-server` 是 pinned checkout（detached HEAD）；回滚 = `git fetch origin <旧 SHA> && git checkout --detach <旧 SHA>` → 重渲染（bootstrap `--skip-clone` 命令见 §6，模板随 LumiThink 仓库版本走、属主自动回填）→ 重启 → healthcheck。**换 SHA 必须先过兼容矩阵评审**（§1），紧急回滚后补评审记录。
+2. **配置回滚**：渲染前留存 `/etc/xiaozhi/xiaozhi.env`（`cp` 0600）；恢复上一份 env → 重渲染（同 §6 命令）→ 重启。
 3. **停用**：`systemctl disable --now xiaozhi-server` + 从 `/etc/caddy/Caddyfile` 移除小智站点块并 reload。无持久化数据依赖（无数据库、无快照、无儿童数据），停用即净退出。
-4. **凭证应急**：轮换 `XIAOZHI_AUTH_KEY` → 重渲染 → 重启（旧 token 全失效，设备重新走 OTA 换取）。
+4. **凭证应急**：轮换 `XIAOZHI_AUTH_KEY` → 重渲染（同 §6 命令，属主自动回填）→ 重启（旧 token 全失效，设备重新走 OTA 换取）。
 
 ## 9. CI 无法证明、由运维执行的部分（诚实披露）
 
@@ -147,6 +148,8 @@ sudo systemctl reload caddy
 - systemd 沙箱在真实内核上的拦截效果（建议 `systemd-analyze security xiaozhi-server` 复核）；
 - OTA **固件下载面**（`data/bin`）的真实升级流：本档位只验证接口契约（200 + 版本协商形状），不放置真实固件；
 - **真实设备接入**（hello 实发、激活、OTA 指向私有服务端、打断/重连）：全部归 #E2E-08；本项验收标注为 **"私有服务端已验证，真实设备仍待 #E2E-08"**。
+
+**上游旁路与接受理由（review R1 P2-1 披露）**：钉死 commit 的上游 `core/api/vision_handler.py` 存在 `client_id == "web_test_client"` 的**免 token 旁路**（上游内置测试客户端语义，L37）。本部署对该旁路的收口是双重的：① `/mcp/vision/explain` 端点只绑 `127.0.0.1:8003` 且 Caddy 刻意不代理（远程不可达，触发面仅限本机回环进程）；② 模板 `VLLM: ""` 使视觉路径在任何请求体读取/外发之前 fail-loud（合并后有效配置无 VLLM 供应段，CI 扫描断言）。接受理由 = 端点网络边界 + 模块显式禁用；两者任一失效即需重新评审。
 
 ## 10. 测试固件差异记录（实施范围 4：只记录，不改写固件）
 

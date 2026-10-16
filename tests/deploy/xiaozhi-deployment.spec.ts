@@ -100,6 +100,11 @@ test("gateway-minimal config template: loopback-only, auth forced on, ASR/TTS/LL
   }
   assert.match(block, /^  Memory: nomem$/m);
   assert.match(block, /^  Intent: nointent$/m);
+  // VLLM is EXPLICITLY disabled ("" is falsy: upstream vision_handler raises
+  // before instantiating any provider or reading any request body — review
+  // R1 P2-1). The upstream default ChatGLMVLLM would keep
+  // https://open.bigmodel.cn alive in the merged effective config.
+  assert.match(block, /^  VLLM: ""$/m);
 
   // Zero-egress assertion: every concrete URL on an active line is either an
   // injected ${VAR} (whole host a placeholder) or a loopback (127.0.0.1/
@@ -174,6 +179,9 @@ test("probe, healthcheck, bootstrap, unit and Caddy artifacts exist and carry th
   assert.ok(healthcheck.includes("/xiaozhi/ota/"));
   assert.ok(healthcheck.includes("8000|8003"), "loopback binding assertion missing");
   assert.ok(healthcheck.includes("probe_hello.py"));
+  // Device-real token path: the OTA-issued token must be replayed over WSS
+  // (review R1 test-gap 1), not only the self-minted one.
+  assert.ok(healthcheck.includes("--token"), "OTA-issued token replay missing");
 
   const bootstrap = read("deploy/xiaozhi/bootstrap.sh");
   const pins = parseVersionEnv(read("deploy/xiaozhi/version.env"));
@@ -181,12 +189,26 @@ test("probe, healthcheck, bootstrap, unit and Caddy artifacts exist and carry th
   assert.ok(bootstrap.includes("XIAOZHI_SERVER_COMMIT"));
   assert.ok(bootstrap.includes("requirements-gateway-minimal.txt"));
   assert.ok(bootstrap.includes("render_config.py"));
+  // Ownership contract (review R1 P1-1): every root render must leave the
+  // rendered config owned by the service user (os.replace drops ownership).
+  assert.ok(bootstrap.includes("--service-user"));
+  assert.ok(bootstrap.includes("--owner"));
+  assert.ok(bootstrap.includes("chown -R"));
+
+  const render = read("deploy/xiaozhi/render_config.py");
+  assert.ok(render.includes("--owner"), "render_config.py lacks the --owner contract");
+  assert.ok(render.includes("os.replace"), "atomic write missing");
 
   const unit = read("deploy/xiaozhi/xiaozhi-server.service");
   assert.match(unit, /^User=xiaozhi-server$/m);
   assert.match(unit, /^NoNewPrivileges=yes$/m);
   assert.match(unit, /^RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX$/m);
   assert.match(unit, /^ExecStart=\/opt\/xiaozhi-esp32-server\/venv\/bin\/python app\.py$/m);
+  // No runtime secret environment (review R1 P2-3): upstream reads only the
+  // rendered config (no env interpolation), so the unit must not inject the
+  // env file into the process environment (the word may still appear in
+  // explanatory comments — match the directive itself, anchored at line start).
+  assert.doesNotMatch(unit, /^EnvironmentFile=/m, "unit must not inject env secrets at runtime");
 
   const caddy = read("deploy/xiaozhi/caddy/Caddyfile.xiaozhi");
   assert.ok(caddy.includes("reverse_proxy @devicews 127.0.0.1:8000"));
@@ -205,6 +227,23 @@ test("runbook carries the honest acceptance label and stays in sync with version
   assert.ok(runbook.includes("私有服务端已验证，真实设备仍待 #E2E-08"));
   // Firmware diff is recorded, not rewritten.
   assert.ok(runbook.includes("v2.5.2_nulllab-ai-vox-v3"));
+  // Review R1 doc regressions: the ownership failure mode (P1-1) and the
+  // web_test_client bypass disclosure (P2-1) must stay documented.
+  assert.ok(runbook.includes("Permission denied"));
+  assert.ok(runbook.includes("web_test_client"));
+});
+
+test("the CI deployment gate pins the same Python version as version.env", () => {
+  // Review R1 test-gap 5: workflow PYTHON_VERSION vs version.env drift is
+  // caught fail-closed by bootstrap at runtime; assert it explicitly too.
+  const pins = parseVersionEnv(read("deploy/xiaozhi/version.env"));
+  const py = pins.get("XIAOZHI_SERVER_PYTHON");
+  assert.match(py ?? "", /^\d+\.\d+$/);
+  const workflow = read(".github/workflows/e2e-04-xiaozhi-deployment-gate.yml");
+  assert.ok(
+    workflow.includes(`PYTHON_VERSION: '${py}'`),
+    `workflow PYTHON_VERSION must equal version.env XIAOZHI_SERVER_PYTHON (${py})`,
+  );
 });
 
 test("the CI deployment gate proves the DoD negatives and triggers on the xiaozhi deploy surface", () => {

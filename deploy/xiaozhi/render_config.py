@@ -5,12 +5,17 @@ Fail-closed rules:
   - every ${VAR} in the template must exist in the env file and be non-empty;
   - placeholder-shaped values (<generate..., 你的...) are refused;
   - secret values are never echoed (errors name the variable, never the value);
-  - output is written 0600 via a temp file + atomic replace.
+  - output is written 0600 via a temp file + atomic replace;
+  - with --owner, the output is chowned to USER[:GROUP] after the atomic
+    replace (os.replace does NOT preserve the replaced file's owner, so every
+    root re-render must re-apply it — otherwise the service user loses read
+    access to its 0600 config and the unit crash-loops).
 
 Usage:
   python3 render_config.py --template config/gateway-minimal.yaml \
       --env-file /etc/xiaozhi/xiaozhi.env \
-      --output /opt/xiaozhi-esp32-server/main/xiaozhi-server/data/.config.yaml
+      --output /opt/xiaozhi-esp32-server/main/xiaozhi-server/data/.config.yaml \
+      --owner xiaozhi-server
 """
 
 import argparse
@@ -59,11 +64,49 @@ def refuse_placeholder(key, value):
         )
 
 
+def apply_owner(path, owner):
+    """Chown the rendered output to USER[:GROUP]; fail closed, never half-done.
+
+    A 0600 config owned by the wrong user is an unbootable deployment (the
+    service user gets EACCES), so an unsatisfiable --owner must abort the
+    render instead of leaving a root-owned file behind.
+    """
+    if not owner:
+        return
+    # POSIX-only stdlib (deployment target is Linux); imported lazily so the
+    # module stays importable on non-POSIX dev machines.
+    import grp
+    import pwd
+
+    user, _, group = owner.partition(":")
+    try:
+        uid = pwd.getpwnam(user).pw_uid
+        gid = grp.getgrnam(group).gr_gid if group else pwd.getpwnam(user).pw_gid
+    except KeyError as exc:
+        raise SystemExit(
+            f"[xiaozhi:render] --owner {owner}: unknown user/group ({exc}); "
+            "create the service user first (runbook §2 step 0)"
+        )
+    try:
+        os.chown(path, uid, gid)
+    except PermissionError:
+        raise SystemExit(
+            f"[xiaozhi:render] --owner {owner}: permission denied; re-run as "
+            "root (a wrongly-owned 0600 config crash-loops the service)"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--template", required=True)
     parser.add_argument("--env-file", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--owner",
+        default="",
+        help="USER[:GROUP] the output must belong to (root re-renders must "
+        "re-apply it: os.replace does not preserve ownership)",
+    )
     args = parser.parse_args()
 
     with open(args.template, "r", encoding="utf-8") as handle:
@@ -110,8 +153,13 @@ def main():
             pass
         raise
     os.chmod(args.output, stat.S_IRUSR | stat.S_IWUSR)
+    apply_owner(args.output, args.owner)
     # One line, value-free: which keys were injected, nothing else.
-    print(f"[xiaozhi:render] wrote {args.output} (0600) with keys: " + ", ".join(required))
+    owner_note = f", owner={args.owner}" if args.owner else ""
+    print(
+        f"[xiaozhi:render] wrote {args.output} (0600{owner_note}) with keys: "
+        + ", ".join(required)
+    )
     return 0
 
 
