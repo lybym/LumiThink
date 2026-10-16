@@ -147,10 +147,16 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Assert system deps (libopus, ffmpeg) exist on the clean runner
+      - name: Install + assert system deps (ffmpeg, libopus) — upstream runtime requirements
         shell: bash
         run: |
           set -euo pipefail
+          # ffmpeg + libopus0 are genuine upstream runtime requirements
+          # (app.py's check_ffmpeg_installed / opuslib_next's ctypes libopus);
+          # hosted runners no longer ship ffmpeg, so install explicitly and
+          # assert both before any deployment step.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg libopus0
           ffmpeg -version | head -1
           python3 -c "import ctypes; ctypes.CDLL('libopus.so.0'); print('libopus OK')"
 
