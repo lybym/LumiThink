@@ -7,13 +7,13 @@
 # 本地 ASR 的档位按上游 requirements.txt 安装（runbook §2/§6）。
 #
 # 为什么是子集：gateway-minimal 档位（deploy/xiaozhi/config/gateway-minimal.yaml）
-# 只启用 SileroVAD + 纯协议面（hello/OTA/auth/abort），ASR/LLM/TTS/Intent/Memory
-# 显式缺省 = 明确禁用（不接任何外部服务）。排除项 = 上游的重量级模型栈：
+# 显式覆盖全部模块键：VAD（纯本地）+ OTA/鉴权/协议面可用；ASR/LLM/TTS 指向
+# 回环死端口（fail-loud），Memory/Intent 显式关闭——不接任何外部服务。
+# 排除项 = 上游的重量级模型栈：
 # torch/torchaudio/funasr（fun_local ASR）、modelscope、sherpa_onnx（本地 ASR
 # 模型推理）、mem0ai/powermem（云端/向量记忆）——上游对这些 Provider 是懒加载
-# （selected_module 选中才 import），本档位不选中。连接入口对二进制音频
-# fail-closed 丢弃（core/connection.py: vad/asr 为 None 直接 return）。
-# 若 CI 冒烟再报模块缺失，对照上游 requirements.txt 补对应轻量 pin。
+# （selected_module 选中才 import），本档位不选中。若 CI 冒烟再报模块缺失，
+# 对照上游 requirements.txt 补对应轻量 pin。
 
 # --------- 上游 pin（与上游 requirements.txt 逐字一致）------------------------
 # cozepy0.20.0 要求 websockets<15.0.0，上游注释：暂时不推荐升级

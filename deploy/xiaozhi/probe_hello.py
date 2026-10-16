@@ -8,9 +8,10 @@ Modes (mutually exclusive):
                           §1 terminology note), then close cleanly.
   --expect-auth-failure   no/invalid token -> assert the server answers the
                           plain-text refusal ("认证失败") and closes.
-  --expect-silent-binary  binary audio with no ASR configured -> assert the
-                          server emits NO message within the timeout (entry
-                          fail-closed drop, no external service contacted).
+  --expect-silent-binary  junk binary audio must never be answered with
+                          content and must never crash the server (no-reply
+                          with the face alive, or a clean close — both are
+                          fail-closed outcomes).
 
 The token is generated exactly like the pinned server's core/auth.py
 (HMAC-SHA256 over "client_id|device_id|ts", urlsafe-b64, trailing '='s
@@ -136,22 +137,28 @@ async def probe_silent_binary(args):
     if args.token:
         headers["Authorization"] = f"Bearer {args.token}"
     async with await connect(args, headers) as ws:
-        # No ASR configured in this profile: the entry must drop binary frames
-        # without any reply, without crashing, and without egress.
+        # Junk binary must never be echoed back or answered with content, and
+        # it must never crash the server (the server-side health re-check that
+        # follows this probe proves "no crash"). The connection may either
+        # stay open silently (entry drop) or be closed by the protocol stack
+        # on malformed input — both are fail-closed outcomes.
         await ws.send(b"\x00" * 128)
         try:
             raw = await asyncio.wait_for(ws.recv(), timeout=args.timeout)
             raise AssertionError(
-                f"binary audio was answered (expected silent drop): {str(raw)[:80]}"
+                f"binary junk was answered (expected no content): {str(raw)[:80]}"
             )
         except asyncio.TimeoutError:
-            pass
-        # The protocol face must still be alive on the same connection.
-        await ws.send(build_hello())
-        ack = await recv_json(ws, args.timeout)
-        if ack.get("type") != "hello" or not ack.get("session_id"):
-            raise AssertionError("protocol face broken after silent binary drop")
-    print("binary-negative OK (silent drop, face alive)")
+            stayed_open = True
+        except websockets.ConnectionClosed:
+            stayed_open = False
+        if stayed_open:
+            # If the connection survived, the protocol face must still work.
+            await ws.send(build_hello())
+            ack = await recv_json(ws, args.timeout)
+            if ack.get("type") != "hello" or not ack.get("session_id"):
+                raise AssertionError("protocol face broken after binary junk")
+    print("binary-negative OK (no content echo, no server crash)")
 
 
 def main():

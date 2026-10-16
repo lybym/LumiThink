@@ -92,12 +92,18 @@ sudo systemctl reload caddy
 
 ## 4. gateway-minimal 档位：明确的"禁用"语义（AC 2）
 
-`deploy/xiaozhi/config/gateway-minimal.yaml`（渲染进 `data/.config.yaml`，其余配置沿用上游仓库内 `config.yaml`）：
+`deploy/xiaozhi/config/gateway-minimal.yaml`（渲染进 `data/.config.yaml`）。
 
-- `selected_module` 仅含 `VAD: SileroVAD`（纯本地：模型随上游仓库内 `models/snakers4_silero-vad/` 提供，onnxruntime CPU 推理，零外发）。
-- **ASR/LLM/TTS/VLLM/Intent/Memory 全部缺省 = 显式禁用**：每条连接启动时上游记录一条 `实例化组件失败: 'TTS'` 错误日志——这是**预期行为**（禁用档位的证据，不是故障）；设备二进制音频在连接入口被丢弃（上游 `core/connection.py` 对 vad/asr 为 None 直接 return），不转发、不外发、不落盘。
-- 文本协议面仅 hello / abort / ping 可响应。因此"未启用供应商 ASR/TTS 时悄然接外部服务"被两层否定：配置层无任何非回环端点（回归测试断言模板 0 外部 URL），行为层无处理链路可外发。
-- 上游 `config.yaml` 的第三方占位（qweather key、Home Assistant 等）位于上游文件的 `plugins` 段且只在对应插件被意图调用时使用；本档位无 LLM/意图链路，且 CI 泄漏扫描断言**本仓库**模板零真实凭据。上游自带示例 key 不随本部署提供任何儿童上下文。
+**关键前提（上游行为，已实证）**：上游将覆盖层与仓库内 `config.yaml` 做**递归合并**——覆盖层省略的 `selected_module` 键会保留上游默认（FunASR/ChatGLM/EdgeTTS 等供应商形状）。因此**"省略 = 禁用"不成立**，本模板显式覆盖全部模块键：
+
+- `VAD: SileroVAD`——唯一真实启用的模块（纯本地：模型随上游仓库内 `models/snakers4_silero-vad/` 提供，onnxruntime CPU 推理，零外发）。
+- `ASR: FunASRServer`、`LLM: OllamaLLM`、`TTS: CustomTTS`——认知层全部显式指向**回环死端口**（`127.0.0.1:10096` / `:11434` / `:9`）：初始化仅建对象（服务可正常启动、协议面可用），任何真实音频/推理/合成请求连接即拒绝——**大声失败，零外发、零供应商、零模型下载**。
+- `Memory: nomem`、`Intent: nointent`——记忆与意图识别显式关闭。
+- `VLLM` 保持上游默认（视觉路径不经 Caddy，公网无路由）。
+- 鉴权强制开启且 `allowed_devices: []`（无 token 旁路），HMAC token 7 天。
+- "未启用供应商 ASR/TTS 时悄然接外部服务"被两层否定：配置层所有具体 URL 均为回环（回归测试 + CI 双断言，非回环主机即测试失败）；行为层回环端点不存在，任何外发语义都退化为本地 fail-loud。
+- 畸形/垃圾二进制音频：入口按协议拒绝（无内容回显、服务端不崩溃——CI 负例断言 OTA 健康随后复验）。
+- 上游 `config.yaml` 的第三方占位（qweather key、Home Assistant 等）位于上游文件的 `plugins` 段且只在对应插件被意图调用时使用；本档位 `Intent: nointent` 且无 LLM 链路。CI 泄漏扫描断言**本仓库**模板零真实凭据。
 
 ## 5. CI 证据（`.github/workflows/e2e-04-xiaozhi-deployment-gate.yml`）
 
@@ -115,7 +121,7 @@ sudo systemctl reload caddy
 | 启动即退（非零退出 + YAML 解析错误） | `data/.config.yaml` 损坏/半渲染 | 重新渲染（修 env）再启动；**不得**手工改渲染产物了事 |
 | `render_config.py` 拒绝：missing/placeholder | env 缺 key 或占位值 | 补真实值；报错只含变量名（无值回显） |
 | 连接被拒 `认证失败` | 无/过期/签名不符 token | 设备重新 POST `/xiaozhi/ota/` 换 token；近期轮换过 auth_key 则全部设备需重取 |
-| 每连接日志 `实例化组件失败: 'TTS'` | gateway-minimal 档位预期 | 非故障（§4）；消除它 = 启用 TTS = 档位变更 + 评审 |
+| 每连接日志 `connect call failed`（10096/11434/9 回环拒绝） | gateway-minimal 档位预期（认知层回环占位 fail-loud） | 非故障（§4）；消除它 = 启用对应真实模块 = 档位变更 + 评审 |
 | OTA 200 但设备连不上 WSS | `XIAOZHI_DEVICE_WS_URL` 与真实域名/TLS 不符（上游注释亦警告 docker/公网部署需手工核对） | 核对 Caddy 站点块域名与该值逐字符一致；`curl -sSI https://<domain>/xiaozhi/ota/` 复核 |
 | `healthcheck` 报端口越界 | 8000/8003 绑定了非回环地址 | 配置被改（模板外覆盖）；恢复 `server.ip: 127.0.0.1` |
 | onnxruntime/libopus 加载失败 | 系统依赖缺失 | `apt-get install libopus0`；ffmpeg 缺失同理由上游启动检查拦截 |

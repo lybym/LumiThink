@@ -83,20 +83,37 @@ jobs:
           fi
           echo "unit syntax OK"
 
-      - name: Config template parses as YAML and stays loopback-only
+      - name: Config template parses as YAML, loopback-only, explicit-disabled
         shell: bash
         run: |
           set -euo pipefail
           python3 -m pip install --quiet pyyaml
           python3 - <<'PY'
+          import re
           import yaml
           cfg = yaml.safe_load(open("deploy/xiaozhi/config/gateway-minimal.yaml", encoding="utf-8"))
           server = cfg["server"]
           assert server["ip"] == "127.0.0.1", server["ip"]
           assert server["auth"]["enabled"] is True
           assert server["auth"]["allowed_devices"] == []
-          assert set(cfg["selected_module"].keys()) == {"VAD"}, cfg["selected_module"]
-          print("gateway-minimal template OK (loopback, auth on, VAD only)")
+          # Recursive merge keeps upstream default keys alive: every module key
+          # must be EXPLICITLY overridden (cognitive layers -> loopback dead
+          # endpoints, Memory/Intent explicitly off).
+          sm = cfg["selected_module"]
+          assert set(sm.keys()) == {"VAD", "ASR", "LLM", "TTS", "VLLM", "Memory", "Intent"}, sm
+          assert sm["Memory"] == "nomem" and sm["Intent"] == "nointent"
+          assert cfg["ASR"]["FunASRServer"]["host"] == "127.0.0.1"
+          assert cfg["LLM"]["OllamaLLM"]["base_url"].startswith("http://127.0.0.1")
+          assert cfg["TTS"]["CustomTTS"]["url"].startswith("http://127.0.0.1")
+          # No external host anywhere on active lines (loopback or ${VAR} only).
+          for raw_line in open("deploy/xiaozhi/config/gateway-minimal.yaml", encoding="utf-8"):
+              line = raw_line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              for match in re.finditer(r"https?://([^/\s\"']+)", line):
+                  host = match.group(1)
+                  assert re.match(r"^(\$\{[A-Z_][A-Z0-9_]*\}|127\.0\.0\.1|localhost)(:\d+)?$", host), line
+          print("gateway-minimal template OK (loopback, auth on, explicit-disabled map)")
           PY
 
       - name: Env template carries no real secrets
@@ -218,7 +235,7 @@ jobs:
             --device-id aa:bb:cc:dd:ee:01 --client-id negative-probe \
             --expect-auth-failure
 
-      - name: Negative — binary audio is silently dropped (no ASR configured, face stays alive)
+      - name: Negative — junk binary gets no content and no crash
         shell: bash
         run: |
           set -euo pipefail

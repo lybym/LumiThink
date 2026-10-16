@@ -90,23 +90,33 @@ test("gateway-minimal config template: loopback-only, auth forced on, ASR/TTS/LL
   assert.match(raw, /^    enabled: true$/m);
   assert.match(raw, /^    allowed_devices: \[\]$/m);
 
-  // The explicit-disabled surface: selected_module contains VAD and nothing else.
+  // The explicit-disabled surface: recursive merge keeps upstream default
+  // keys alive, so EVERY module key must be explicitly overridden — cognitive
+  // layers to loopback dead endpoints, Memory/Intent explicitly off.
   const block = raw.slice(raw.indexOf("selected_module:"), raw.indexOf("VAD:\n  SileroVAD:"));
   assert.ok(block.length > 0, "selected_module block not found");
-  assert.match(block, /^  VAD: SileroVAD$/m);
-  assert.doesNotMatch(block, /^  (ASR|LLM|TTS|VLLM|Intent|Memory):/m);
+  for (const key of ["VAD", "ASR", "LLM", "TTS", "VLLM", "Memory", "Intent"]) {
+    assert.match(block, new RegExp(`^  ${key}: `, "m"), `selected_module lacks explicit ${key}`);
+  }
+  assert.match(block, /^  Memory: nomem$/m);
+  assert.match(block, /^  Intent: nointent$/m);
 
-  // Zero-egress assertion: no non-comment line carries a concrete external
-  // URL; every scheme occurrence on an active line is an injected ${VAR}.
+  // Zero-egress assertion: every concrete URL on an active line is either an
+  // injected ${VAR} (whole host a placeholder) or a loopback (127.0.0.1/
+  // localhost) dead endpoint. No concrete external host may appear outside
+  // comments.
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
-    if (!trimmed.includes("://")) continue;
-    assert.match(
-      trimmed,
-      /\$\{[A-Z_][A-Z0-9_]*\}/,
-      `active config line carries a concrete URL (external egress risk): ${trimmed}`,
-    );
+    const urlMatches = [...trimmed.matchAll(/https?:\/\/([^\/\s"']+)/g)];
+    for (const match of urlMatches) {
+      const host = match[1];
+      assert.match(
+        host,
+        /^(\$\{[A-Z_][A-Z0-9_]*\}|127\.0\.0\.1|localhost)(:\d+)?$/,
+        `active config line carries a concrete external URL (egress risk): ${trimmed}`,
+      );
+    }
   }
 });
 
