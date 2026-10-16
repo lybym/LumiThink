@@ -56,12 +56,14 @@ test("gateway-minimal requirements are fully pinned and keep the upstream-critic
   }
   const pinned = new Set(lines.map((line) => line.split("==")[0].toLowerCase()));
   // websockets 14.2 is the upstream-pinned protocol dependency (cozepy <15
-  // constraint); numpy/onnxruntime back the only enabled module (SileroVAD).
+  // constraint); numpy/onnxruntime back the only enabled module (SileroVAD);
+  // opuslib_next is imported unconditionally at server import time.
   assert.ok(pinned.has("websockets"), "websockets pin missing");
   assert.ok(lines.includes("websockets==14.2"));
   assert.ok(pinned.has("numpy"));
   assert.ok(lines.includes("numpy==1.26.4"));
   assert.ok(pinned.has("onnxruntime"), "deployment-added onnxruntime pin missing");
+  assert.ok(pinned.has("opuslib_next"), "opuslib_next pin missing (top-level import)");
   // The heavy model stack must NOT leak into the gateway-minimal profile.
   for (const forbidden of ["torch", "torchaudio", "funasr", "modelscope", "sherpa_onnx", "mem0ai"]) {
     assert.ok(!pinned.has(forbidden), `${forbidden} must stay out of gateway-minimal`);
