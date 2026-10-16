@@ -36,6 +36,7 @@
 import { ContractValidationError, problem } from "../../contract/core.ts";
 import { ingestDomainFact } from "../../legacy-guard.ts";
 import type {
+  BridgeAgentFailureEvent,
   BridgeAgentHandle,
   BridgeAgentPort,
   BridgeDurableEvent,
@@ -95,7 +96,8 @@ export interface BridgeAuditEntry {
     | "bridge.session_closed"
     | "bridge.worker_quarantined"
     | "bridge.worker_recovered"
-    | "bridge.delta_dropped";
+    | "bridge.delta_dropped"
+    | "bridge.turn_failed";
   readonly sessionKey: string | null;
   readonly turnId: string | null;
   readonly epoch: number | null;
@@ -349,10 +351,55 @@ export function createVoiceBridge(options: VoiceBridgeOptions): VoiceBridgeServi
     state.activeTurn = null;
   }
 
+  /**
+   * Marker used as the `messageId` of a FAILED settlement: the attempt ended
+   * without any durable assistant message, so no message id exists (E2E-03,
+   * issue #53 DoD 2: 模型失败必须把轮次带到终态，而不是永久 RUNNING).
+   */
+  const FAILED_SETTLEMENT_MESSAGE_MARKER = "durable-settlement-absent";
+
+  /**
+   * Settle the active turn FAILED when its attempt ended without a durable
+   * settlement (E2E-03, issue #53: the port's failure notification for a
+   * model request/step error). Idempotent by construction: the first
+   * settlement clears `activeTurn`, so neither a late durable COMPLETED nor
+   * a second failure event can double-settle. The value-free class travels
+   * only into the bridge audit, never into the event payload.
+   */
+  function forwardAttemptFailure(state: BridgeSessionState, event: BridgeAgentFailureEvent): void {
+    const active = state.activeTurn;
+    if (active === null || event.attemptId !== active.attemptId) {
+      return;
+    }
+    pushAudit({
+      action: "bridge.turn_failed",
+      sessionKey: state.sessionKey,
+      turnId: active.turnId,
+      epoch: active.epoch,
+      resultCode: event.code,
+      count: 1,
+    });
+    emit({
+      kind: "event",
+      name: "turn.settled",
+      payload: {
+        sessionKey: state.sessionKey,
+        turnId: active.turnId,
+        epoch: active.epoch,
+        messageId: FAILED_SETTLEMENT_MESSAGE_MARKER,
+        finalState: "FAILED",
+      },
+    });
+    state.activeTurn = null;
+  }
+
   function bindHandle(state: BridgeSessionState, handle: BridgeAgentHandle): void {
     state.handle = handle;
     handle.onStream((event) => forwardStreamEvent(state, event));
     handle.onDurable((event) => forwardDurableEvent(state, event));
+    // Optional port capability (E2E-03, issue #53): ports without failure
+    // visibility (the synthetic mock runtime) keep the previous behavior.
+    handle.onFailure?.((event) => forwardAttemptFailure(state, event));
   }
 
   const service: VoiceBridgeService = {

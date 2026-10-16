@@ -46,6 +46,7 @@ import { fileURLToPath } from 'node:url'
 import type {
   BridgeAgentCancelInput,
   BridgeAgentCancelResult,
+  BridgeAgentFailureEvent,
   BridgeAgentHandle,
   BridgeAgentPort,
   BridgeAgentPortErrorCode,
@@ -222,8 +223,19 @@ export interface RealBridgeHandleState {
   readonly upstreamToAdapter: Map<string, string>
   readonly streamListeners: ((event: BridgeStreamEvent) => void)[]
   readonly durableListeners: ((event: BridgeDurableEvent) => void)[]
+  readonly failureListeners: ((event: BridgeAgentFailureEvent) => void)[]
   droppedDurableAfterCancel: number
   staleStreamFrames: number
+  /**
+   * E2E-03 (issue #53) failure tracking for the CURRENT attempt: the worker
+   * reports `request_error`/`step_error` phases; a failure flag survives
+   * only until the attempt either recovers (any further text chunk) or
+   * settles durably. At the attempt `end` (or agent idle) with a still-set
+   * flag and no durable settlement, the port notifies the Bridge so the
+   * turn can settle FAILED instead of hanging RUNNING forever.
+   */
+  attemptFailed: boolean
+  attemptSettled: boolean
 }
 
 const STDERR_TAIL_LIMIT = 4_000
@@ -348,11 +360,49 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
         forwardDurable(state, event)
         return
       }
-      case 'status':
+      case 'phase': {
+        // E2E-03 (issue #53): bounded turn-phase diagnostics double as the
+        // failure detector — a request/step error marks the CURRENT attempt
+        // failed unless a later chunk proves the attempt recovered.
+        if (event.phase === 'request_error' || event.phase === 'step_error') {
+          state.handle.state.attemptFailed = true
+        }
+        return
+      }
+      case 'status': {
+        // The agent went idle with a still-unfinished failed attempt and no
+        // durable settlement: fire the failure now (belt and braces — the
+        // attempt `end` frame usually arrives first).
+        const handleState = state.handle.state
+        if (
+          event.status === 'idle' &&
+          handleState.attemptFailed &&
+          !handleState.attemptSettled &&
+          !(handleState.cancelRequested && !handleState.idleConfirmed) &&
+          handleState.adapterAttemptId !== null
+        ) {
+          fireAttemptFailure(handleState, handleState.adapterAttemptId)
+        }
+        return
+      }
       case 'stopped':
         return
       default:
         return
+    }
+  }
+
+  /** Notify the Bridge that the attempt ended without a durable settlement. */
+  function fireAttemptFailure(handleState: RealBridgeHandleState, attemptId: string): void {
+    if (!handleState.attemptFailed || handleState.attemptSettled) return
+    handleState.attemptFailed = false
+    handleState.attemptSettled = true
+    for (const listener of [...handleState.failureListeners]) {
+      try {
+        listener({ attemptId, code: 'model_request_failed' })
+      } catch {
+        /* listener containment */
+      }
     }
   }
 
@@ -388,7 +438,10 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
             }
           : { kind: 'end', attemptId: adapterId, stepId: frame.stepId }
     if (frame.kind === 'chunk') {
+      // A chunk after a request error means the retried attempt recovered —
+      // the failure flag only survives an attempt that ends with no output.
       handleState.nextStreamIndex += 1
+      handleState.attemptFailed = false
     }
     for (const listener of [...handleState.streamListeners]) {
       try {
@@ -396,6 +449,12 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       } catch {
         /* listener containment */
       }
+    }
+    if (frame.kind === 'end') {
+      // The attempt's stream ended: with a still-set failure flag, no durable
+      // settlement and no user cancel in flight, the turn must settle FAILED
+      // (issue #53 DoD 2) instead of hanging RUNNING forever.
+      fireAttemptFailure(handleState, adapterId)
     }
   }
 
@@ -407,6 +466,11 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
     if (handleState.disposed || handleState.crashed) return
     const adapterId = handleState.upstreamToAdapter.get(event.attemptId)
     if (adapterId === null || adapterId === undefined) return
+    // A durable settlement (even a dropped-after-cancel one) means the
+    // attempt's outcome is owned by the durable/cancel paths — the failure
+    // notification must never double-settle it.
+    handleState.attemptSettled = true
+    handleState.attemptFailed = false
     if (handleState.cancelRequested && !handleState.idleConfirmed) {
       // A cancelled attempt's interrupted settlement is audit-only upstream;
       // it must NEVER become a turn.settled(COMPLETED) notification.
@@ -476,8 +540,11 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       upstreamToAdapter: new Map(),
       streamListeners: [],
       durableListeners: [],
+      failureListeners: [],
       droppedDurableAfterCancel: 0,
       staleStreamFrames: 0,
+      attemptFailed: false,
+      attemptSettled: false,
     }
     const state: WorkerState = {
       sessionKey,
@@ -584,6 +651,8 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
         handleState.cancelRequested = false
         handleState.idleConfirmed = false
         handleState.nextStreamIndex = 0
+        handleState.attemptFailed = false
+        handleState.attemptSettled = false
         void request(state, 'followup', { sessionId: state.dshSessionId, text: input.promptText }).then((reply) => {
           if (!reply.ok && !handleState.crashed && !handleState.disposed) {
             // The wake itself failed inside the real runtime: worker fault.
@@ -649,6 +718,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
         handleState.disposed = true
         handleState.streamListeners.length = 0
         handleState.durableListeners.length = 0
+        handleState.failureListeners.length = 0
         if (state.child !== null && !state.exited) {
           state.disposedByRequest = true
           await request(state, 'dispose', { sessionId: state.dshSessionId }, disposeTimeoutMs)
@@ -681,6 +751,12 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       },
       onDurable(listener) {
         handleState.durableListeners.push(listener)
+        return { ok: true }
+      },
+      onFailure(listener) {
+        // E2E-03 (issue #53): the Bridge settles failed attempts FAILED so
+        // the trusted turn state machine can never hang on a model failure.
+        handleState.failureListeners.push(listener)
         return { ok: true }
       },
       isRunning() {
