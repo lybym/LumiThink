@@ -11,6 +11,13 @@ name: R0 zero-skip gate
 # loopback mock model, three-round streaming, real cancellation, worker crash
 # and whenIdle-hang isolation, negative permissions, and its own zero-skip
 # JUnit report gate (`reports/e2e02-bridge.xml`).
+#
+# E2E-03 (Issue #53): the `e2e03` job runs the REAL DSH runtime's model route
+# through the loopback Model Gateway egress proxy (host-side Model Gateway +
+# `http_messages` provider against a loopback synthetic vendor). No real
+# provider credential exists in CI and no non-loopback egress path is created
+# — the real-provider evidence run stays an explicit operator opt-in
+# (`test:e2e03:real`).
 on:
   pull_request:
     paths:
@@ -283,4 +290,118 @@ jobs:
           }
           report "E2E-02 real-runtime suite" "${{ steps.e2e02_tests.outcome }}"
           report "E2E-02 zero-skip report gate" "${{ steps.e2e02_gate.outcome }}"
+          exit "${status}"
+
+  e2e03:
+    name: E2E-03 gateway-routed model path (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install exact pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Install exact Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Assert the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_node="$(node --version)"
+          actual_pnpm="$(pnpm --version)"
+          echo "node=${actual_node} pnpm=${actual_pnpm}"
+          if [ "${actual_node}" != "v${NODE_VERSION}" ]; then
+            echo "::error::Node ${actual_node} is not the pinned v${NODE_VERSION}"
+            exit 1
+          fi
+          if [ "${actual_pnpm}" != "${PNPM_VERSION}" ]; then
+            echo "::error::pnpm ${actual_pnpm} is not the pinned ${PNPM_VERSION}"
+            exit 1
+          fi
+
+      - name: Prove the CI mock-only contract before installing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${LUMITHINK_MODEL_ROUTE:-}" ]; then
+            echo "::error::LUMITHINK_MODEL_ROUTE must stay unset in the E2E-03 gate (CI is all-mock)"
+            exit 1
+          fi
+          if [ -n "${LUMITHINK_MODEL_PROVIDER_KEY:-}" ]; then
+            echo "::error::LUMITHINK_MODEL_PROVIDER_KEY must stay unset in the E2E-03 gate"
+            exit 1
+          fi
+          if [ -n "${LUMITHINK_E2E03_REAL:-}" ]; then
+            echo "::error::LUMITHINK_E2E03_REAL must stay unset in the E2E-03 gate"
+            exit 1
+          fi
+          echo "mock-only CI confirmed: no real-provider activation variables"
+
+      - name: Prepare isolated DSH_HOME
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "${DSH_HOME}"
+          mkdir -p "${DSH_HOME}"
+          echo "DSH_HOME=${DSH_HOME}"
+
+      - name: Frozen-lockfile install
+        working-directory: poc/dsh-child
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: poc/dsh-child
+        run: pnpm run typecheck
+
+      - name: E2E-03 gateway-route suite (JUnit report + spec output)
+        id: e2e03_tests
+        if: ${{ !cancelled() }}
+        working-directory: poc/dsh-child
+        continue-on-error: true
+        run: pnpm run test:e2e03:run
+
+      - name: Attach the report contract and enforce the zero-skip gate
+        id: e2e03_gate
+        if: ${{ !cancelled() }}
+        working-directory: poc/dsh-child
+        continue-on-error: true
+        run: pnpm run test:e2e03:gate
+
+      - name: Sanitize the JUnit artifact (strip absolute paths)
+        if: ${{ !cancelled() }}
+        working-directory: poc/dsh-child
+        run: pnpm run test:e2e03:sanitize
+
+      - name: Upload sanitized E2E-03 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e03-gateway-acceptance
+          if-no-files-found: warn
+          retention-days: 14
+          path: poc/dsh-child/reports/e2e03-gateway.sanitized.xml
+
+      - name: Fail the job if any E2E-03 gate step failed
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          report() {
+            if [ "$2" != "success" ]; then
+              echo "::error::E2E-03 gate step '$1' concluded '$2'"
+              status=1
+            fi
+          }
+          report "E2E-03 gateway-route suite" "${{ steps.e2e03_tests.outcome }}"
+          report "E2E-03 zero-skip report gate" "${{ steps.e2e03_gate.outcome }}"
           exit "${status}"
