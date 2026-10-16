@@ -78,6 +78,17 @@ export interface BridgeDurableEvent {
   readonly messageRef: string;
 }
 
+/**
+ * One attempt that ended WITHOUT a durable settlement because the model
+ * request failed (E2E-03, issue #53 DoD 2: 模型失败必须有可审计降级——失败
+ * 的尝试必须把轮次带到终态，而不是永久 RUNNING). The code is a static,
+ * value-free class — no upstream error text ever crosses the boundary.
+ */
+export interface BridgeAgentFailureEvent {
+  readonly attemptId: string;
+  readonly code: "model_request_failed";
+}
+
 /** The cancel argument the Bridge always uses (issue #29 实现范围 2). */
 export interface BridgeAgentCancelInput {
   readonly kind: "user";
@@ -110,6 +121,14 @@ export interface BridgeAgentHandle {
   onStream(listener: (event: BridgeStreamEvent) => void): { readonly ok: true };
   /** Subscribe to durable session events (settlement/audit only). */
   onDurable(listener: (event: BridgeDurableEvent) => void): { readonly ok: true };
+  /**
+   * Subscribe to attempt-failure notifications (E2E-03, issue #53). OPTIONAL:
+   * ports without failure visibility (the synthetic mock runtime) may omit
+   * it; the Bridge then keeps its previous crash-or-settle behavior. An
+   * implementation MUST NOT fire it for a user-cancelled attempt (the cancel
+   * path owns that settlement) or after a durable settlement arrived.
+   */
+  onFailure?(listener: (event: BridgeAgentFailureEvent) => void): { readonly ok: true };
   /** True while an attempt is running (no cancel has taken effect yet). */
   isRunning(): boolean;
 }

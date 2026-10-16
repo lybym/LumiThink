@@ -29,9 +29,11 @@ Cordis 服务树由**显式白名单**（`profiles/lumithink-child/cordis.patch.
    `tool-fs*` / `tool-web` / `tool-subagent*`、
    `mcp-resources` / `mcp-client`、全部 feedback / OTel 遥测插件、`hmr`、
    `plugin-manager`。`agent-loop.agents: []` 禁止子 Agent。
-4. **数据外发边界**：模型适配器 `baseURL` 只指向 `$DSH_POC_MOCK_BASE_URL`
-   （本机合成 Messages mock，`src/mock-model.ts`）；变量缺失时回落到
-   `http://127.0.0.1:9`（discard 端口，必然失败关闭），**永远不会**回落到
+4. **数据外发边界**：模型适配器 `baseURL` 只指向回环端点——E2E-03（issue #53）
+   起解析链为 `$DSH_BRIDGE_MODEL_BASE_URL`（宿主侧回环 **Model Gateway 出网代理**，
+   唯一真实供应商路由；真实密钥只存在于宿主 keySource，永不进入子进程）
+   `?? $DSH_POC_MOCK_BASE_URL`（本机合成 Messages mock，`src/mock-model.ts`）
+   `?? http://127.0.0.1:9`（discard 端口，必然失败关闭），**永远不会**回落到
    公网 DeepSeek API。mock 记录每一次请求（脱敏后）作为外发证据。
    子进程环境通过 `DSH_TELEMETRY_DISABLED=1` 显式关闭遥测。
 5. **隔离 DSH_HOME**：子进程 `DSH_HOME` 指向 `<poc>/.r0/dsh-home`（或测试临时

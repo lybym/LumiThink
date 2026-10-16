@@ -1,6 +1,7 @@
 # LumiThink Model Gateway 合同（MODEL_GATEWAY.md v1.0）
 
 > 版本：`1.0` ｜ 日期：2026-10-14 ｜ 状态：**R1-02 域层已交付**——Provider 契约、Mock/真实 Provider 适配器、预算/熔断/超时/取消与审计由 `lib/domain/gateway/` + `tests/domain/gateway/` 实现；HTTP 端点接线（R1-05）与真实供应商的独立数据外发评审**尚未发生**（见 §7）。
+> **E2E-03（Issue #53）增补**：真实 Provider 的**激活机制与出网拓扑已交付**——`lib/server/real-provider-composition.ts`（fail-closed 激活记录：route 选择器 + 完整 Provider/价格/预算/评审字段）与 `lib/server/gateway-egress-proxy.ts`（DSH 运行时模型路由唯一出网口：回环代理 → Model Gateway → `http_messages` 供应商）；真实 DSH + 真实 LLM 的端到端证据链路由 E2E-03 零 SKIP 门禁在 CI 以回环合成 vendor 验证（`test:e2e03`），真实供应商调用仍是**显式运营者 opt-in**（`test:e2e03:real`，CI 永不携带真实密钥）。儿童数据处理评审保持 `not_performed`（见 §7）。
 > R1-03 接线说明（Issue #15）：`requestTimeoutMs` 与 `models[].maxOutputTokens` 成为被实际消费的配置（默认值 + 上限）；`GATEWAY_NO_PROVIDER` 与尝试前取消补齐审计事件；重试退避 abort-aware；baseURL 语义修正为 origin-only（适配器自行拼接 `/v1/messages`）。见 §3/§5。
 > 对应：[Issue #14](https://github.com/lybym/LumiThink/issues/14) ｜ [PRD FR-004/FR-006](./PRD.md) ｜ [Roadmap R1-02](./ROADMAP.md) ｜ [HARNESS §3](./HARNESS.md) ｜ [架构](./ARCHITECTURE.md) ｜ [TECH_STACK](./TECH_STACK.md)
 > 合并要求遵循 Issue #14：一 Issue 一 PR；合成数据；R0 DSH 最小权限与零 SKIP CI 不变；新安全/隐私失败阻断合并。
@@ -74,7 +75,7 @@ provider.stream(request: ModelRequest, { signal }): AsyncIterable<ProviderStream
 
 `GATEWAY_CANCELLED` 不进入错误包：端点层将其转换为 `turn.cancelled` 事件（契约 §6），late 结果由 `suppressLateAgentResponse` 降级——Gateway 的取消语义与该规则对齐：**取消后的输出在 Gateway 内部就被截断，根本不会产生"迟到结果"**。
 
-## 7. 真实 Provider 激活门槛（当前：未激活）
+## 7. 真实 Provider 激活门槛（E2E-03：激活机制已交付，CI 默认 Mock）
 
 `http_messages` Provider 的构造要求**同时满足**（缺一即构造失败）：
 
@@ -82,12 +83,21 @@ provider.stream(request: ModelRequest, { signal }): AsyncIterable<ProviderStream
 2. 显式 `keySource` 回调——凭据在**请求时**由部署方解析，启动路径（`lib/env.ts`）不读取任何 Provider 密钥（R1-00 规则不变，`tests/env/startup-env.spec.ts` 继续守卫）；
 3. 显式 `DataEgressReviewAcknowledgement { acknowledgeDataEgressReview: true, reviewer, reason }`——独立数据外发评审的显式确认，仿照 legacy migration acknowledgement 的"字面 true"惯例。
 
-**状态声明（不得改写为已完成）**：Issue #14 要求的独立数据外发评审**尚未进行**；因此本 PR 交付适配器代码与 loopback 合成 E2E（不产生任何真实出网），不提供任何启用真实供应商的配置。启用前必须：完成该评审 → 在部署配置中登记 reviewer/reason → 按 §9 回归。CI 默认全 Mock（根 `pnpm test` 仅 Mock + loopback 合成服务器，无外部出网）。
+**E2E-03（Issue #53）交付的激活机制**（`lib/server/real-provider-composition.ts`，测试 `tests/server/real-provider-composition.spec.ts`）：
 
-## 8. 与 DSH 的边界（R1-V2 预留）
+- **路由选择器** `LUMITHINK_MODEL_ROUTE=mock|real`（缺省/mock 为一切默认路径；CI 不设置任何激活变量，`r0-zero-skip-gate.yml` 的 e2e03 job 显式断言这些变量为空）。`real` 模式要求**完整** Provider 记录——endpoint origin、modelId、输出上限、整数定价、显式日预算、超时、重试/熔断界限、以及 reviewer/reason 评审记录——缺任何一项即激活失败（错误只列变量名，不回显值）。
+- **凭据请求时注入**：`LUMITHINK_MODEL_PROVIDER_KEY` 只由 keySource 闭包在请求时读取（secrets-registry slot `model_provider_api_key`）；无 Key 时每次请求 fail-closed 为 `GATEWAY_AUTH_FAILED`（可审计，供应商零接触）。
+- **出网拓扑（唯一真实路径）**：真实 DSH 运行时（`poc/dsh-child` bridge worker）的模型适配器只能指向回环 `GatewayEgressProxy`（`lib/server/gateway-egress-proxy.ts`）——代理把每个 Messages 请求翻译成**一个** Model Gateway 请求（预算/重试/熔断/超时/取消/审计/单 Provider 路由全部由 Gateway 执行），不引入第二套不受控 Agent；供应商密钥永不进入 worker 进程（子进程保留其合成占位符凭据，仅用于回环代理鉴权）。非回环绑定在代理构造时即拒绝。
+- **儿童数据边界（DoD 4）**：`CHILD_DATA_EGRESS_REVIEW_STATUS = "not_performed"` 是常量而非开关——真实儿童数据的处理评审与监护人授权未完成前，本组合在结构上不存在解锁路径。激活记录只覆盖合成/成人内容的验证路径（issue #53 DoD 1 的运营者 opt-in 证据运行：`poc/dsh-child` `test:e2e03:real`，产出经脱敏的 token/费用/耗时/型号证据 JSON）。
+- **状态声明（不得改写为已完成）**：本 PR 交付的是**机制与门禁**；任何具体部署的供应商数据外发评审仍必须由运营者在激活时以 reviewer/reason 显式登记（激活解析不生成、不伪造该记录），CI 全套件保持 loopback-only（无任何真实出网路径）。
+- **生产组合根接线是后续任务（issue #53 review r1 P2-3，不得改写为已接线）**：`parseRealProviderActivation` / `buildRealProviderGateway` / `createGatewayEgressProxy` 目前仅被 opt-in 证据 runner（`test:e2e03:real`）与测试消费；主应用组合根（`lib/server/web-mvp-runtime.ts`）仍只组装 mock provider——在部署环境设置 `LUMITHINK_MODEL_ROUTE=real` 对主应用是 **no-op**（负向测试 `tests/server/real-provider-composition.spec.ts`）。把真实路由接入生产组合根（含 `deploy/env` 与 runbook 更新）是一个独立的后续任务，运营者不得误以为仅设置该变量即可切换部署环境的模型路由。
+- **接线任务的儿童数据闸门要求（issue #53 review r2 P2-2）**：生产接线落地时，`CHILD_DATA_EGRESS_REVIEW_STATUS` 必须随之从"代码中的文档常量"升级为**可测试的激活前置条件**——生产组合根在组装 `real` 路由时必须显式消费该常量（断言其仍为 `not_performed` 并据此结构性拒绝真实儿童数据外发路径，或将其作为组合函数的显式 gate 参数），并附带可执行的负向测试；不允许出现"真实路由已接线、但该常量仍无任何生产消费点"的中间状态（防止"接线但忘闸"，DoD 4）。
+
+## 8. 与 DSH 的边界（R1-V2 预留；E2E-03 出网拓扑）
 
 - Gateway 的取消是**模型请求/传输层**取消（abort HTTP 流、停止消费 delta）。DSH SDK 的文本停止**不得**被宣称为取消了进程内 Agent Loop；真正的 Agent Loop 取消、轮次所有权与 epoch 栅栏属 R1-V2（[VOICE_RUNTIME](./VOICE_RUNTIME.md)、[ARCHITECTURE §5](./ARCHITECTURE.md)）。R1-03 接线时：Orchestrator 调 Gateway 取消 ≠ 调 DSH Bridge cancel，两者各自验收。
 - 工具（`tool_schema`）v0 仅承载受限声明（名称/描述，数量上限 16）；工具执行白名单由 Safety Gate/Tool Gate（R1-15/R1-03）负责，Gateway 不引入工具执行面。
+- **E2E-03（Issue #53）模型路由**：真实 DSH bridge worker 的 llm 适配器指向回环 `GatewayEgressProxy`（`lib/server/gateway-egress-proxy.ts`；profile `lumi-dsh-runtime-bridge` 的 `DSH_BRIDGE_MODEL_BASE_URL → DSH_POC_MOCK_BASE_URL → 127.0.0.1:9` 失败关闭链）。代理无自有 Provider 逻辑：每个请求 = 一个 Model Gateway 请求，供应商错误体/密钥/提示词结构性地不进入代理响应（静态错误映射 + 脏标记测试）。拓扑决策见 [ADR-0008](./adr/0008-real-provider-egress-topology.md)。
 
 ## 9. 验收标准 → 测试映射（issue #14）
 

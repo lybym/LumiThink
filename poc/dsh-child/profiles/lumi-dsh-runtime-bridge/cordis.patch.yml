@@ -15,10 +15,13 @@
 #       - @deepseek-ai/dsh-mcp-resources / dsh-mcp-client (unrestricted MCP)
 #       - any tool-fs / tool-web / tool-subagent providers (generic FS, HTTP fetch, subagents)
 #       - feedback / product-telemetry-otel / session-telemetry-otel plugins
-#   * The model adapter (llm-deepseek) routes ONLY to $DSH_POC_MOCK_BASE_URL
-#     (the local synthetic Messages mock on loopback). If the variable is
-#     absent the row falls back to the loopback discard port, which always
-#     fails closed — it can never fall back to a public provider API.
+#   * The model adapter (llm-deepseek) routes ONLY to a loopback endpoint:
+#       1. $DSH_BRIDGE_MODEL_BASE_URL — the E2E-03 (issue #53) Model Gateway
+#          egress proxy (host-side loopback; the ONLY real-provider route and
+#          never a vendor endpoint — the worker keeps its synthetic key);
+#       2. $DSH_POC_MOCK_BASE_URL — the local synthetic Messages mock;
+#       3. the loopback discard port, which always fails closed. The route
+#          can never fall back to a public provider API.
 #   * Safety invariants (dsh-invariants + the four subplugin invariants) are
 #     kept from the upstream kernel and are non-negotiable.
 
@@ -31,7 +34,7 @@
       name: '@deepseek-ai/dsh-llm-deepseek-api-key'
       config:
         apiKeyEnv: DEEPSEEK_API_KEY
-        baseURL: !!js process.env.DSH_POC_MOCK_BASE_URL ?? 'http://127.0.0.1:9'
+        baseURL: !!js process.env.DSH_BRIDGE_MODEL_BASE_URL ?? process.env.DSH_POC_MOCK_BASE_URL ?? 'http://127.0.0.1:9'
         reasoningEffort: 'off'
         defaultContextWindow: 32768
         streamIdleTimeoutMs: 60000

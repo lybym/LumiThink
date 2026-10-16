@@ -390,18 +390,35 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
       case "turn.settled": {
         if (
           typeof payload.sessionKey === "string" &&
-          typeof payload.turnId === "string" &&
-          payload.finalState === "COMPLETED"
+          typeof payload.turnId === "string"
         ) {
-          const settled = orchestrator.settleTurn({
-            sessionKey: payload.sessionKey,
-            turnId: payload.turnId,
-            outcome: "COMPLETED",
-          });
-          if (settled.ok) {
-            vaultDestroy(payload.sessionKey, payload.turnId);
-            gate.clearTurn(payload.sessionKey, payload.turnId);
-            void dispatchQueuedTurn(payload.sessionKey);
+          const finalState = typeof payload.finalState === "string" ? payload.finalState : null;
+          if (finalState === "COMPLETED") {
+            const settled = orchestrator.settleTurn({
+              sessionKey: payload.sessionKey,
+              turnId: payload.turnId,
+              outcome: "COMPLETED",
+            });
+            if (settled.ok) {
+              vaultDestroy(payload.sessionKey, payload.turnId);
+              gate.clearTurn(payload.sessionKey, payload.turnId);
+              void dispatchQueuedTurn(payload.sessionKey);
+            }
+          } else if (finalState === "FAILED") {
+            // E2E-03 (issue #53 DoD 2): a model-request failure settles the
+            // turn FAILED at the Bridge (durable-settlement-absent marker).
+            // The trusted turn must reach a terminal state — the scheduler
+            // stays live and the failure is auditable at the Gateway.
+            const settled = orchestrator.settleTurn({
+              sessionKey: payload.sessionKey,
+              turnId: payload.turnId,
+              outcome: "FAILED",
+            });
+            if (settled.ok) {
+              vaultDestroy(payload.sessionKey, payload.turnId);
+              gate.clearTurn(payload.sessionKey, payload.turnId);
+              void dispatchQueuedTurn(payload.sessionKey);
+            }
           }
         }
         return;
