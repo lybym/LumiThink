@@ -420,7 +420,8 @@ test("reconnect re-delivery of the same final does not mint an error turn; the s
 });
 
 test("the adapter version bump is observable for the E2E-05 dedup semantics", () => {
-  // A cheap contract pin: dedup is a v1.2 adapter behavior; a future reader
-  // comparing evidence across versions sees which semantics produced it.
-  assert.equal(GATEWAY_ADAPTER_VERSION, "1.2");
+  // A cheap contract pin: dedup is a v1.2 adapter behavior (unchanged by the
+  // v1.3 E2E-06 TTS metrics); a future reader comparing evidence across
+  // versions sees which semantics produced it.
+  assert.equal(GATEWAY_ADAPTER_VERSION, "1.3");
 });

@@ -19,10 +19,14 @@ name: E2E-04 xiaozhi deployment gate
 #      the effective surface WITHOUT booting it: no server start against the
 #      tier, no vendor connection, no credential beyond a dummy CI value
 #      (real-provider runs are operator opt-in, never CI).
+#   4. real-TTS tier (E2E-06, issue #56) — same render/scan discipline for
+#      the reviewed gateway-tts-real overlay (CosyVoice dual-stream TTS at
+#      the pinned extension point): parsed, fail-closed render-checked and
+#      merge-scanned WITHOUT booting it; no vendor network, no real credential.
 # No real credentials, no real device, no external egress: the gateway-minimal
 # profile selects only loopback placeholder ASR/LLM/TTS providers and
-# explicitly disables VLLM (selected_module.VLLM=""); the real-ASR tier is
-# rendered/merged/scanned only.
+# explicitly disables VLLM (selected_module.VLLM=""); the real-ASR and
+# real-TTS tiers are rendered/merged/scanned only.
 on:
   pull_request:
     paths:
@@ -237,6 +241,79 @@ jobs:
             --env-file "${work}/asr.env" --output "${work}/out.yaml"
           stat -c '%a' "${work}/out.yaml" | grep -qx '600' || { echo "::error::rendered overlay is not 0600"; exit 1; }
           echo "real-ASR tier render contract OK (fail-closed, 0600)"
+
+      - name: Real-TTS tier template (E2E-06, issue #56) parses; reviewed provider, retention gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          python3 - <<'PY'
+          import re
+          import yaml
+          cfg = yaml.safe_load(open("deploy/xiaozhi/config/gateway-tts-real.yaml", encoding="utf-8"))
+          assert cfg["server"]["ip"] == "127.0.0.1", cfg["server"]["ip"]
+          assert cfg["server"]["auth"]["enabled"] is True
+          assert cfg["server"]["auth"]["allowed_devices"] == []
+          sm = cfg["selected_module"]
+          assert set(sm.keys()) == {"VAD", "ASR", "LLM", "TTS", "VLLM", "Memory", "Intent"}, sm
+          # The ONLY tier change vs gateway-minimal: the reviewed first real
+          # TTS provider at the pinned commit's extension point. ASR/LLM stay
+          # loopback placeholders (the TTS review implies neither).
+          assert sm["TTS"] == "AliBLStreamTTS", sm
+          assert sm["ASR"] == "FunASRServer" and sm["LLM"] == "OllamaLLM", sm
+          assert sm["VLLM"] == "" and sm["Memory"] == "nomem" and sm["Intent"] == "nointent"
+          tts = cfg["TTS"]["AliBLStreamTTS"]
+          assert tts["type"] == "alibl_stream", tts
+          assert tts["api_key"] == "${XIAOZHI_TTS_API_KEY}", "credential must be render-time injected, never literal"
+          assert tts["model"] == "cosyvoice-v2", tts
+          assert tts["voice"] == "longxiaochun_v2", tts
+          assert tts["format"] == "pcm", tts
+          # Pinned-commit fact: tts/base.py + tts/alibl_stream.py log sentence
+          # text at INFO — the real-TTS tier must suppress it.
+          assert cfg["log"]["log_level"] == "WARNING", cfg["log"]
+          assert cfg["delete_audio"] is True
+          assert cfg["read_config_from_api"] is False, "report queues must stay structurally off"
+          assert cfg["ASR"]["FunASRServer"]["host"] == "127.0.0.1"
+          assert cfg["LLM"]["OllamaLLM"]["base_url"].startswith("http://127.0.0.1")
+          # The pinned DEFAULT_WS_URL is the review anchor: the template must
+          # NOT override ws_url (any override = re-run the egress review).
+          assert "ws_url" not in tts, tts
+          # No concrete external host on active lines (the reviewed vendor
+          # endpoint is a pinned-code default — documented, not a template value).
+          for raw_line in open("deploy/xiaozhi/config/gateway-tts-real.yaml", encoding="utf-8"):
+              line = raw_line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              for match in re.finditer(r"https?://([^/\s\"']+)", line):
+                  host = match.group(1)
+                  assert re.match(r"^(\$\{[A-Z_][A-Z0-9_]*\}|127\.0\.0\.1|localhost)(:\d+)?$", host), line
+          print("gateway-tts-real template OK (reviewed dual-stream TTS, WARNING logs, zero retention)")
+          PY
+
+      - name: Real-TTS tier render is fail-closed on a missing provider key, then 0600 on the happy path
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          printf 'XIAOZHI_AUTH_KEY=%s\n' "$(openssl rand -hex 32)" > "${work}/tts.env"
+          printf 'XIAOZHI_DEVICE_WS_URL=ws://127.0.0.1:8000/xiaozhi/v1/\n' >> "${work}/tts.env"
+          printf 'XIAOZHI_PUBLIC_DOMAIN=127.0.0.1\n' >> "${work}/tts.env"
+          # Missing XIAOZHI_TTS_API_KEY → render refuses, naming the variable.
+          if python3 deploy/xiaozhi/render_config.py \
+              --template deploy/xiaozhi/config/gateway-tts-real.yaml \
+              --env-file "${work}/tts.env" --output "${work}/out.yaml" 2>"${work}/err.log"; then
+            echo "::error::render succeeded without the TTS provider key"
+            exit 1
+          fi
+          grep -q "XIAOZHI_TTS_API_KEY" "${work}/err.log" || {
+            echo "::error::fail-closed error does not name the missing variable"; cat "${work}/err.log"; exit 1; }
+          # Happy path: a dummy CI value (never a real credential) renders a 0600 overlay.
+          printf 'XIAOZHI_TTS_API_KEY=dummy-ci-not-a-real-key\n' >> "${work}/tts.env"
+          python3 deploy/xiaozhi/render_config.py \
+            --template deploy/xiaozhi/config/gateway-tts-real.yaml \
+            --env-file "${work}/tts.env" --output "${work}/out.yaml"
+          stat -c '%a' "${work}/out.yaml" | grep -qx '600' || { echo "::error::rendered overlay is not 0600"; exit 1; }
+          echo "real-TTS tier render contract OK (fail-closed, 0600)"
 
       - name: Env template carries no real secrets
         shell: bash
@@ -501,6 +578,127 @@ jobs:
           bad = [h for h in hosts if not loopback_re.match(h)]
           assert not bad, f"real-ASR tier active surface carries non-loopback config endpoints: {bad}"
           print("gateway-asr-real effective config OK (reviewed selection, retention gates, loopback LLM/TTS; not booted)")
+          PY
+
+      - name: Real-TTS tier (E2E-06) — effective merged config scan (render only; NO boot, NO vendor network)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # E2E-06 (issue #56): prove what the reviewed real-TTS tier would be
+          # EFFECTIVE at runtime (upstream recursive merge), fail-closed on
+          # pin drift — WITHOUT booting it: no server start, no dashscope
+          # connection, no credential beyond a dummy CI value.
+          work="$(mktemp -d)"
+          cp xiaozhi-smoke.env "${work}/tts.env"
+          printf 'XIAOZHI_TTS_API_KEY=dummy-ci-not-a-real-key\n' >> "${work}/tts.env"
+          chmod 600 "${work}/tts.env"
+          python3 deploy/xiaozhi/render_config.py \
+            --template deploy/xiaozhi/config/gateway-tts-real.yaml \
+            --env-file "${work}/tts.env" --output "${work}/tts-overlay.yaml"
+          TTS_OVERLAY="${work}/tts-overlay.yaml" "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" - <<'PY'
+          import os
+          import re
+          import yaml
+
+          server_root = os.path.join(
+              os.environ["RUNNER_TEMP"], "xiaozhi-esp32-server", "main", "xiaozhi-server"
+          )
+
+          def merge(defaults, overlay):
+              # Same pinned-commit mirror as the gateway-minimal scan above
+              # (upstream config_loader.merge_configs: recursive dict merge,
+              # overlay wins). Re-verify on any future pin bump.
+              if not isinstance(defaults, dict) or not isinstance(overlay, dict):
+                  return overlay
+              merged = dict(defaults)
+              for key, value in overlay.items():
+                  if isinstance(merged.get(key), dict) and isinstance(value, dict):
+                      merged[key] = merge(merged[key], value)
+                  else:
+                      merged[key] = value
+              return merged
+
+          with open(os.path.join(server_root, "config.yaml"), encoding="utf-8") as fh:
+              upstream = yaml.safe_load(fh)
+          with open(os.environ["TTS_OVERLAY"], encoding="utf-8") as fh:
+              overlay = yaml.safe_load(fh)
+          effective = merge(upstream, overlay)
+
+          expected = {
+              "VAD": "SileroVAD",
+              "ASR": "FunASRServer",
+              "LLM": "OllamaLLM",
+              "TTS": "AliBLStreamTTS",
+              "VLLM": "",
+              "Memory": "nomem",
+              "Intent": "nointent",
+          }
+          assert effective["selected_module"] == expected, effective["selected_module"]
+
+          tts = effective["TTS"]["AliBLStreamTTS"]
+          assert tts["type"] == "alibl_stream", tts
+          assert tts["model"] == "cosyvoice-v2" and tts["voice"] == "longxiaochun_v2", tts
+          assert tts["format"] == "pcm", tts
+          # Comparison only — the dummy value is never printed.
+          assert tts["api_key"] == "dummy-ci-not-a-real-key", "render-time injection failed"
+          # The review anchor must stay the pinned code default, not config.
+          assert "ws_url" not in tts, tts
+          # Pinned-upstream binding (review R1 P2-2): the review anchor is the
+          # pinned checkout's OWN hardcoded default, so extract it from the
+          # pinned code and compare THREE ways — the LumiThink activation
+          # constant, the runbook anchor and the template anchor comment must
+          # all carry the same URL verbatim. A pin bump that changes
+          # DEFAULT_WS_URL fails HERE (re-run the egress review) instead of
+          # leaving the recorded anchor stale. (#55's ASR anchor has the same
+          # pattern; that residual belongs to issue #55's scope.)
+          with open(os.path.join(server_root, "core", "utils", "alibl_endpoint.py"), encoding="utf-8") as fh:
+              alibl_src = fh.read()
+          upstream_match = re.search(r'DEFAULT_WS_URL\s*=\s*"([^"]+)"', alibl_src)
+          assert upstream_match, "pinned alibl_endpoint.py no longer carries a literal DEFAULT_WS_URL"
+          upstream_default = upstream_match.group(1)
+          with open("lib/server/real-tts-composition.ts", encoding="utf-8") as fh:
+              ts_src = fh.read()
+          ts_match = re.search(r'REAL_TTS_VENDOR_ENDPOINT\s*=\s*"([^"]+)"', ts_src)
+          ts_value = ts_match.group(1) if ts_match else "<absent>"
+          assert ts_value == upstream_default, (
+              "LumiThink REAL_TTS_VENDOR_ENDPOINT (%r) != pinned upstream DEFAULT_WS_URL (%r)"
+              " — the vendor endpoint review anchor drifted; re-run the egress review"
+              % (ts_value, upstream_default)
+          )
+          with open("deploy/xiaozhi/runbook.md", encoding="utf-8") as fh:
+              runbook_src = fh.read()
+          assert upstream_default in runbook_src, "runbook anchor drifted from the pinned upstream default"
+          with open("deploy/xiaozhi/config/gateway-tts-real.yaml", encoding="utf-8") as fh:
+              template_src = fh.read()
+          assert upstream_default in template_src, "template anchor comment drifted from the pinned upstream default"
+          print("pinned DEFAULT_WS_URL three-way binding OK (%s)" % upstream_default)
+          assert effective["log"]["log_level"] == "WARNING", effective["log"]
+          assert effective["delete_audio"] is True
+          assert effective["read_config_from_api"] is False
+
+          # Beyond the reviewed TTS vendor (whose endpoint lives in pinned
+          # provider CODE, not config), every URL in the active provider
+          # surface must still be loopback: ASR/LLM placeholders unchanged.
+          url_re = re.compile(r"https?://([^/\s\"']+)")
+          loopback_re = re.compile(r"^(127\.0\.0\.1|localhost)(:\d+)?$")
+          hosts = []
+
+          def collect(node):
+              if isinstance(node, dict):
+                  for value in node.values():
+                      collect(value)
+              elif isinstance(node, list):
+                  for value in node:
+                      collect(value)
+              elif isinstance(node, str):
+                  hosts.extend(url_re.findall(node))
+
+          for module in ("ASR", "LLM"):
+              collect(effective[module][effective["selected_module"][module]])
+          collect(effective["TTS"]["AliBLStreamTTS"])
+          bad = [h for h in hosts if not loopback_re.match(h)]
+          assert not bad, f"real-TTS tier active surface carries non-loopback config endpoints: {bad}"
+          print("gateway-tts-real effective config OK (reviewed selection, retention gates, loopback ASR/LLM; not booted)")
           PY
 
       - name: Boot the gateway-minimal server (foreground, smoke env)

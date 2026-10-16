@@ -22,9 +22,10 @@ TARGET="/opt/xiaozhi-esp32-server"
 ENV_FILE=""
 SKIP_CLONE=0
 SERVICE_USER="xiaozhi-server"
-# E2E-05: the config tier is selectable. Default stays the E2E-04
+# E2E-05/E2E-06: the config tier is selectable. Default stays the E2E-04
 # gateway-minimal tier (zero-egress); the reviewed real-ASR tier is
-# config/gateway-asr-real.yaml (issue #55) — enabling it is an explicit,
+# config/gateway-asr-real.yaml (issue #55) and the reviewed real-TTS tier is
+# config/gateway-tts-real.yaml (issue #56) — enabling either is an explicit,
 # reviewed change, and disabling is re-rendering the default tier.
 TEMPLATE="config/gateway-minimal.yaml"
 while [ $# -gt 0 ]; do

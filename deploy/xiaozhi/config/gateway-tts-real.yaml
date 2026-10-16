@@ -1,0 +1,152 @@
+# E2E-06 (issue #56) — 小智私有服务端 gateway-tts-real 档位配置模板（真实 TTS）
+#
+# 渲染目标：<server-dir>/main/xiaozhi-server/data/.config.yaml（上游的覆盖层）。
+# 由 deploy/xiaozhi/render_config.py 从本模板 + 受控 env 文件渲染：
+#   - 模板中的每个占位符都必须由 env 注入，缺失/占位值 → fail-closed 拒绝渲染；
+#   - Secret 值永不回显、不进 Git/日志/CI（渲染产物 0600）。
+#
+# 【档位语义】本档位 = E2E-04 gateway-minimal 档位 + 唯一变更：TTS 换成小智
+# 已钉版本（27399a2f…，version.env 单一事实源）Provider 扩展点上的**真实 TTS
+# 供应商**（语音合成、Opus 下行编码与流式下发全部由钉死服务端完成——
+# LumiThink 不新增供应商客户端，协议面仍只有帧数+摘要，见
+# docs/VOICE_GATEWAY_PROTOCOL.md §2.4）。启用本档位 = TTS 供应商安全/保留/
+# 外发评审已完成（docs/VOICE_HARDWARE.md §3 + docs/adr/0010）后的显式配置
+# 变更；**禁用 = 重渲染 gateway-minimal 档位**（bootstrap --template 缺省值）。
+# ASR/LLM 保持回环占位不变：TTS 评审不隐含 ASR/LLM 评审，真实 ASR 见
+# gateway-asr-real 档位（issue #55），组合档位留待后续 Issue 显式评审。
+#
+# 【首供应商与流式面】AliBLStreamTTS（type alibl_stream，阿里云百炼 CosyVoice
+# 双流 TTS；与 #55 的真实 ASR 同供应商族，评审/凭据/锚点同源）：
+#   - 流式模式：duplex WebSocket 双流（上游 @ pinned commit 标注
+#     InterfaceType.DUAL_STREAM；句子级 FIRST/MIDDLE/LAST 事件驱动小智线协议
+#     的 tts start/sentence_start/stop）；
+#   - 端点锚点：模板省略 ws_url → 上游 core/utils/alibl_endpoint.py 的硬编码
+#     默认值 wss://dashscope.aliyuncs.com/api-ws/v1/inference/（该端点是外发
+#     评审锚点；resolve_ws_url 同时强制校验只接受阿里云官方 WSS 推理端点，
+#     钉死版本升级改动它 = 重跑评审）；
+#   - 音色/模型/格式：model cosyvoice-v2、voice longxiaochun_v2（上游默认
+#     值，逐字核验 @ pinned commit alibl_stream.py）、format pcm（上游默认；
+#     上游 TTS base 再按连接协商采样率编码 Opus 下行）；
+#   - 下行采样率协商：请求携带 sample_rate = conn.sample_rate（上游逐字事实，
+#     永不供应商侧改写）；16/24 kHz 协商语义见 VOICE_GATEWAY_PROTOCOL §1；
+#   - 鉴权：api_key 由 ${XIAOZHI_TTS_API_KEY} 渲染期注入（0600 渲染产物），
+#     不进 Git/普通日志/CI；上游缺 key 直接 raise（fail-loud）。
+#
+# 【音频/文本不落盘三闸（docs/adr/0010）】
+#   1. delete_audio: true + 双流路径 → 上游 TTS base 的流式分支不写任何 tmp
+#      音频文件（仅 delete_audio 为 false 的文件路径才生成/记录 tmp 文件）；
+#   2. read_config_from_api: false → 上游 reportHandle 的 ASR/TTS 上报队列
+#      结构性 never enqueue（合成文本/音频不进消息队列，无 manager-api 可上报）；
+#   3. log_level: WARNING → 钉死 commit 在 alibl_stream.py 以 INFO 打印
+#      "句子语音生成成功： {tts_text}"（合成原文），WARNING 全部抑制。残留：
+#      WARNING 以上异常路径可能携带供应商侧错误详情（连接/鉴权失败，不含合成
+#      正文），日志按敏感面对待（journald 权限/轮转），见 runbook §3.6。
+#
+# 【其余与 gateway-minimal 完全一致】显式覆盖全部模块键（对抗递归合并的缺省
+# 键存活）：ASR/LLM 仍指向回环死端口（fail-loud，零外发），VLLM "" 显式禁用，
+# Memory/Intent 关闭，仅回环监听，鉴权强制 + 空白名单。
+
+server:
+  # 仅回环监听；公网暴露只经 Caddy（deploy/xiaozhi/caddy/Caddyfile.xiaozhi）。
+  ip: 127.0.0.1
+  port: 8000
+  http_port: 8003
+  websocket: ${XIAOZHI_DEVICE_WS_URL}
+  # 视觉分析接口地址：本档位该路径不由 Caddy 代理（fail-closed 无路由）；
+  # 此处仅为满足上游配置形状。
+  vision_explain: http://${XIAOZHI_PUBLIC_DOMAIN}:8003/mcp/vision/explain
+  timezone_offset: +8
+  auth:
+    # 强制开启：设备必须持 HMAC-SHA256 token（server.auth_key 签名）连接，
+    # 无 token 白名单旁路（allowed_devices 为空 = 最小权限）。
+    enabled: true
+    allowed_devices: []
+    expire_seconds: 604800
+  auth_key: ${XIAOZHI_AUTH_KEY}
+
+# 单模块模式：设备差异化配置不走远端 API；同时结构性关闭 ASR/TTS 上报队列。
+read_config_from_api: false
+
+log:
+  # WARNING：钉死 commit 以 INFO 打印合成句文本（tts/alibl_stream.py
+  # "句子语音生成成功"）——真实 TTS 档位必须抑制该日志面。
+  log_level: WARNING
+  log_dir: tmp
+  log_file: server.log
+  data_dir: data
+
+# 上游 speech_to_text_wrapper / TTS 文件路径依据该开关决定是否保留音频文件
+# （true = 双流直推、不落盘；文件路径分支不进入）。
+delete_audio: true
+close_connection_no_voice_time: 120
+enable_wakeup_words_response_cache: false
+enable_greeting: false
+enable_stop_tts_notify: false
+enable_websocket_ping: false
+
+xiaozhi:
+  type: hello
+  version: 1
+  transport: websocket
+  audio_params:
+    format: opus
+    # 下行采样率：与 VOICE_GATEWAY_PROTOCOL.md §1 一致（服务端可协商至 24k）；
+    # TTS 供应商请求使用该协商值（conn.sample_rate），永不供应商侧改写。
+    sample_rate: 24000
+    channels: 1
+    frame_duration: 60
+
+# 全部模块键显式覆盖（对抗递归合并的缺省键存活）：
+selected_module:
+  VAD: SileroVAD
+  ASR: FunASRServer
+  LLM: OllamaLLM
+  # 唯一档位变更：真实 TTS（评审锚点 = 上游硬编码默认端点 + 钉死 provider
+  # 形状；tests/deploy + CI 合并后扫描强制）。
+  TTS: AliBLStreamTTS
+  # 显式禁用视觉模块（"" 为 falsy，上游 vision_handler 在实例化任何 provider
+  # 之前直接 raise；见 gateway-minimal 同名注释）。
+  VLLM: ""
+  Memory: nomem
+  Intent: nointent
+
+VAD:
+  SileroVAD:
+    type: silero
+    threshold: 0.5
+    threshold_low: 0.3
+    model_dir: models/snakers4_silero-vad
+    min_silence_duration_ms: 200
+
+# 占位 ASR：本机 10096 端口不部署任何服务——初始化仅建对象，音频链路连接即
+# 拒绝（fail-loud）。真实 ASR = gateway-asr-real 档位（issue #55），与本档位
+# 评审互相独立。
+ASR:
+  FunASRServer:
+    type: fun_server
+    host: 127.0.0.1
+    port: 10096
+    is_ssl: false
+    api_key: none
+    output_dir: tmp/
+
+# 占位 LLM：本机 Ollama 端口（11434）不部署——会话推理连接即拒绝（fail-loud）。
+LLM:
+  OllamaLLM:
+    type: ollama
+    model_name: gateway-disabled
+    base_url: http://127.0.0.1:11434
+
+# 真实 TTS（唯一评审过的供应商路径；api_key 渲染期注入）。ws_url 刻意省略：
+# 钉死 commit 的 alibl_endpoint.DEFAULT_WS_URL 即评审锚点
+# wss://dashscope.aliyuncs.com/api-ws/v1/inference/，任何配置覆盖 = 重跑评审。
+# output_dir 仅在 delete_audio 为 false 的文件路径分支被使用——本档位恒为
+# true（双流直推），此处保留合法路径形状只为满足上游配置形状。
+TTS:
+  AliBLStreamTTS:
+    type: alibl_stream
+    api_key: ${XIAOZHI_TTS_API_KEY}
+    model: cosyvoice-v2
+    voice: longxiaochun_v2
+    format: pcm
+    output_dir: tmp/

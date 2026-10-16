@@ -1,7 +1,7 @@
 # Voice Gateway Adapter：小智 v2.5.2 协议兼容矩阵与合同（R1-V3）
 
-> 版本：1.2 ｜ 2026-10-15 ｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30)，1.1 修订 Issue [#51](https://github.com/lybym/LumiThink/issues/51)，1.2 修订 Issue [#55](https://github.com/lybym/LumiThink/issues/55) ｜ **合同 + 合成验证；固件/服务端兼容与私有 OTA 均【未实机验证】；真实 ASR 供应商转写质量未实机验证**
-> [VOICE_RUNTIME](./VOICE_RUNTIME.md) · [ADR-002](./adr/0002-voice-runtime-bridge.md) · [ADR-007](./adr/0007-asr-transient-text-channel.md) · [ADR-0009](./adr/0009-real-asr-provider-transient-channel.md) · [硬件选型](./VOICE_HARDWARE.md) · [Roadmap R1-V3](./ROADMAP.md)
+> 版本：1.3 ｜ 2026-10-15（1.3 修订 2026-10-17）｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30)，1.1 修订 Issue [#51](https://github.com/lybym/LumiThink/issues/51)，1.2 修订 Issue [#55](https://github.com/lybym/LumiThink/issues/55)，1.3 修订 Issue [#56](https://github.com/lybym/LumiThink/issues/56) ｜ **合同 + 合成验证；固件/服务端兼容与私有 OTA 均【未实机验证】；真实 ASR/TTS 供应商行为未实机验证**
+> [VOICE_RUNTIME](./VOICE_RUNTIME.md) · [ADR-002](./adr/0002-voice-runtime-bridge.md) · [ADR-007](./adr/0007-asr-transient-text-channel.md) · [ADR-0009](./adr/0009-real-asr-provider-transient-channel.md) · [ADR-0010](./adr/0010-real-tts-provider-dual-stream.md) · [硬件选型](./VOICE_HARDWARE.md) · [Roadmap R1-V3](./ROADMAP.md)
 
 ## 1. 固定评估基线（版本/契约钉死）
 
@@ -76,6 +76,7 @@ v1.0 中 `asr_final` 文本在 Adapter 内即刻降为 FNV-1a 摘要并丢弃—
 - `abort` → **fence 先行**（`core.bargeIn` = 组合层 `bargeInCancel`：原子 epoch 递增 → Bridge 进程内真取消 + `whenIdle` 复核 → CANCELLED）→ 才发 `tts.stop{reason:"interrupted"}`（每 turn 恰好一次）→ `drainTts` 丢弃全部旧 epoch 队列项并回执 `tts.clear{droppedStale}`。
 - 连续抢话：无播放中的 abort 是枚举化 no-op（`no_active_playback` 语义，无第二次 epoch bump、无重复 stop——"不是每一帧 VAD 都提升 epoch"）。
 - 出站帧批：`drainTts` 只交付当前 epoch 队列项 → 每批再过 `fenceOutput(kind:"audio_send")` 深度防御 → `tts.frames{frameCount, audioDigest}`（**帧数 + 十六进制摘要，协议内不存在音频字节字段**，真实编解码属 R5）。
+- **内容无关 TTS 指标（v1.3，issue #56 / ADR-0010）**：Adapter 记录 `ttsTurnsPlayed`（按**投递 episode** 计数：turn 中途断连→重连恢复投递会对同一 turnId 再次计数并重发 `tts.start`，first-audio 锚点对每次 final 接受只计一次；候选基线指标，审计口径 = 投递 episode 而非去重 turn 数）/`ttsSentencesSent`/`ttsFramesSent`、`ttsFirstAudioMs`（final 接受 → 该 turn 首个帧批）、`ttsInterSentenceGapMs`（同 turn 帧批间隙）、`ttsStopEffectiveMs`（abort 到达 → 端侧 stop）与 `ttsStaleAudioSuppressed`（fence 拒绝 + 队列丢弃；旧 epoch 送出结构上为 0）；mapping 快照按设备记录 hello 协商下行采样率。真实供应商合成由钉死服务端的 `gateway-tts-real` 档位承载；服务器端解码/播放验证为运营者 opt-in，协议面不变。
 
 ## 3. 兼容矩阵（v2.5.2 线协议 × Adapter 合同）
 
@@ -164,7 +165,7 @@ node --experimental-strip-types --test-isolation=none --test \
 
 - [x] 单模块服务端部署与版本钉死（评估基线 `27399a2`，升级需重跑本矩阵）——**E2E-04（issue #54）已交付部署面**：钉死 checkout、gateway-minimal 档位（VAD 仅本地、ASR/LLM/TTS 显式缺省）、healthcheck + 模拟设备 hello/abort 探针、鉴权/重启/损坏配置负例与干净环境 CI 冒烟（`deploy/xiaozhi/`、`e2e-04-xiaozhi-deployment-gate.yml`）。**口径：私有服务端已验证，真实设备仍待 #E2E-08**；本行不标注供应商接入与实机 OTA 完成。
 - [x] 首个真实流式 ASR Provider 的钉死扩展点配置与评审门禁——**E2E-05（issue #55）已交付配置/评审/证据面**（[ADR-0009](./adr/0009-real-asr-provider-transient-channel.md)）：`gateway-asr-real` 档位（AliyunBLStreamASR @ pinned commit 扩展点、16 kHz 上行、duplex 流式、转写不落盘三闸、`bootstrap.sh --template` 显式选档/禁用）、fail-closed 激活记录（评审锚点端点逐字校验）+ 内容无关证据合同（置信度如实标注不上线）、重复 final 窗口化去重与五族流式故障回归（`real-asr-stream.spec.ts`）、CI 渲染/合并后扫描（不启动、零真实出网）。**口径：部署配置面与合成证据已验证，真实供应商转写质量/实机行为/儿童数据评审未完成**——告知同意流程与真实数据评审仍以下行未勾选项为准。
-- [ ] 第三方 ASR/TTS/LLM 供应商安全与保留评估、告知同意流程（[VOICE_HARDWARE §3](./VOICE_HARDWARE.md)）——E2E-05 交付了首供应商（百炼 Paraformer 实时）的配置面与评审锚点/激活门禁；**监护人告知同意流程、真实数据评审与供应商侧保留核实仍未完成**。
+- [ ] 第三方 ASR/TTS/LLM 供应商安全与保留评估、告知同意流程（[VOICE_HARDWARE §3](./VOICE_HARDWARE.md)）——E2E-05 交付了首供应商（百炼 Paraformer 实时）的配置面与评审锚点/激活门禁；E2E-06 交付了首 TTS 供应商（百炼 CosyVoice 双流，[ADR-0010](./adr/0010-real-tts-provider-dual-stream.md)）的配置面与评审锚点/激活门禁；**监护人告知同意流程、真实数据评审与供应商侧保留核实仍未完成**。
 - [ ] 私有 OTA 激活/升级/回滚演练；断网-重连-重激活全链路。
 - [ ] 真实无线环境下断线重连、重复连接、session_id 轮换行为复核（对照 §5 合成结论）。
 - [ ] Adapter 组合层真实 IPC 传输冒烟（POSIX-only，沿用 `voice-bridge-ipc.spec.ts` 的 SKIP 模式）：当前 5 个适配层套件固定 `transport:"in_process"`，`ipc` 路径由 R1-V2 Bridge 套件间接覆盖，Adapter 组合层自身无 IPC 用例（评审登记项，非本 PR 阻塞）。

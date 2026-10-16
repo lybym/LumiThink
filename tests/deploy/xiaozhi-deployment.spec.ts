@@ -6,8 +6,11 @@ import { fileURLToPath } from "node:url";
 import { XIAOZHI_GATEWAY_BASELINE } from "../../lib/domain/voice/adapter/protocol.ts";
 
 const repoUrl = new URL("../../", import.meta.url); // directory URL ending in "/"
+// EOL-normalize: Windows checkouts (core.autocrlf=true) materialize LF files
+// with CRLF on disk; the \n-based block slices below must behave identically
+// there and on LF-only CI.
 const read = (relativePath: string): string =>
-  readFileSync(fileURLToPath(new URL(relativePath, repoUrl)), "utf8");
+  readFileSync(fileURLToPath(new URL(relativePath, repoUrl)), "utf8").replace(/\r\n/g, "\n");
 
 const parseVersionEnv = (raw: string): Map<string, string> => {
   const pins = new Map<string, string>();
@@ -402,4 +405,203 @@ test("the runbook carries the real-ASR tier section with its policy and honest b
   // Review anchor + child-data gate references.
   assert.ok(runbook.includes("dashscope.aliyuncs.com"));
   assert.ok(runbook.includes("not_performed"));
+});
+
+// ---------------------------------------------------------------------------
+// E2E-06 (issue #56): the reviewed real-TTS tier (gateway-tts-real)
+// ---------------------------------------------------------------------------
+
+test("gateway-tts-real tier template: reviewed TTS selected at the pinned extension point", () => {
+  const raw = read("deploy/xiaozhi/config/gateway-tts-real.yaml");
+
+  // The tier change is the TTS selection ONLY: the safety skeleton of
+  // gateway-minimal must be byte-for-byte equivalent in semantics.
+  assert.match(raw, /^  ip: 127\.0\.0\.1$/m);
+  assert.match(raw, /^    enabled: true$/m);
+  assert.match(raw, /^    allowed_devices: \[\]$/m);
+  assert.match(raw, /^read_config_from_api: false$/m);
+  assert.match(raw, /^delete_audio: true$/m);
+  assert.match(raw, /^  VLLM: ""$/m);
+  assert.match(raw, /^  Memory: nomem$/m);
+  assert.match(raw, /^  Intent: nointent$/m);
+  // ASR/LLM stay loopback placeholders: the TTS review implies neither.
+  assert.match(raw, /^  ASR: FunASRServer$/m);
+  assert.match(raw, /^  LLM: OllamaLLM$/m);
+  assert.match(raw, /^    host: 127\.0\.0\.1$/m);
+  assert.match(raw, /^    base_url: http:\/\/127\.0\.0\.1:11434$/m);
+
+  // The reviewed first real TTS provider: Aliyun Bailian CosyVoice dual-stream
+  // at the pinned commit's extension point, vendor defaults pinned verbatim.
+  assert.match(raw, /^  TTS: AliBLStreamTTS$/m);
+  const tts = raw.slice(raw.indexOf("TTS:\n  AliBLStreamTTS:"));
+  assert.ok(tts.length > 0, "TTS provider block not found");
+  assert.match(tts, /^    type: alibl_stream$/m);
+  assert.match(tts, /^    api_key: \$\{XIAOZHI_TTS_API_KEY\}$/m, "the credential is render-time injected, never literal");
+  assert.match(tts, /^    model: cosyvoice-v2$/m);
+  assert.match(tts, /^    voice: longxiaochun_v2$/m);
+  assert.match(tts, /^    format: pcm$/m);
+  // ws_url stays unset on active lines: the pinned DEFAULT_WS_URL is the
+  // review anchor; a config override would bypass the pinned-endpoint review.
+  const ttsActiveLines = tts
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+  assert.ok(
+    ttsActiveLines.every((line) => !line.startsWith("ws_url:")),
+    "the TTS block must not override ws_url (the pinned default is the review anchor)",
+  );
+
+  // Sentence-text retention gates: the pinned commit logs sentence text at
+  // INFO — the real-TTS tier must run at WARNING (issue #56).
+  assert.match(raw, /^  log_level: WARNING$/m);
+
+  // Zero-egress discipline: no concrete external http(s) host on active lines
+  // (the reviewed vendor endpoint is a pinned-code default, documented in
+  // comments and the runbook — it is not a template value).
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const urlMatches = [...trimmed.matchAll(/https?:\/\/([^\/\s"']+)/g)];
+    for (const match of urlMatches) {
+      const host = match[1];
+      assert.match(
+        host,
+        /^(\$\{[A-Z_][A-Z0-9_]*\}|127\.0\.0\.1|localhost)(:\d+)?$/,
+        `active config line carries a concrete external URL (egress risk): ${trimmed}`,
+      );
+    }
+  }
+  // The review anchor must stay documented in the file (drift = re-review).
+  assert.ok(raw.includes("wss://dashscope.aliyuncs.com/api-ws/v1/inference/"));
+  assert.ok(raw.includes("27399a2f"));
+});
+
+test("gateway-tts-real render placeholder contract: the four injected keys, only on active lines", () => {
+  const raw = read("deploy/xiaozhi/config/gateway-tts-real.yaml");
+  const activeLines = raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .join("\n");
+  const placeholders = [...activeLines.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map(
+    (match) => match[1],
+  );
+  assert.deepEqual([...new Set(placeholders)].sort(), [
+    "XIAOZHI_AUTH_KEY",
+    "XIAOZHI_DEVICE_WS_URL",
+    "XIAOZHI_PUBLIC_DOMAIN",
+    "XIAOZHI_TTS_API_KEY",
+  ]);
+});
+
+test("gateway-tts-real env template carries no real secret values (shapes only)", () => {
+  const raw = read("deploy/xiaozhi/env/gateway-tts-real.example");
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    assert.match(
+      trimmed,
+      /^XIAOZHI_[A-Z_]+=/,
+      `unexpected non-XIAOZHI_ active line: ${trimmed}`,
+    );
+    const value = trimmed.slice(trimmed.indexOf("=") + 1);
+    assert.ok(
+      value === "" || /^(<generate|wss:\/\/xiaozhi\.example\.com|xiaozhi\.example\.com)/.test(value),
+      `env template line carries a real-looking value: ${trimmed}`,
+    );
+  }
+});
+
+test("the runbook carries the real-TTS tier section with its policy and honest boundaries (E2E-06)", () => {
+  const runbook = read("deploy/xiaozhi/runbook.md");
+  assert.ok(runbook.includes("gateway-tts-real"), "the real-TTS tier section is missing");
+  // Policy surface: credential injection, retention gates, disable switch.
+  assert.ok(runbook.includes("XIAOZHI_TTS_API_KEY"));
+  assert.ok(runbook.includes("alibl_stream"));
+  assert.ok(runbook.includes("longxiaochun_v2"));
+  // Honest boundaries: decode/play verification is operator opt-in; child
+  // data stays gated; the tier is not device-verified.
+  assert.ok(runbook.includes("运营者 opt-in"));
+  assert.ok(runbook.includes("未实机验证"));
+  assert.ok(runbook.includes("not_performed"));
+  // Review anchor + disable switch.
+  assert.ok(runbook.includes("wss://dashscope.aliyuncs.com/api-ws/v1/inference/"));
+  assert.ok(runbook.includes("禁用"));
+});
+
+test("the CI deployment gate renders and merge-scans the real-TTS tier without booting it (E2E-06)", () => {
+  const workflow = read(".github/workflows/e2e-04-xiaozhi-deployment-gate.yml");
+  assert.ok(workflow.includes("gateway-tts-real.yaml"), "workflow lacks the real-TTS tier render/scan");
+  assert.ok(workflow.includes("XIAOZHI_TTS_API_KEY"), "workflow lacks the TTS provider-key fail-closed check");
+  // The scan must pin the reviewed selection and the retention gates.
+  assert.ok(workflow.includes("AliBLStreamTTS"));
+  assert.ok(workflow.includes("alibl_stream"));
+  assert.ok(workflow.includes("longxiaochun_v2"));
+});
+
+test("gateway-tts-real vs gateway-minimal: the mechanical template diff is exactly the TTS tier (selected_module.TTS + TTS block + log_level)", () => {
+  // Review R1 test gap: the tier relationship was previously assembled from
+  // per-key assertions. This pins the COMPLETE comment-free line diff as a
+  // multiset — ANY other template change (shape, key, value) fails here and
+  // forces a conscious re-review of the "only TTS changed" claim. A
+  // legitimate tier-shape change must update the expected diff verbatim.
+  const activeLines = (raw: string): readonly string[] =>
+    raw
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter((line) => {
+        const trimmed = line.trim();
+        return trimmed.length > 0 && !trimmed.startsWith("#");
+      });
+
+  const multisetDiff = (a: readonly string[], b: readonly string[]): { readonly onlyA: string[]; readonly onlyB: string[] } => {
+    const counts = new Map<string, number>();
+    for (const line of a) counts.set(line, (counts.get(line) ?? 0) + 1);
+    for (const line of b) counts.set(line, (counts.get(line) ?? 0) - 1);
+    const onlyA: string[] = [];
+    const onlyB: string[] = [];
+    for (const [line, count] of counts) {
+      for (let i = 0; i < Math.abs(count); i += 1) {
+        (count > 0 ? onlyA : onlyB).push(line);
+      }
+    }
+    return { onlyA: onlyA.sort(), onlyB: onlyB.sort() };
+  };
+
+  const { onlyA, onlyB } = multisetDiff(
+    activeLines(read("deploy/xiaozhi/config/gateway-minimal.yaml")),
+    activeLines(read("deploy/xiaozhi/config/gateway-tts-real.yaml")),
+  );
+
+  assert.deepEqual(
+    [...onlyA].sort(),
+    [
+      '      input: "{prompt_text}"',
+      '      response_format: "mp3"',
+      "    format: mp3",
+      "    headers: {}",
+      "    method: POST",
+      "    params:",
+      "    type: custom",
+      '    url: "http://127.0.0.1:9/v1/tts"',
+      "  CustomTTS:",
+      "  TTS: CustomTTS",
+      "  log_level: INFO",
+    ],
+    "gateway-minimal carries active lines beyond the TTS tier change",
+  );
+  assert.deepEqual(
+    [...onlyB].sort(),
+    [
+      "    api_key: ${XIAOZHI_TTS_API_KEY}",
+      "    format: pcm",
+      "    model: cosyvoice-v2",
+      "    type: alibl_stream",
+      "    voice: longxiaochun_v2",
+      "  AliBLStreamTTS:",
+      "  TTS: AliBLStreamTTS",
+      "  log_level: WARNING",
+    ],
+    "gateway-tts-real carries active lines beyond the TTS tier change",
+  );
 });
