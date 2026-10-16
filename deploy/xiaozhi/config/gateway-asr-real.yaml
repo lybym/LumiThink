@@ -1,0 +1,148 @@
+# E2E-05 (issue #55) — 小智私有服务端 gateway-asr-real 档位配置模板（真实流式 ASR）
+#
+# 渲染目标：<server-dir>/main/xiaozhi-server/data/.config.yaml（上游的覆盖层）。
+# 由 deploy/xiaozhi/render_config.py 从本模板 + 受控 env 文件渲染：
+#   - 模板中的每个占位符都必须由 env 注入，缺失/占位值 → fail-closed 拒绝渲染；
+#   - Secret 值永不回显、不进 Git/日志/CI（渲染产物 0600）。
+#
+# 【档位语义】本档位 = E2E-04 gateway-minimal 档位 + 唯一变更：ASR 换成小智
+# 已钉版本（27399a2f…，version.env 单一事实源）Provider 扩展点上的**真实流式
+# ASR 供应商**。启用本档位 = 供应商安全/保留/外发评审已完成
+# （docs/VOICE_HARDWARE.md §3 + docs/adr/0009-real-asr-provider-transient-channel.md）
+# 后的显式配置变更；**禁用 = 重渲染 gateway-minimal 档位**（bootstrap --template
+# 缺省值），不需要改本文件。
+#
+# 【首供应商与流式面】AliyunBLStreamASR（type aliyunbl_stream）：
+#   - 流式模式：duplex WebSocket（上游 @ pinned commit 硬编码
+#     wss://dashscope.aliyuncs.com/api-ws/v1/inference —— 该端点是外发评审锚点，
+#     钉死版本升级改动它 = 重跑评审）；
+#   - 上行音频：设备 Opus 16 kHz 单声道（hello 协商）→ 服务端解码 PCM 16 kHz
+#     → 本段 sample_rate: 16000 / format: pcm 与上行合同一致；
+#   - 端点检测：供应商侧 max_sentence_silence（VAD 断句，200 ms；手动模式上游
+#     自动放宽至 6000 ms）+ 本地 SileroVAD 触发语音起止；
+#   - 鉴权：api_key 由 ${XIAOZHI_ASR_API_KEY} 渲染期注入（0600 渲染产物），
+#     不进 Git/普通日志/CI。
+#
+# 【转写不落盘三闸（docs/adr/0009）】
+#   1. delete_audio: true → 上游 base.py 不写音频文件（delete_audio_file 路径）；
+#   2. read_config_from_api: false → 上游 reportHandle 的 ASR/TTS 上报队列
+#      结构性 never enqueue（原始转写/音频不进消息队列，无 manager-api 可上报）；
+#   3. log_level: WARNING → 钉死 commit 在 asr/base.py / aliyunbl_stream.py 以
+#      INFO 打印"识别文本/识别到文本"，WARNING 全部抑制。残留：WARNING 以上
+#      异常路径可能携带供应商侧错误详情（不含本地转写正文），日志按敏感面对待
+#      （journald 权限/轮转），见 runbook §3.5。
+#
+# 【其余与 gateway-minimal 完全一致】显式覆盖全部模块键（对抗递归合并的缺省
+# 键存活）：LLM/TTS 仍指向回环死端口（fail-loud，零外发），VLLM "" 显式禁用，
+# Memory/Intent 关闭，仅回环监听，鉴权强制 + 空白名单。
+
+server:
+  # 仅回环监听；公网暴露只经 Caddy（deploy/xiaozhi/caddy/Caddyfile.xiaozhi）。
+  ip: 127.0.0.1
+  port: 8000
+  http_port: 8003
+  websocket: ${XIAOZHI_DEVICE_WS_URL}
+  # 视觉分析接口地址：本档位该路径不由 Caddy 代理（fail-closed 无路由）；
+  # 此处仅为满足上游配置形状。
+  vision_explain: http://${XIAOZHI_PUBLIC_DOMAIN}:8003/mcp/vision/explain
+  timezone_offset: +8
+  auth:
+    # 强制开启：设备必须持 HMAC-SHA256 token（server.auth_key 签名）连接，
+    # 无 token 白名单旁路（allowed_devices 为空 = 最小权限）。
+    enabled: true
+    allowed_devices: []
+    expire_seconds: 604800
+  auth_key: ${XIAOZHI_AUTH_KEY}
+
+# 单模块模式：设备差异化配置不走远端 API；同时结构性关闭 ASR/TTS 上报队列。
+read_config_from_api: false
+
+log:
+  # WARNING：钉死 commit 以 INFO 打印识别文本（asr/base.py "识别文本"、
+  # asr/aliyunbl_stream.py "识别到文本"）——真实 ASR 档位必须抑制该日志面。
+  log_level: WARNING
+  log_dir: tmp
+  log_file: server.log
+  data_dir: data
+
+# 上游 speech_to_text_wrapper 依据该开关决定是否保留 ASR 音频文件
+# （true = 用后即删，不落 asr_*.wav）。
+delete_audio: true
+close_connection_no_voice_time: 120
+enable_wakeup_words_response_cache: false
+enable_greeting: false
+enable_stop_tts_notify: false
+enable_websocket_ping: false
+
+xiaozhi:
+  type: hello
+  version: 1
+  transport: websocket
+  audio_params:
+    format: opus
+    # 下行采样率：与 VOICE_GATEWAY_PROTOCOL.md §1 一致（服务端可协商至 24k）。
+    sample_rate: 24000
+    channels: 1
+    frame_duration: 60
+
+# 全部模块键显式覆盖（对抗递归合并的缺省键存活）：
+selected_module:
+  VAD: SileroVAD
+  # 唯一档位变更：真实流式 ASR（评审锚点 = 上游硬编码 vendor 端点 + 钉死
+  # provider 形状；tests/deploy + CI 合并后扫描强制）。
+  ASR: AliyunBLStreamASR
+  LLM: OllamaLLM
+  TTS: CustomTTS
+  # 视觉模块显式禁用（E2E-04 review R2 P1-1 措辞口径）："" 为 falsy，上游
+  # vision_handler 在实例化任何 provider（即任何外发）之前直接 raise。
+  VLLM: ""
+  Memory: nomem
+  Intent: nointent
+
+VAD:
+  SileroVAD:
+    type: silero
+    threshold: 0.5
+    threshold_low: 0.3
+    model_dir: models/snakers4_silero-vad
+    min_silence_duration_ms: 200
+
+# 真实流式 ASR（唯一评审过的供应商路径；api_key 渲染期注入）。
+# output_dir 仅在 delete_audio 为 false 时被上游用于写音频文件——本档位恒为
+# true，此处保留合法路径形状只为满足上游配置形状。
+ASR:
+  AliyunBLStreamASR:
+    type: aliyunbl_stream
+    api_key: ${XIAOZHI_ASR_API_KEY}
+    model: paraformer-realtime-v2
+    format: pcm
+    # 上行合同：设备 Opus 16 kHz → 服务端 PCM 16 kHz（勿改；变更 = 重跑评审）。
+    sample_rate: 16000
+    # 供应商侧端点检测：VAD 断句静音阈值（ms，上游默认 200；手动模式上游放宽 6000）。
+    max_sentence_silence: 200
+    # 交互场景语义断句关闭（VAD 断句，低延迟）；标点/ITN 保持上游默认开启。
+    semantic_punctuation_enabled: false
+    punctuation_prediction_enabled: true
+    inverse_text_normalization_enabled: true
+    disfluency_removal_enabled: false
+    output_dir: tmp/
+
+# 占位 LLM：本机 Ollama 端口（11434）不部署——会话推理连接即拒绝（fail-loud）。
+LLM:
+  OllamaLLM:
+    type: ollama
+    model_name: gateway-disabled
+    base_url: http://127.0.0.1:11434
+
+# 占位 TTS：本机 discard 端口（9）——合成请求连接即拒绝（fail-loud）。
+TTS:
+  CustomTTS:
+    type: custom
+    method: POST
+    url: "http://127.0.0.1:9/v1/tts"
+    params:
+      input: "{prompt_text}"
+      response_format: "mp3"
+    headers: {}
+    format: mp3
+    output_dir: tmp/

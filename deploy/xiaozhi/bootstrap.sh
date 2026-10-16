@@ -22,21 +22,35 @@ TARGET="/opt/xiaozhi-esp32-server"
 ENV_FILE=""
 SKIP_CLONE=0
 SERVICE_USER="xiaozhi-server"
+# E2E-05: the config tier is selectable. Default stays the E2E-04
+# gateway-minimal tier (zero-egress); the reviewed real-ASR tier is
+# config/gateway-asr-real.yaml (issue #55) — enabling it is an explicit,
+# reviewed change, and disabling is re-rendering the default tier.
+TEMPLATE="config/gateway-minimal.yaml"
 while [ $# -gt 0 ]; do
   case "$1" in
     --target) TARGET="$2"; shift 2 ;;
     --env-file) ENV_FILE="$2"; shift 2 ;;
     --skip-clone) SKIP_CLONE=1; shift ;;
     --service-user) SERVICE_USER="$2"; shift 2 ;;
+    --template) TEMPLATE="$2"; shift 2 ;;
     *) echo "[xiaozhi:bootstrap] unknown arg: $1" >&2; exit 1 ;;
   esac
 done
+
+# Relative --template values resolve against deploy/xiaozhi/ (the documented
+# short form and the default both stay relative; absolute paths pass through).
+case "${TEMPLATE}" in
+  /*) ;;
+  *) TEMPLATE="${REPO_ROOT}/deploy/xiaozhi/${TEMPLATE}" ;;
+esac
 
 [ -n "${XIAOZHI_SERVER_COMMIT}" ] || { echo "[xiaozhi:bootstrap] version.env pin missing" >&2; exit 1; }
 # The render step is unconditional (also on --skip-clone re-renders), so the
 # env file is always required — fail here with a clear message, not inside
 # render_config with an empty path.
 [ -n "${ENV_FILE}" ] || { echo "[xiaozhi:bootstrap] --env-file required" >&2; exit 1; }
+[ -f "${TEMPLATE}" ] || { echo "[xiaozhi:bootstrap] --template not found: ${TEMPLATE}" >&2; exit 1; }
 
 # Privilege: only escalate when the target location is not writable by us.
 SUDO=""
@@ -120,7 +134,7 @@ if [ -n "${SUDO}" ] || [ "$(id -u)" -eq 0 ]; then
 fi
 ${SUDO} mkdir -p "${SERVER_DIR}/data" "${SERVER_DIR}/tmp"
 ${SUDO} "${VENV_DIR}/bin/python" "${REPO_ROOT}/deploy/xiaozhi/render_config.py" \
-  --template "${REPO_ROOT}/deploy/xiaozhi/config/gateway-minimal.yaml" \
+  --template "${TEMPLATE}" \
   --env-file "${ENV_FILE}" \
   --output "${SERVER_DIR}/data/.config.yaml" \
   "${RENDER_OWNER_ARGS[@]+${RENDER_OWNER_ARGS[@]}}"

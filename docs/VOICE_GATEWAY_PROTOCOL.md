@@ -1,7 +1,7 @@
 # Voice Gateway Adapter：小智 v2.5.2 协议兼容矩阵与合同（R1-V3）
 
-> 版本：1.1 ｜ 2026-10-15 ｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30)，1.1 修订 Issue [#51](https://github.com/lybym/LumiThink/issues/51) ｜ **合同 + 合成验证；固件/服务端兼容与私有 OTA 均【未实机验证】**
-> [VOICE_RUNTIME](./VOICE_RUNTIME.md) · [ADR-002](./adr/0002-voice-runtime-bridge.md) · [ADR-007](./adr/0007-asr-transient-text-channel.md) · [硬件选型](./VOICE_HARDWARE.md) · [Roadmap R1-V3](./ROADMAP.md)
+> 版本：1.2 ｜ 2026-10-15 ｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30)，1.1 修订 Issue [#51](https://github.com/lybym/LumiThink/issues/51)，1.2 修订 Issue [#55](https://github.com/lybym/LumiThink/issues/55) ｜ **合同 + 合成验证；固件/服务端兼容与私有 OTA 均【未实机验证】；真实 ASR 供应商转写质量未实机验证**
+> [VOICE_RUNTIME](./VOICE_RUNTIME.md) · [ADR-002](./adr/0002-voice-runtime-bridge.md) · [ADR-007](./adr/0007-asr-transient-text-channel.md) · [ADR-0009](./adr/0009-real-asr-provider-transient-channel.md) · [硬件选型](./VOICE_HARDWARE.md) · [Roadmap R1-V3](./ROADMAP.md)
 
 ## 1. 固定评估基线（版本/契约钉死）
 
@@ -67,6 +67,8 @@ v1.0 中 `asr_final` 文本在 Adapter 内即刻降为 FNV-1a 摘要并丢弃—
 - **外发审批链**（每层缺一不可，fail-closed）：监护人激活绑定（activation digest）→ hello 持有凭证比对 → 连接租约 + 会话映射授权 → **真实 R1-15 Input Safety Gate**（`evaluateInputGate`，entrance `voice`；`block`/`escalate_crisis` 一律 `input_gate_blocked` 拒绝，枚举码进审计，文本不留痕）→ 可信 Orchestrator 注册（turn_id/epoch 铸造 + 幂等键）→ Bridge `turn.prompt`（协议 **v2**）→ 受信 Agent 的单轮模型请求。
 - **明文生命周期**：文本只存在于 Adapter 单个调用帧、组合层瞬态 prompt vault（QUEUED 轮暂存；有界 64 条、纯内存、不导出不落盘）、必要 IPC 与获批模型请求。vault 条目派发时取用即毁（成功或失败都毁）、fence 取消/Worker 崩溃/终态结算时销毁；丢失条目的轮次派发即 `prompt_text_lost` fail-closed（宁可 FAILED，不让摘要冒充模型输入）。长度上限 512 字符，在协议解析层即拒。
 - **密钥化去重**：转写去重指纹为 HMAC-SHA256（64 hex），密钥 = 进程内 `randomBytes(32)`，不落盘不打日志、随进程销毁。密钥随进程销毁意味着跨进程重放**不再被幂等账本识别**：幂等键派生自当前密钥下的指纹（`idem-gw<指纹前 8 位>t<计数>`），重启换钥后同一转写产生**不同指纹 → 不同幂等键 → 账本 miss → 铸造新 turn 重新执行**（fail-closed 方向的显式接受语义，见 ADR-0007"约束/后果"；`idempotency_conflict` 仅覆盖"同键不同指纹"，跨进程重放不会持有旧键，不适用）。可重放测试可注入固定测试密钥（`asrFingerprintKeyHex`，生产必须省略）。FNV-1a 仅保留非隐私用途（会话键派生、帧批摘要、重放指纹）。
+- **重复 final 窗口化去重（v1.2，issue #55 / ADR-0009）**：真实流式 ASR 会产生同一话语的重复 final（端点双发、重连重投递）。Adapter 对**已接受** final 的 HMAC 指纹做**每设备、有界窗口（默认 2000 ms）**去重：窗口内同指纹、且无 `listen start`/`detect` 新话语信号 → 枚举化 no-op（`gateway.asr_duplicate_suppressed`，无第二 turn/无第二次模型请求/无文本残留）。记忆**跨重连存活**（每设备）：断线后重投递同一 final 不会在新连接上铸造错误轮；新话语信号或窗口过期后同文本按新话语接受。保守方向（2 s 内同文本快速重述被并作同一话语）为显式接受语义，R5 实机标定可经 `asrDuplicateWindowMs` 调整。
+- **内容无关 ASR 指标（v1.2）**：`asrEndpointWindows`（listen start/detect 开窗数）、`asrDuplicateFinalsSuppressed`、`asrFinalAcceptMs{count,maxMs}`（final 事件到达 → 受保护单轮提交完成的候选时延）进入 metrics/证据快照（`buildRealAsrEvidenceRecord`，`voice-asr-real/1`）；钉死 commit 的 `stt` 线协议不携带供应商置信度，证据如实标注 `confidence.onWire=false`。
 - **零泄漏不变量**：文本不入普通日志/审计/快照/错误包/制品；审计 detail 只有枚举码或 64-hex 密钥化摘要；schema 测试断言字段 allow-list，泄漏扫描断言合成标记在全部内容无关表面零出现（唯一允许位置 = Fake Agent 收到的获批模型请求）。
 
 ### 2.4 播放停止 / TTS 队列清空 / Opus 发送（验收 1）
@@ -85,8 +87,8 @@ v1.0 中 `asr_final` 文本在 Adapter 内即刻降为 FNV-1a 摘要并丢弃—
 | `hello` ack（含 `session_id`） | 服务端→设备 | `session_issued` → 连接级映射铸造 | 合同+合成已验；未实机验证 |
 | `listen` start/stop/detect（mode auto/manual/realtime） | 设备→服务端 | 语音状态计数；**播放中 detect 仅计为打断候选，不栅栏** | 合同+合成已验；未实机验证 |
 | `abort`（reason: wake_word_detected/manual/vad_detected）——即 issue 所称 client_abort | 设备→服务端 | fence 先行打断：epoch 递增 → 端侧 `tts.stop(interrupted)` → 队列清空 | 合同+合成已验（56 场景）；实机打断 未实机验证 |
-| ASR partial（自建服务端流式 ASR 内部事件） | 服务端内部 | `asr_partial` 有界瞬态事件：只计数/候选，不产生 prompt | 合同+合成已验；真实流式 ASR 行为 未实机验证 |
-| `stt`（text，ASR 终稿） | 服务端→设备 | `asr_final`：长度受限 + Input Safety Gate → 授权瞬态明文走 §2.3 通道（vault → `turn.prompt` v2 `promptText` → 受信 Agent）；去重指纹为 HMAC-SHA256（§2.3） | 合同+合成已验（`transient-channel.spec.ts`）；未实机验证 |
+| ASR partial（自建服务端流式 ASR 内部事件） | 服务端内部 | `asr_partial` 有界瞬态事件：只计数/候选，不产生 prompt。**E2E-05 注**：钉死 commit 的 STREAM provider（aliyunbl_stream 等）在服务端内部消费流式 partial，设备线协议不转发 partial 文本——partial 面保持防御性合同 | 合同+合成已验；真实流式 ASR 行为 未实机验证 |
+| `stt`（text，ASR 终稿） | 服务端→设备 | `asr_final`：长度受限 + Input Safety Gate → 授权瞬态明文走 §2.3 通道（vault → `turn.prompt` v2 `promptText` → 受信 Agent）；去重指纹为 HMAC-SHA256（§2.3）；v1.2 起窗口化重复 final 去重（§2.3）。**E2E-05**：真实供应商路径由钉死小智服务端的 `gateway-asr-real` 档位承载（ADR-0009），线协议不变 | 合同+合成已验（`transient-channel.spec.ts` / `real-asr-stream.spec.ts`）；真实供应商转写 未实机验证 |
 | `tts` start / sentence_start / stop | 服务端→设备 | `tts.start` / `tts.frames`（帧数+摘要）/ `tts.stop`（completed/interrupted/failed，每 turn 恰一次） | 合同+合成已验；未实机验证 |
 | 二进制 Opus 帧（v1 裸帧；v2/v3 带元数据） | 双向 | POC 固定 v1 契约面；帧批以 frameCount+digest 表示；v2/v3 与 AEC 时钟对齐留 R5 | 契约固定；未实机验证 |
 | `mcp`（JSON-RPC 2.0 IoT 控制） | 双向 | **本阶段不开放**：设备工具必须走 R1-15 SAFE_TOOL_REGISTRY/工具栅栏，禁止设备 MCP 旁路安全 Gate | 拒绝（fail-closed 解析器不接受该类型） |
@@ -161,7 +163,8 @@ node --experimental-strip-types --test-isolation=none --test \
 **Linux 自建服务端 / ASR / TTS / OTA（R5 前置）**
 
 - [x] 单模块服务端部署与版本钉死（评估基线 `27399a2`，升级需重跑本矩阵）——**E2E-04（issue #54）已交付部署面**：钉死 checkout、gateway-minimal 档位（VAD 仅本地、ASR/LLM/TTS 显式缺省）、healthcheck + 模拟设备 hello/abort 探针、鉴权/重启/损坏配置负例与干净环境 CI 冒烟（`deploy/xiaozhi/`、`e2e-04-xiaozhi-deployment-gate.yml`）。**口径：私有服务端已验证，真实设备仍待 #E2E-08**；本行不标注供应商接入与实机 OTA 完成。
-- [ ] 第三方 ASR/TTS/LLM 供应商安全与保留评估、告知同意流程（[VOICE_HARDWARE §3](./VOICE_HARDWARE.md)）。
+- [x] 首个真实流式 ASR Provider 的钉死扩展点配置与评审门禁——**E2E-05（issue #55）已交付配置/评审/证据面**（[ADR-0009](./adr/0009-real-asr-provider-transient-channel.md)）：`gateway-asr-real` 档位（AliyunBLStreamASR @ pinned commit 扩展点、16 kHz 上行、duplex 流式、转写不落盘三闸、`bootstrap.sh --template` 显式选档/禁用）、fail-closed 激活记录（评审锚点端点逐字校验）+ 内容无关证据合同（置信度如实标注不上线）、重复 final 窗口化去重与五族流式故障回归（`real-asr-stream.spec.ts`）、CI 渲染/合并后扫描（不启动、零真实出网）。**口径：部署配置面与合成证据已验证，真实供应商转写质量/实机行为/儿童数据评审未完成**——告知同意流程与真实数据评审仍以下行未勾选项为准。
+- [ ] 第三方 ASR/TTS/LLM 供应商安全与保留评估、告知同意流程（[VOICE_HARDWARE §3](./VOICE_HARDWARE.md)）——E2E-05 交付了首供应商（百炼 Paraformer 实时）的配置面与评审锚点/激活门禁；**监护人告知同意流程、真实数据评审与供应商侧保留核实仍未完成**。
 - [ ] 私有 OTA 激活/升级/回滚演练；断网-重连-重激活全链路。
 - [ ] 真实无线环境下断线重连、重复连接、session_id 轮换行为复核（对照 §5 合成结论）。
 - [ ] Adapter 组合层真实 IPC 传输冒烟（POSIX-only，沿用 `voice-bridge-ipc.spec.ts` 的 SKIP 模式）：当前 5 个适配层套件固定 `transport:"in_process"`，`ipc` 路径由 R1-V2 Bridge 套件间接覆盖，Adapter 组合层自身无 IPC 用例（评审登记项，非本 PR 阻塞）。
