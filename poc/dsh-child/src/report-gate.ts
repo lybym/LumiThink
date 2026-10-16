@@ -34,7 +34,7 @@ export const REPORT_CONTRACT_VERSION = 1
 /** Exact baseline the R0 acceptance suite must produce (updated only with the suite). */
 export const R0_BASELINE = {
   /** Total `<testcase>` rows in the R0 acceptance suite (phase 1). */
-  tests: 35,
+  tests: 37,
   /** Suites in the R0 acceptance report. */
   suites: 8,
   /** Exact `skipped` count. Never allowed to be anything but 0. */
