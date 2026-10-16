@@ -1,0 +1,91 @@
+# E2E-04 (issue #54) — 小智私有服务端 systemd 单元（受限进程，gateway-minimal 档位）
+#
+# Install (see deploy/xiaozhi/runbook.md §2):
+#   sudo cp deploy/xiaozhi/xiaozhi-server.service /etc/systemd/system/xiaozhi-server.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now xiaozhi-server
+#
+# Security model mirrors deploy/lumithink.service (issue #20): dedicated system
+# user with no shell, strict filesystem, no new privileges, minimal syscall/
+# address-family surface, no capabilities. The server binds 127.0.0.1:8000
+# (WS) and 127.0.0.1:8003 (OTA HTTP) ONLY — public exposure happens solely
+# through the TLS reverse proxy (deploy/xiaozhi/caddy/Caddyfile.xiaozhi).
+#
+# 与 LumiThink 服务（lumithink.service）无 systemd 启动顺序依赖：两者独立
+# 监听不同回环端口；公网面都在 Caddy。启动顺序约定见 runbook §2。
+
+[Unit]
+Description=xiaozhi private voice server (gateway-minimal, E2E-04)
+Documentation=https://github.com/lybym/LumiThink/blob/main/deploy/xiaozhi/runbook.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xiaozhi-server
+Group=xiaozhi-server
+WorkingDirectory=/opt/xiaozhi-esp32-server/main/xiaozhi-server
+# 渲染配置在 data/.config.yaml（0600，属主 xiaozhi-server，由 bootstrap.sh +
+# render_config.py 生成并在每次渲染后回填属主）。上游运行时只读该配置文件
+# （config_loader 无 env 插值），因此【不】用 EnvironmentFile 把
+# XIAOZHI_AUTH_KEY 等注入进程环境：env 文件只是渲染期输入，注入只会扩大
+# /proc/<pid>/environ 的 secret 暴露面（review R1 P2-3）。
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/xiaozhi-esp32-server/venv/bin/python app.py
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+# --- Filesystem restriction ---------------------------------------------------
+ProtectSystem=strict
+# data/（渲染配置 + OTA 固件缓存 data/bin）与 tmp/（日志）可写；其余只读。
+ReadWritePaths=/opt/xiaozhi-esp32-server/main/xiaozhi-server/data
+ReadWritePaths=/opt/xiaozhi-esp32-server/main/xiaozhi-server/tmp
+ProtectHome=tmpfs
+ReadOnlyPaths=/opt/xiaozhi-esp32-server
+NoExecPaths=/var/lib/xiaozhi-esp32-server
+ExecPaths=/usr /bin /opt/xiaozhi-esp32-server/venv
+PrivateTmp=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# --- Capability / privilege restriction ---------------------------------------
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=yes
+# MemoryDenyWriteExecute=no is DELIBERATE (same rationale as
+# deploy/lumithink.service): CPython/onnxruntime native extensions may map
+# writable+executable pages for generated trampolines; =yes risks a
+# crash-loop CI cannot prove either way. Compensations: no new privileges,
+# strict filesystem + syscall filter, loopback-only binding.
+MemoryDenyWriteExecute=no
+PrivateUsers=no
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+UMask=0027
+
+# --- Network restriction ------------------------------------------------------
+# INET/INET6 for the loopback listeners; UNIX for internal sockets.
+# gateway-minimal 档位下服务端不外发任何连接（ASR/LLM/TTS 未配置）；
+# 启用供应商模块 = 档位变更 + 评审，外发收口另按 runbook §6。
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# --- Syscall filter -----------------------------------------------------------
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @module
+SystemCallArchitectures=native
+
+# --- Resource bounds (single-family MVP scale) --------------------------------
+LimitNOFILE=4096
+MemoryMax=2G
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

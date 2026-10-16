@@ -11,6 +11,7 @@
 | `r0-zero-skip-gate.yml` | R0（DSH SDK PoC） | `poc/dsh-child` 35/35 零 SKIP（ubuntu+windows）、越权负向、Egress Guard | 不触及根工程；R1-10 未改动它 |
 | `r1-baseline-gate.yml` | R1 根基线 | frozen install、typecheck、unit/schema/contract 集成测试、build、干净环境 boot+health | 不做发布评测/演练 |
 | `r1-deployment-gate.yml` | R1 部署（#20） | 部署物语法/模板、Linux 部署烟测（快照往返、重启恢复、安全头、回环绑定） | 不做发布门禁（#20 评审明确留给 R1-10） |
+| `e2e-04-xiaozhi-deployment-gate.yml` | E2E-04（#54） | 小智私有服务端部署物语法/pinning/模板、干净环境部署冒烟（OTA 下发、回环绑定、模拟设备 hello+abort、鉴权拒绝/静默丢音频/重启/损坏配置负例） | 不做真实设备验收（归 #E2E-08）、不接供应商 ASR/TTS/LLM、不重跑 R1 基线 |
 | `r1-release-gate.yml`（本 issue） | R1 发布 | ① 儿童专业与安全评测（4 套件过真实 harness）；② release manifest 漂移门禁；③ 泄漏扫描；④ Web Mock E2E（真实 HTTP）；⑤ N→N+1→N 升级回滚合成演练 | 不重跑基线单测（由 baseline gate 拥有）、不触碰 R0、不配置真实 Provider 凭据或真实儿童数据 |
 
 互不覆盖的三条硬规则：(a) 每个 gate 的断言只增不改——本 PR 未修改既有三个 workflow；(b) R0 门禁路径过滤（`poc/dsh-child/**`、lockfile、workspace 文件）保持原样；(c) 发布判定以**全套门禁同时绿**为准，任何单个 gate 无权豁免另一个。

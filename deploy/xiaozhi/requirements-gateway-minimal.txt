@@ -1,0 +1,66 @@
+# E2E-04 (issue #54) — gateway-minimal 档位的最小 Python 依赖（全部精确 pin）
+#
+# 版本一律抄自上游 xinnan-tech/xiaozhi-esp32-server @
+# 27399a2fb64b5910196f438a256ce0a9f868481f 的 main/xiaozhi-server/requirements.txt，
+# 上游注释原样保留（"不推荐升级"的依赖保持原 pin）。本文件是上游 requirements
+# 的【子集 + 显式补齐】，不是替代：完整模型栈（torch/funasr 等）只在启用了
+# 本地 ASR 的档位按上游 requirements.txt 安装（runbook §2/§6）。
+#
+# 为什么是子集：gateway-minimal 档位（deploy/xiaozhi/config/gateway-minimal.yaml）
+# 显式覆盖全部模块键：VAD（纯本地）+ OTA/鉴权/协议面可用；ASR/LLM/TTS 指向
+# 回环死端口（fail-loud），Memory/Intent 显式关闭——不接任何外部服务。
+# 排除项 = 上游的重量级模型栈：
+# torch/torchaudio/funasr（fun_local ASR）、modelscope、sherpa_onnx（本地 ASR
+# 模型推理）、mem0ai/powermem（云端/向量记忆）——上游对这些 Provider 是懒加载
+# （selected_module 选中才 import），本档位不选中。若 CI 冒烟再报模块缺失，
+# 对照上游 requirements.txt 补对应轻量 pin。
+
+# --------- 上游 pin（与上游 requirements.txt 逐字一致）------------------------
+# cozepy0.20.0 要求 websockets<15.0.0，上游注释：暂时不推荐升级
+websockets==14.2
+numpy==1.26.4
+pyyml==0.0.2
+# opuslib_next：core/connection.py 顶层 import（Opus 解码栈，需系统 libopus0），
+# 无论档位如何启用，服务端进程启动即加载——不可省略。
+opuslib_next==1.3.1
+aiohttp==3.13.2
+aiohttp_cors==0.8.1
+aioconsole==0.8.2
+pydub==0.25.1
+loguru==0.7.3
+requests==2.32.5
+httpx==0.28.1
+PySocks==1.7.1
+cozepy==0.20.0
+bs4==0.0.2
+cnlunar==0.2.4
+markitdown==0.1.3
+mcp==1.22.0
+mcp-proxy==0.12.0
+PyJWT==2.10.1
+psutil==7.1.3
+ruamel.yaml==0.18.16
+# portalocker：上游注释"暂留 3.x：4.x 与 qdrant-client<1.20 的 portalocker<4.0
+# 约束冲突 (PR #3360)"
+portalocker==3.2.0
+# --- 以下同为上游 pin；本档位虽不选中对应 Provider/插件，但上游在启动可达的
+# --- 导入链中存在对它们的无条件顶层 import（CI 冒烟 traceback 实证 openai），
+# --- 因此必须随进程安装。排除的只有重量级模型栈（文件末尾注释）。
+openai==2.8.1
+edge_tts==7.2.8
+dashscope==1.25.2
+baidu-aip==4.16.13
+vosk==0.3.45
+ormsgpack==1.12.0
+google-generativeai==0.8.5
+
+# --------- 部署补齐（上游经传递依赖获得，gateway-minimal 档位需显式声明）------
+# Jinja2：core/utils/prompt_manager.py 顶层 import（连接链路启动即加载）。
+Jinja2==3.1.6
+# cryptography：core/utils/auth.py（vision_handler → auth 顶层 import）使用
+# hazmat 对称加密；上游由 cozepy 传递引入，此处显式 pin 防传递漂移。
+cryptography==44.0.1
+# SileroVAD 直接 import onnxruntime 加载仓库内模型
+# models/snakers4_silero-vad/src/silero_vad/data/silero_vad.onnx；
+# 上游的 onnxruntime 由 funasr 传递引入，本档位不装 funasr，故显式 pin。
+onnxruntime==1.20.1

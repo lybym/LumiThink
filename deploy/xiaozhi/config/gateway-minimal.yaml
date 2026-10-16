@@ -1,0 +1,128 @@
+# E2E-04 (issue #54) — 小智私有服务端 gateway-minimal 档位配置模板
+#
+# 渲染目标：<server-dir>/main/xiaozhi-server/data/.config.yaml（上游的覆盖层）。
+# 由 deploy/xiaozhi/render_config.py 从本模板 + 受控 env 文件渲染：
+#   - 模板中的每个占位符都必须由 env 注入，缺失/占位值 → fail-closed 拒绝渲染；
+#   - Secret 值永不回显、不进 Git/日志/CI（渲染产物 0600）。
+#
+# 【关键语义：显式覆盖而非省略】上游 config.yaml 的 selected_module 默认值会与
+# 本覆盖层做【递归合并】（缺省键存活），因此"省略 = 禁用"不成立——本模板显式
+# 覆盖全部模块键：认知层（LLM/TTS/ASR）一律指向回环死端口（fail-loud：连接/
+# 合成即失败并大声报错，零外发、零供应商、零模型下载），意图/记忆显式关闭。
+#
+# 档位行为：
+#   - VAD（SileroVAD，纯本地）+ OTA/鉴权/协议面（hello/abort/ping）可验证；
+#   - 设备二进制音频会进入解码/占位 ASR 链路：占位端点拒绝 → 大声报错，无任何
+#     外发；畸形音频被入口拒绝（连接按协议关闭，服务端不崩溃——CI 断言）；
+#   - 启用真实 ASR/TTS/LLM = 更换档位 = 供应商安全与保留评审
+#     （docs/VOICE_HARDWARE.md §3）+ 兼容矩阵重跑后的显式配置变更。
+
+server:
+  # 仅回环监听；公网暴露只经 Caddy（deploy/xiaozhi/caddy/Caddyfile.xiaozhi）。
+  # 负例由 healthcheck.sh 的 ss -ltn 断言强制。
+  ip: 127.0.0.1
+  port: 8000
+  # OTA/固件下载 HTTP 口（同样仅回环，经 Caddy /xiaozhi/ota/* 暴露）。
+  http_port: 8003
+  # 设备拿到的 WebSocket 地址：经 Caddy 的 WSS 公网面（单机回环冒烟时
+  # 由 env 注入 ws://127.0.0.1:8000/xiaozhi/v1/）。
+  websocket: ${XIAOZHI_DEVICE_WS_URL}
+  # 视觉分析接口地址：gateway-minimal 档位下该路径不由 Caddy 代理
+  # （fail-closed 无路由）；此处仅为满足上游配置形状。
+  vision_explain: http://${XIAOZHI_PUBLIC_DOMAIN}:8003/mcp/vision/explain
+  timezone_offset: +8
+  auth:
+    # 强制开启：设备必须持 HMAC-SHA256 token（server.auth_key 签名）连接，
+    # 无 token 白名单旁路（allowed_devices 为空 = 最小权限）。
+    enabled: true
+    allowed_devices: []
+    # token 有效期 7 天；设备重新 POST /xiaozhi/ota/ 换取新 token。
+    expire_seconds: 604800
+  # JWT/OTA/websocket 认证共用密钥（受控 env 注入，绝不写死）。
+  auth_key: ${XIAOZHI_AUTH_KEY}
+
+# 单模块模式（无 manager-api/智控台）：设备差异化配置不走远端 API。
+read_config_from_api: false
+
+log:
+  log_level: INFO
+  log_dir: tmp
+  log_file: server.log
+  data_dir: data
+
+delete_audio: true
+# 无语音输入 120s 断开（上游默认；设备侧重连按协议处理）。
+close_connection_no_voice_time: 120
+# gateway-minimal 档位关闭问候语/唤醒词缓存（二者依赖 TTS 生成音频）。
+enable_wakeup_words_response_cache: false
+enable_greeting: false
+enable_stop_tts_notify: false
+# 关闭 WS 心跳保活（与 v2.5.2 设备默认行为一致，避免多余协议面）。
+enable_websocket_ping: false
+
+xiaozhi:
+  type: hello
+  version: 1
+  transport: websocket
+  audio_params:
+    format: opus
+    # 下行采样率：与 VOICE_GATEWAY_PROTOCOL.md §1 一致（服务端可协商至 24k）。
+    sample_rate: 24000
+    channels: 1
+    frame_duration: 60
+
+# 全部模块键显式覆盖（对抗递归合并的缺省键存活）：
+selected_module:
+  VAD: SileroVAD
+  ASR: FunASRServer
+  LLM: OllamaLLM
+  TTS: CustomTTS
+  # 显式禁用视觉模块（review R1 P2-1；R2 P1-1 措辞订正）："" 为 falsy，上游
+  # vision_handler 在实例化任何 provider（即任何外发）之前直接 raise"您还未
+  # 设置默认的视觉分析模块"（multipart 请求体读取发生在 raise 之前，但读取
+  # 本身不产生外发；fail-loud、零外发）。上游 config.yaml 自带外部 VLLM 供应
+  # 段（ChatGLMVLLM{url: https://open.bigmodel.cn/...} 等）：递归合并后这些
+  # 段在有效配置中仍然存在但绝不被选中（"" 不指向任何供应段）；若写上游默认
+  # ChatGLMVLLM，视觉请求体会出网。启用视觉 = 档位变更 + 供应商评审。
+  VLLM: ""
+  Memory: nomem
+  Intent: nointent
+
+VAD:
+  SileroVAD:
+    type: silero
+    threshold: 0.5
+    threshold_low: 0.3
+    model_dir: models/snakers4_silero-vad
+    min_silence_duration_ms: 200
+
+# 占位 ASR：本机 10096 端口不部署任何服务——初始化仅建对象，音频链路连接即
+# 拒绝（fail-loud）。真实 ASR（本地 FunASR/Vosk 或评审后的供应商）= 档位变更。
+ASR:
+  FunASRServer:
+    type: fun_server
+    host: 127.0.0.1
+    port: 10096
+    is_ssl: false
+    api_key: none
+    output_dir: tmp/
+
+# 占位 LLM：本机 Ollama 端口（11434）不部署——会话推理连接即拒绝（fail-loud）。
+LLM:
+  OllamaLLM:
+    type: ollama
+    model_name: gateway-disabled
+    base_url: http://127.0.0.1:11434
+
+# 占位 TTS：本机 discard 端口（9）——合成请求连接即拒绝（fail-loud）。
+TTS:
+  CustomTTS:
+    type: custom
+    method: POST
+    url: "http://127.0.0.1:9/v1/tts"
+    params:
+      input: "{prompt_text}"
+      response_format: "mp3"
+    headers: {}
+    format: mp3
+    output_dir: tmp/
