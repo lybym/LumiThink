@@ -109,6 +109,10 @@ pnpm run test:r0
 
 验收记录：[poc/dsh-child/docs/R0-02_ACCEPTANCE.md](poc/dsh-child/docs/R0-02_ACCEPTANCE.md)。语音部署配置、模型真实外发与生产运行步骤尚待各自 POC 完成后编写，现阶段不提供无法验证的“一键儿童生产部署”声明。
 
+### 真实 LLM Provider 路径（E2E-03，issue #53）
+
+真实 DSH 运行时的模型路由可以经**回环 Model Gateway 代理**指向一个**经评审配置的远程供应商**：`LUMITHINK_MODEL_ROUTE=real` + 完整 Provider 记录（endpoint/模型/定价/预算/数据外发评审 reviewer+reason）+ 请求时注入的密钥（`LUMITHINK_MODEL_PROVIDER_KEY`，永不进入子进程，也永不落日志）。缺任何一项即 fail-closed；CI 与默认启动保持**全 Mock、零真实出网**。真实供应商的三轮证据由显式 opt-in 运行（`poc/dsh-child` `pnpm run test:e2e03:real`）产生脱敏 JSON；真实儿童数据的处理评审与授权完成前该路径**结构上不可用于儿童数据**。详见 [docs/MODEL_GATEWAY.md §7](docs/MODEL_GATEWAY.md)、[ADR-0008](docs/adr/0008-real-provider-egress-topology.md)。
+
 ## 安全与隐私
 
 - 不将真实儿童姓名、学校、家庭地址、录音、对话或模型凭据上传公开仓库/Issue/CI/普通日志；默认不长期存原始音频。
