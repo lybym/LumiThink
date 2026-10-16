@@ -149,6 +149,108 @@ test("render placeholder contract: only the three injected keys, only on active 
   ]);
 });
 
+// ---------------------------------------------------------------------------
+// E2E-05 (issue #55): the reviewed real-ASR tier (gateway-asr-real)
+// ---------------------------------------------------------------------------
+
+test("gateway-asr-real tier template: reviewed streaming ASR selected at the pinned extension point", () => {
+  const raw = read("deploy/xiaozhi/config/gateway-asr-real.yaml");
+
+  // The tier change is the ASR selection ONLY: the safety skeleton of
+  // gateway-minimal must be byte-for-byte equivalent in semantics.
+  assert.match(raw, /^  ip: 127\.0\.0\.1$/m);
+  assert.match(raw, /^    enabled: true$/m);
+  assert.match(raw, /^    allowed_devices: \[\]$/m);
+  assert.match(raw, /^read_config_from_api: false$/m);
+  assert.match(raw, /^delete_audio: true$/m);
+  assert.match(raw, /^  VLLM: ""$/m);
+  assert.match(raw, /^  Memory: nomem$/m);
+  assert.match(raw, /^  Intent: nointent$/m);
+
+  // The reviewed first real ASR provider: Aliyun Bailian Paraformer realtime
+  // streaming at the pinned commit's extension point, 16 kHz uplink contract.
+  assert.match(raw, /^  ASR: AliyunBLStreamASR$/m);
+  const asr = raw.slice(raw.indexOf("ASR:\n  AliyunBLStreamASR:"), raw.indexOf("# 占位 LLM"));
+  assert.ok(asr.length > 0, "ASR provider block not found");
+  assert.match(asr, /^    type: aliyunbl_stream$/m);
+  assert.match(asr, /^    api_key: \$\{XIAOZHI_ASR_API_KEY\}$/m, "the credential is render-time injected, never literal");
+  assert.match(asr, /^    model: paraformer-realtime-v2$/m);
+  assert.match(asr, /^    format: pcm$/m);
+  assert.match(asr, /^    sample_rate: 16000$/m, "the 16 kHz uplink contract is pinned in the template");
+  assert.match(asr, /^    max_sentence_silence: 200$/m, "provider-side endpoint detection window pinned");
+
+  // Transcript-retention gates: the pinned commit logs 识别文本 at INFO —
+  // the real-ASR tier must run at WARNING (issue #55: 默认不保存原始转写).
+  assert.match(raw, /^  log_level: WARNING$/m);
+
+  // Zero-egress discipline unchanged: no concrete external host on active
+  // lines (the reviewed vendor endpoint is upstream-hardcoded, documented in
+  // comments and the runbook — it is not a template value).
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const urlMatches = [...trimmed.matchAll(/https?:\/\/([^\/\s"']+)/g)];
+    for (const match of urlMatches) {
+      const host = match[1];
+      assert.match(
+        host,
+        /^(\$\{[A-Z_][A-Z0-9_]*\}|127\.0\.0\.1|localhost)(:\d+)?$/,
+        `active config line carries a concrete external URL (egress risk): ${trimmed}`,
+      );
+    }
+  }
+  // The review anchor must stay documented in the file (drift = re-review).
+  assert.ok(raw.includes("wss://dashscope.aliyuncs.com/api-ws/v1/inference"));
+  assert.ok(raw.includes("27399a2f"));
+});
+
+test("gateway-asr-real render placeholder contract: the four injected keys, only on active lines", () => {
+  const raw = read("deploy/xiaozhi/config/gateway-asr-real.yaml");
+  const activeLines = raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .join("\n");
+  const placeholders = [...activeLines.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map(
+    (match) => match[1],
+  );
+  assert.deepEqual([...new Set(placeholders)].sort(), [
+    "XIAOZHI_ASR_API_KEY",
+    "XIAOZHI_AUTH_KEY",
+    "XIAOZHI_DEVICE_WS_URL",
+    "XIAOZHI_PUBLIC_DOMAIN",
+  ]);
+});
+
+test("gateway-asr-real env template carries no real secret values (shapes only)", () => {
+  const raw = read("deploy/xiaozhi/env/gateway-asr-real.example");
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    assert.match(
+      trimmed,
+      /^XIAOZHI_[A-Z_]+=/,
+      `unexpected non-XIAOZHI_ active line: ${trimmed}`,
+    );
+    const value = trimmed.slice(trimmed.indexOf("=") + 1);
+    assert.ok(
+      value === "" || /^(<generate|wss:\/\/xiaozhi\.example\.com|xiaozhi\.example\.com)/.test(value),
+      `env template line carries a real-looking value: ${trimmed}`,
+    );
+  }
+});
+
+test("bootstrap keeps gateway-minimal as the default tier and supports --template (E2E-05 tier switch)", () => {
+  const bootstrap = read("deploy/xiaozhi/bootstrap.sh");
+  // Default render = the zero-egress E2E-04 tier.
+  assert.match(bootstrap, /^TEMPLATE="config\/gateway-minimal\.yaml"$/m);
+  // The real-ASR tier is selectable explicitly.
+  assert.ok(bootstrap.includes("--template"));
+  assert.ok(bootstrap.includes("--template not found"));
+  // The render call consumes the selectable template.
+  assert.match(bootstrap, /--template "\$\{TEMPLATE\}"/);
+});
+
 test("env template carries no real secret values (shapes only)", () => {
   const raw = read("deploy/xiaozhi/env/gateway-minimal.example");
   for (const line of raw.split("\n")) {
@@ -277,4 +379,27 @@ test("the CI deployment gate proves the DoD negatives and triggers on the xiaozh
   // (no blind sleep race) and must NOT rely on a bare `error` signature.
   assert.ok(workflow.includes("did not exit within 20s of TERM"), "corrupted-config negative lacks the exit poll");
   assert.doesNotMatch(workflow, /grep -qiE 'yaml\|scanner\|parser\|error'/, "corrupted-config negative still uses the bare-error signature");
+  // E2E-05 (issue #55): the real-ASR tier is rendered/merge-scanned in CI but
+  // never booted — no vendor network, no real credential.
+  assert.ok(workflow.includes("gateway-asr-real.yaml"), "workflow lacks the real-ASR tier render/scan");
+  assert.ok(workflow.includes("XIAOZHI_ASR_API_KEY"), "workflow lacks the provider-key fail-closed check");
+  assert.match(workflow, /NO vendor network/i, "the real-tier scan must disclose that it never touches the vendor");
+});
+
+test("the runbook carries the real-ASR tier section with its policy and honest boundaries (E2E-05)", () => {
+  const runbook = read("deploy/xiaozhi/runbook.md");
+  assert.ok(runbook.includes("gateway-asr-real"), "the real-ASR tier section is missing");
+  // Policy surface: auth injection, retention gates, disable switch.
+  assert.ok(runbook.includes("XIAOZHI_ASR_API_KEY"));
+  assert.ok(runbook.includes("log_level: WARNING"));
+  assert.ok(runbook.includes("read_config_from_api: false"));
+  assert.ok(runbook.includes("delete_audio: true"));
+  // Disable switch = re-render the default zero-egress tier.
+  assert.ok(runbook.includes("禁用开关"));
+  // Honest boundaries: not device-verified; confidence not on the wire.
+  assert.ok(runbook.includes("未实机验证"));
+  assert.ok(runbook.includes("confidence.onWire=false"));
+  // Review anchor + child-data gate references.
+  assert.ok(runbook.includes("dashscope.aliyuncs.com"));
+  assert.ok(runbook.includes("not_performed"));
 });

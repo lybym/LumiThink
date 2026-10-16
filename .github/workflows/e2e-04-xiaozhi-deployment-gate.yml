@@ -14,9 +14,15 @@ name: E2E-04 xiaozhi deployment gate
 #      abort->tts stop, auth refusal negative, silent binary drop negative,
 #      restart recovery with the same device-id, corrupted-config fail-fast
 #      negative, and --skip-clone re-render idempotency.
+#   3. real-ASR tier (E2E-05, issue #55) — the reviewed gateway-asr-real
+#      overlay is parsed, render-checked fail-closed and merge-scanned for
+#      the effective surface WITHOUT booting it: no server start against the
+#      tier, no vendor connection, no credential beyond a dummy CI value
+#      (real-provider runs are operator opt-in, never CI).
 # No real credentials, no real device, no external egress: the gateway-minimal
 # profile selects only loopback placeholder ASR/LLM/TTS providers and
-# explicitly disables VLLM (selected_module.VLLM="").
+# explicitly disables VLLM (selected_module.VLLM=""); the real-ASR tier is
+# rendered/merged/scanned only.
 on:
   pull_request:
     paths:
@@ -163,6 +169,74 @@ jobs:
           leftovers="$(ls -A "${work}/out" | grep -v '^\.config\.yaml$' || true)"
           [ -z "${leftovers}" ] || { echo "::error::temp files left behind: ${leftovers}"; exit 1; }
           echo "render ownership regression OK (0600, owner preserved across re-render)"
+
+      - name: Real-ASR tier template (E2E-05, issue #55) parses; reviewed provider, transcript-log suppression
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          python3 - <<'PY'
+          import re
+          import yaml
+          cfg = yaml.safe_load(open("deploy/xiaozhi/config/gateway-asr-real.yaml", encoding="utf-8"))
+          assert cfg["server"]["ip"] == "127.0.0.1", cfg["server"]["ip"]
+          assert cfg["server"]["auth"]["enabled"] is True
+          assert cfg["server"]["auth"]["allowed_devices"] == []
+          sm = cfg["selected_module"]
+          assert set(sm.keys()) == {"VAD", "ASR", "LLM", "TTS", "VLLM", "Memory", "Intent"}, sm
+          # The ONLY tier change vs gateway-minimal: the reviewed first real
+          # streaming ASR provider at the pinned commit's extension point.
+          assert sm["ASR"] == "AliyunBLStreamASR", sm
+          assert sm["VLLM"] == "" and sm["Memory"] == "nomem" and sm["Intent"] == "nointent"
+          asr = cfg["ASR"]["AliyunBLStreamASR"]
+          assert asr["type"] == "aliyunbl_stream", asr
+          assert asr["api_key"] == "${XIAOZHI_ASR_API_KEY}", "credential must be render-time injected, never literal"
+          assert asr["model"] == "paraformer-realtime-v2", asr
+          assert asr["sample_rate"] == 16000 and asr["format"] == "pcm", asr
+          assert asr["max_sentence_silence"] == 200, asr
+          # Pinned-commit fact: asr/base.py + asr/aliyunbl_stream.py log the
+          # transcript at INFO — the real-ASR tier must suppress it.
+          assert cfg["log"]["log_level"] == "WARNING", cfg["log"]
+          assert cfg["delete_audio"] is True
+          assert cfg["read_config_from_api"] is False, "report queues must stay structurally off"
+          assert cfg["LLM"]["OllamaLLM"]["base_url"].startswith("http://127.0.0.1")
+          assert cfg["TTS"]["CustomTTS"]["url"].startswith("http://127.0.0.1")
+          # No concrete external host on active lines (the reviewed vendor
+          # endpoint is upstream-hardcoded — documented, not a template value).
+          for raw_line in open("deploy/xiaozhi/config/gateway-asr-real.yaml", encoding="utf-8"):
+              line = raw_line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              for match in re.finditer(r"https?://([^/\s\"']+)", line):
+                  host = match.group(1)
+                  assert re.match(r"^(\$\{[A-Z_][A-Z0-9_]*\}|127\.0\.0\.1|localhost)(:\d+)?$", host), line
+          print("gateway-asr-real template OK (reviewed streaming ASR, WARNING logs, zero retention)")
+          PY
+
+      - name: Real-ASR tier render is fail-closed on a missing provider key, then 0600 on the happy path
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          printf 'XIAOZHI_AUTH_KEY=%s\n' "$(openssl rand -hex 32)" > "${work}/asr.env"
+          printf 'XIAOZHI_DEVICE_WS_URL=ws://127.0.0.1:8000/xiaozhi/v1/\n' >> "${work}/asr.env"
+          printf 'XIAOZHI_PUBLIC_DOMAIN=127.0.0.1\n' >> "${work}/asr.env"
+          # Missing XIAOZHI_ASR_API_KEY → render refuses, naming the variable.
+          if python3 deploy/xiaozhi/render_config.py \
+              --template deploy/xiaozhi/config/gateway-asr-real.yaml \
+              --env-file "${work}/asr.env" --output "${work}/out.yaml" 2>"${work}/err.log"; then
+            echo "::error::render succeeded without the ASR provider key"
+            exit 1
+          fi
+          grep -q "XIAOZHI_ASR_API_KEY" "${work}/err.log" || {
+            echo "::error::fail-closed error does not name the missing variable"; cat "${work}/err.log"; exit 1; }
+          # Happy path: a dummy CI value (never a real credential) renders a 0600 overlay.
+          printf 'XIAOZHI_ASR_API_KEY=dummy-ci-not-a-real-key\n' >> "${work}/asr.env"
+          python3 deploy/xiaozhi/render_config.py \
+            --template deploy/xiaozhi/config/gateway-asr-real.yaml \
+            --env-file "${work}/asr.env" --output "${work}/out.yaml"
+          stat -c '%a' "${work}/out.yaml" | grep -qx '600' || { echo "::error::rendered overlay is not 0600"; exit 1; }
+          echo "real-ASR tier render contract OK (fail-closed, 0600)"
 
       - name: Env template carries no real secrets
         shell: bash
@@ -338,6 +412,95 @@ jobs:
           bad = [h for h in hosts if not loopback_re.match(h)]
           assert not bad, f"active provider surface has non-loopback endpoints: {bad}"
           print("effective merged config OK (explicit map, VLLM unselected, loopback-only active surface, upstream external VLLM defaults pinned)")
+          PY
+
+      - name: Real-ASR tier (E2E-05) — effective merged config scan (render only; NO boot, NO vendor network)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # E2E-05 (issue #55): prove what the reviewed real-ASR tier would be
+          # EFFECTIVE at runtime (upstream recursive merge), fail-closed on
+          # pin drift — WITHOUT booting it: no server start, no dashscope
+          # connection, no credential beyond a dummy CI value.
+          work="$(mktemp -d)"
+          cp xiaozhi-smoke.env "${work}/asr.env"
+          printf 'XIAOZHI_ASR_API_KEY=dummy-ci-not-a-real-key\n' >> "${work}/asr.env"
+          chmod 600 "${work}/asr.env"
+          python3 deploy/xiaozhi/render_config.py \
+            --template deploy/xiaozhi/config/gateway-asr-real.yaml \
+            --env-file "${work}/asr.env" --output "${work}/asr-overlay.yaml"
+          ASR_OVERLAY="${work}/asr-overlay.yaml" "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" - <<'PY'
+          import os
+          import re
+          import yaml
+
+          server_root = os.path.join(
+              os.environ["RUNNER_TEMP"], "xiaozhi-esp32-server", "main", "xiaozhi-server"
+          )
+
+          def merge(defaults, overlay):
+              # Same pinned-commit mirror as the gateway-minimal scan above
+              # (upstream config_loader.merge_configs: recursive dict merge,
+              # overlay wins). Re-verify on any future pin bump.
+              if not isinstance(defaults, dict) or not isinstance(overlay, dict):
+                  return overlay
+              merged = dict(defaults)
+              for key, value in overlay.items():
+                  if isinstance(merged.get(key), dict) and isinstance(value, dict):
+                      merged[key] = merge(merged[key], value)
+                  else:
+                      merged[key] = value
+              return merged
+
+          with open(os.path.join(server_root, "config.yaml"), encoding="utf-8") as fh:
+              upstream = yaml.safe_load(fh)
+          with open(os.environ["ASR_OVERLAY"], encoding="utf-8") as fh:
+              overlay = yaml.safe_load(fh)
+          effective = merge(upstream, overlay)
+
+          expected = {
+              "VAD": "SileroVAD",
+              "ASR": "AliyunBLStreamASR",
+              "LLM": "OllamaLLM",
+              "TTS": "CustomTTS",
+              "VLLM": "",
+              "Memory": "nomem",
+              "Intent": "nointent",
+          }
+          assert effective["selected_module"] == expected, effective["selected_module"]
+
+          asr = effective["ASR"]["AliyunBLStreamASR"]
+          assert asr["type"] == "aliyunbl_stream", asr
+          assert asr["sample_rate"] == 16000 and asr["format"] == "pcm", asr
+          # Comparison only — the dummy value is never printed.
+          assert asr["api_key"] == "dummy-ci-not-a-real-key", "render-time injection failed"
+          assert effective["log"]["log_level"] == "WARNING", effective["log"]
+          assert effective["delete_audio"] is True
+          assert effective["read_config_from_api"] is False
+
+          # Beyond the reviewed ASR vendor (whose endpoint lives in pinned
+          # provider CODE, not config), every URL in the active provider
+          # surface must still be loopback: LLM/TTS placeholders unchanged.
+          url_re = re.compile(r"https?://([^/\s\"']+)")
+          loopback_re = re.compile(r"^(127\.0\.0\.1|localhost)(:\d+)?$")
+          hosts = []
+
+          def collect(node):
+              if isinstance(node, dict):
+                  for value in node.values():
+                      collect(value)
+              elif isinstance(node, list):
+                  for value in node:
+                      collect(value)
+              elif isinstance(node, str):
+                  hosts.extend(url_re.findall(node))
+
+          for module in ("LLM", "TTS"):
+              collect(effective[module][effective["selected_module"][module]])
+          collect(effective["ASR"]["AliyunBLStreamASR"])
+          bad = [h for h in hosts if not loopback_re.match(h)]
+          assert not bad, f"real-ASR tier active surface carries non-loopback config endpoints: {bad}"
+          print("gateway-asr-real effective config OK (reviewed selection, retention gates, loopback LLM/TTS; not booted)")
           PY
 
       - name: Boot the gateway-minimal server (foreground, smoke env)

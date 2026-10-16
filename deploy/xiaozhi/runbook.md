@@ -90,6 +90,44 @@ sudo systemctl reload caddy
 
 纪律：渲染由 `render_config.py` 执行——缺 key/占位值拒绝（报错只给变量名）、产物 0600、值永不回显、root 执行时属主回填服务用户（`--owner`，每次渲染都保持）。审计面：小智服务端是**领域外发边界之前**的语音入口，儿童会话正文不经过它（gateway-minimal 档位连 ASR 都未配置）。
 
+## 3.5 gateway-asr-real 档位：真实流式 ASR 供应商（E2E-05，issue #55）
+
+> 启用本档位 = 在小智已钉版本（§1，`27399a2f…`）的 Provider 扩展点（`selected_module.ASR`）接入**一个评审过的真实流式 ASR 供应商**。本节与 [docs/adr/0009-real-asr-provider-transient-channel.md](../../docs/adr/0009-real-asr-provider-transient-channel.md)、[VOICE_HARDWARE §3](../../docs/VOICE_HARDWARE.md) 共同构成启用前提；**未完成评审 = 保持 gateway-minimal 档位**（fail-closed：模板/env 缺任何一项渲染即拒绝）。
+
+**首供应商（唯一评审路径）**：`ASR: AliyunBLStreamASR`（`type: aliyunbl_stream`，阿里云百炼 Paraformer 实时）。钉死 commit 的该 provider 硬编码 `wss://dashscope.aliyuncs.com/api-ws/v1/inference`（duplex WebSocket 流式）；上行合同 = 设备 Opus 16 kHz 单声道 → 服务端解码 PCM 16 kHz（模板 `sample_rate: 16000`、`format: pcm`）；端点检测 = 本地 SileroVAD + 供应商侧 `max_sentence_silence: 200`（VAD 断句；手动模式上游自动放宽 6000 ms）。钉死版本升级若改动该硬编码端点/provider 形状 = 换基线（§1）+ **重跑外发评审**（CI 合并后扫描会因形状漂移失败）。
+
+| 政策面 | 值 | 载体（模板强制，CI/测试断言） |
+| --- | --- | --- |
+| 鉴权 | API Key 渲染期注入 `${XIAOZHI_ASR_API_KEY}`；systemd 单元不注入进程环境 | `env/gateway-asr-real.example`（0600）+ `render_config.py` fail-closed |
+| 数据外发 | 仅 ASR 音频流 → dashscope（评审锚点端点）；LLM/TTS/VLLM 零外发不变 | 模板活跃面扫描 + 合并后有效配置扫描 |
+| 保留（本机） | `delete_audio: true`（不落音频文件）；`read_config_from_api: false`（**ASR/TTS 上报队列结构性 never enqueue**，原始转写不进消息队列/无 manager-api 可上报） | 上游 `asr/base.py` / `reportHandle.py` @ pinned commit；模板断言 |
+| 保留（日志） | `log_level: WARNING`：钉死 commit 以 INFO 打印"识别文本/识别到文本"（`asr/base.py`、`asr/aliyunbl_stream.py`），WARNING 全部抑制 | 上游 `config/logger.py` 按 `log.log_level` 过滤 |
+| 残留（如实披露） | WARNING 以上异常路径可能携带供应商侧错误详情（连接/鉴权失败等，不含本地转写正文）；上游 `loguru` 文件 handler `diagnose=True` 为钉死代码，异常堆栈可能含变量值——日志按敏感面对待（journald 权限 + 轮转 + 运维 vantage），本机转写正文不进常规日志 | 本节；ADR-0009"约束/后果" |
+| 供应商侧保留 | 由运营者在激活时的外发评审记录中登记（reviewer/reason；LumiThink 侧激活记录 `LUMITHINK_ASR_*` 校验锚点端点一致）；儿童数据闸门 = `CHILD_DATA_EGRESS_REVIEW_STATUS = not_performed` 常量，本档位仅覆盖**成人合成/公开测试音频对照路径** | `lib/server/real-asr-composition.ts`（fail-closed） |
+
+**激活步骤**（在 §2 完成的基础上）：
+
+```bash
+# 1. env 追加供应商键（模板 shapes 见 deploy/xiaozhi/env/gateway-asr-real.example）
+sudo vi /etc/xiaozhi/xiaozhi.env          # + XIAOZHI_ASR_API_KEY=<百炼 API-KEY>
+
+# 2. 以真实 ASR 档位重渲染（--template 显式选档；缺省仍是 gateway-minimal）
+sudo env "PATH=$PATH" bash deploy/xiaozhi/bootstrap.sh \
+  --target /opt/xiaozhi-esp32-server --env-file /etc/xiaozhi/xiaozhi.env \
+  --skip-clone --template deploy/xiaozhi/config/gateway-asr-real.yaml
+
+# 3. 重启并复核
+sudo systemctl restart xiaozhi-server
+sudo XIAOZHI_AUTH_KEY="$(sudo grep -oP '(?<=^XIAOZHI_AUTH_KEY=).*' /etc/xiaozhi/xiaozhi.env)" \
+  deploy/xiaozhi/healthcheck.sh
+```
+
+**禁用开关（服务端可禁用 ASR 外发）**：重渲染缺省档位即回到零外发形态——`bootstrap.sh --skip-clone`（不带 `--template`）→ 重启。运营商侧还可直接停用百炼 Key（fail-loud：ASR 请求失败，协议面存活）。
+
+**对照样例与证据流程（DoD 1/3）**：仓库内证据 = 合成流式源驱动真实 LumiThink 组合栈（`tests/domain/voice/adapter/real-asr-stream.spec.ts`：final 逐字进受控 Core + 内容无关时延/端点指标 + 零泄漏扫描）；**成人合成/公开测试音频 → 远程 ASR** 的服务器端对照为**运营者 opt-in**：以成人/合成样本音频经设备 WS（或真机）触发，激活时登记 reviewer/reason，证据只保留内容无关事实（时延、端点/去重计数、通过/失败）；**真实儿童音频不在本档位授权范围内**（儿童数据闸门为常量），任何实机验收归 #E2E-08 且需独立评审。
+
+**诚实边界**：私有服务端配置面已验证（CI 渲染/合并后扫描），**真实供应商转写质量、实机打断/重连行为未实机验证**；供应商置信度不在钉死 commit 的设备线协议上暴露（`stt` 只带文本），证据记录如实标注 `confidence.onWire=false`，不合成数值。
+
 ## 4. gateway-minimal 档位：明确的"禁用"语义（AC 2）
 
 `deploy/xiaozhi/config/gateway-minimal.yaml`（渲染进 `data/.config.yaml`）。
@@ -123,6 +161,8 @@ sudo systemctl reload caddy
 | `render_config.py` 拒绝：missing/placeholder | env 缺 key 或占位值 | 补真实值；报错只含变量名（无值回显） |
 | 连接被拒 `认证失败` | 无/过期/签名不符 token | 设备重新 POST `/xiaozhi/ota/` 换 token；近期轮换过 auth_key 则全部设备需重取 |
 | 每连接日志 `connect call failed`（10096/11434/9 回环拒绝） | gateway-minimal 档位预期（认知层回环占位 fail-loud） | 非故障（§4）；消除它 = 启用对应真实模块 = 档位变更 + 评审 |
+| `ASR识别失败`/上游 `任务失败`（仅 WARNING+，含供应商错误码） | gateway-asr-real 档位：供应商连接/鉴权/配额失败（fail-loud，协议面存活） | 核对 `XIAOZHI_ASR_API_KEY` 与百炼控制台状态；轮换 = 改值 → 重渲染 → 重启（§3.5）；设备侧重连按协议处理 |
+| 真实 ASR 档位下日志出现"识别文本"字样 | `log_level` 被改回 INFO（模板被手改/旧渲染产物） | **不得**手工改渲染产物；用 §3.5 命令重渲染（WARNING 抑制转写日志面） |
 | OTA 200 但设备连不上 WSS | `XIAOZHI_DEVICE_WS_URL` 与真实域名/TLS 不符（上游注释亦警告 docker/公网部署需手工核对） | 核对 Caddy 站点块域名与该值逐字符一致；`curl -sSI https://<domain>/xiaozhi/ota/` 复核 |
 | `healthcheck` 报端口越界 | 8000/8003 绑定了非回环地址 | 配置被改（模板外覆盖）；恢复 `server.ip: 127.0.0.1` |
 | onnxruntime/libopus 加载失败 | 系统依赖缺失 | `apt-get install libopus0`；ffmpeg 缺失同理由上游启动检查拦截 |
