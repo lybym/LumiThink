@@ -193,8 +193,11 @@ def main():
         asyncio.run(probe_auth_failure(args))
         return 0
     if args.expect_silent_binary:
-        if not (args.token or args.auth_key):
+        secret = args.auth_key or os.environ.get("XIAOZHI_AUTH_KEY")
+        if not args.token and not secret:
             raise SystemExit("[xiaozhi:probe] --expect-silent-binary needs auth")
+        if secret and not args.token:
+            args.token = generate_token(secret, args.client_id, args.device_id)
         asyncio.run(probe_silent_binary(args))
         return 0
 
