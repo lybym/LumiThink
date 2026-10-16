@@ -643,6 +643,35 @@ jobs:
           assert tts["api_key"] == "dummy-ci-not-a-real-key", "render-time injection failed"
           # The review anchor must stay the pinned code default, not config.
           assert "ws_url" not in tts, tts
+          # Pinned-upstream binding (review R1 P2-2): the review anchor is the
+          # pinned checkout's OWN hardcoded default, so extract it from the
+          # pinned code and compare THREE ways — the LumiThink activation
+          # constant, the runbook anchor and the template anchor comment must
+          # all carry the same URL verbatim. A pin bump that changes
+          # DEFAULT_WS_URL fails HERE (re-run the egress review) instead of
+          # leaving the recorded anchor stale. (#55's ASR anchor has the same
+          # pattern; that residual belongs to issue #55's scope.)
+          with open(os.path.join(server_root, "core", "utils", "alibl_endpoint.py"), encoding="utf-8") as fh:
+              alibl_src = fh.read()
+          upstream_match = re.search(r'DEFAULT_WS_URL\s*=\s*"([^"]+)"', alibl_src)
+          assert upstream_match, "pinned alibl_endpoint.py no longer carries a literal DEFAULT_WS_URL"
+          upstream_default = upstream_match.group(1)
+          with open("lib/server/real-tts-composition.ts", encoding="utf-8") as fh:
+              ts_src = fh.read()
+          ts_match = re.search(r'REAL_TTS_VENDOR_ENDPOINT\s*=\s*"([^"]+)"', ts_src)
+          ts_value = ts_match.group(1) if ts_match else "<absent>"
+          assert ts_value == upstream_default, (
+              "LumiThink REAL_TTS_VENDOR_ENDPOINT (%r) != pinned upstream DEFAULT_WS_URL (%r)"
+              " — the vendor endpoint review anchor drifted; re-run the egress review"
+              % (ts_value, upstream_default)
+          )
+          with open("deploy/xiaozhi/runbook.md", encoding="utf-8") as fh:
+              runbook_src = fh.read()
+          assert upstream_default in runbook_src, "runbook anchor drifted from the pinned upstream default"
+          with open("deploy/xiaozhi/config/gateway-tts-real.yaml", encoding="utf-8") as fh:
+              template_src = fh.read()
+          assert upstream_default in template_src, "template anchor comment drifted from the pinned upstream default"
+          print("pinned DEFAULT_WS_URL three-way binding OK (%s)" % upstream_default)
           assert effective["log"]["log_level"] == "WARNING", effective["log"]
           assert effective["delete_audio"] is True
           assert effective["read_config_from_api"] is False

@@ -4,6 +4,9 @@ import test from "node:test";
 /**
  * E2E-06 (issue #56) — real TTS activation record: fail-closed parsing and
  * the content-free evidence contract (mirrors the E2E-05 activation gates).
+ * Test names are deliberately TTS-distinct (review R1 P2-4): the ASR suite
+ * carries verbatim-mirror names, and same-named tests made CI-log grep
+ * audits lie about which suite actually ran.
  *
  * The provider credential is deliberately absent from this module's surface:
  * it is a deploy-tier render input (render_config.py, secrets-registry slot
@@ -44,7 +47,7 @@ function realEnv(overrides: EnvSource = {}): EnvSource {
   };
 }
 
-test("the route selector defaults to mock; anything but mock|real fails closed", () => {
+test("TTS route selector defaults to mock; anything but mock|real fails closed", () => {
   assert.deepEqual(parseRealTtsActivation({}), { mode: "mock" });
   assert.deepEqual(parseRealTtsActivation({ LUMITHINK_TTS_ROUTE: "" }), { mode: "mock" });
   assert.deepEqual(parseRealTtsActivation({ LUMITHINK_TTS_ROUTE: "mock" }), { mode: "mock" });
@@ -55,7 +58,7 @@ test("the route selector defaults to mock; anything but mock|real fails closed",
   assert.deepEqual([...TTS_ROUTE_VALUES], ["mock", "real"]);
 });
 
-test("real route: every missing structural fact fails closed with variable NAMES only", () => {
+test("real TTS route: every missing structural fact fails closed with variable NAMES only", () => {
   const cases: readonly (readonly [string, EnvSource])[] = [
     ["vendor endpoint", { LUMITHINK_TTS_VENDOR_ENDPOINT: "" }],
     ["model", { LUMITHINK_TTS_PROVIDER_MODEL: "" }],
@@ -82,7 +85,7 @@ test("real route: every missing structural fact fails closed with variable NAMES
   }
 });
 
-test("real route: a drifted vendor endpoint is a review failure, not a config value", () => {
+test("real TTS route: a drifted vendor endpoint is a review failure, not a config value", () => {
   for (const drifted of ["wss://elsewhere.example/v1", "wss://dashscope.aliyuncs.com/api-ws/v1/inference"]) {
     // The second value is the real-ASR anchor WITHOUT the trailing slash —
     // the pinned TTS default carries the slash; near-misses must fail too.
@@ -99,7 +102,7 @@ test("real route: a drifted vendor endpoint is a review failure, not a config va
   }
 });
 
-test("real route: the downlink sample rate is the negotiated wire contract (16000|24000)", () => {
+test("real TTS route: the downlink sample rate is the negotiated wire contract (16000|24000)", () => {
   assert.deepEqual([...REAL_TTS_DOWNLINK_SAMPLE_RATES], [16000, 24000]);
   for (const bad of ["8000", "48000", "16001", "0", "-16000", "24kHz", "abc"]) {
     assert.throws(
@@ -117,7 +120,7 @@ test("real route: the downlink sample rate is the negotiated wire contract (1600
   }
 });
 
-test("real route: the full record freezes the reviewed provider facts", () => {
+test("real TTS route: the full record freezes the reviewed provider facts", () => {
   const parsed = parseRealTtsActivation(realEnv());
   assert.equal(parsed.mode, "real");
   if (parsed.mode !== "real") {
@@ -141,7 +144,7 @@ test("real route: the full record freezes the reviewed provider facts", () => {
   assert.ok(Object.isFrozen(record));
 });
 
-test("the provider key is not a LumiThink env var of this module and never reaches any output", () => {
+test("the provider key is not a LumiThink env var of the TTS module and never reaches any output", () => {
   // The key belongs to the deploy tier's render_config.py surface.
   assert.ok(!(REAL_TTS_ENV_VARS as readonly string[]).includes("LUMITHINK_TTS_PROVIDER_KEY"));
   const envWithKey: EnvSource = {
@@ -194,7 +197,7 @@ test("the child-data egress gate stays the issue #53 constant in the TTS path to
   assert.equal(evidence.serverPlaybackVerification.performed, false);
 });
 
-test("mock-route evidence records are provider-free and sanitized", () => {
+test("mock-route TTS evidence records are provider-free and sanitized", () => {
   const evidence = buildRealTtsEvidenceRecord({
     activation: { mode: "mock" },
     metrics: {

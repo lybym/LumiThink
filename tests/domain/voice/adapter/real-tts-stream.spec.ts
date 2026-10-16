@@ -306,6 +306,8 @@ test("abort without playback stays an enumerated no-op: queued sentences still p
 // ---------------------------------------------------------------------------
 
 const SESSION = "sessmock-000001-0001";
+/** Fresh per-connection xiaozhi session id for the reconnect episode test. */
+const SESSION_RECONNECT = "sessmock-000001-0002";
 
 function testAsrFingerprint(text: string): string {
   return gatewayContentDigest(`test-key\u0000${text}`);
@@ -316,7 +318,9 @@ interface ScriptedDrain {
   droppedStale: number;
 }
 
-function createScriptedCore() {
+function createScriptedCore(
+  opts: { readonly bargeInRefusesWith?: "cancel_unknown_turn" | "stale_turn_rejected" | "turn_terminal" } = {},
+) {
   const epochBox = { epoch: 1 };
   const drain: ScriptedDrain = { deliverable: [], droppedStale: 0 };
   const core: GatewayCorePort = {
@@ -327,6 +331,12 @@ function createScriptedCore() {
       return { ok: true, turnId: "trn_tts000000001", dispatched: true };
     },
     async bargeIn() {
+      if (opts.bargeInRefusesWith !== undefined) {
+        // Fence-unknown abort (review R1 test gap): the trusted core refuses
+        // the barge-in; the adapter must resolve the device stop from the
+        // turn's terminal state WITHOUT a second epoch bump or a drain.
+        return { ok: false as const, code: opts.bargeInRefusesWith, fenced: false };
+      }
       epochBox.epoch += 1; // the fence bumps the trusted epoch
       return { ok: true };
     },
@@ -403,6 +413,123 @@ test("the stale-audio suppression counter accounts fenced batches AND dropped qu
   // The hello-negotiated downlink sample rate (24 kHz here) is recorded.
   const mapping = adapter.mappingSnapshot().find((entry) => entry.deviceId === DEVICE);
   assert.ok(mapping && mapping.downlinkSampleRate === 24_000);
+});
+
+test("a fence-unknown abort resolves the device stop from the terminal turn state (describeTurn path, deterministic)", async () => {
+  const scripted = createScriptedCore({ bargeInRefusesWith: "turn_terminal" });
+  const directives: GatewayDeviceDirective[] = [];
+  let nowMs = 1_000;
+  const clock = () => {
+    nowMs += 1;
+    return nowMs;
+  };
+  const binding = createGatewayDeviceBindingRegistry({ clock });
+  const adapter = createVoiceGatewayAdapter({
+    core: scripted.core,
+    binding,
+    asrFingerprint: testAsrFingerprint,
+    clock,
+    framesPerSentence: 4,
+    sink: (directive) => directives.push(directive),
+  });
+  adapter.bindDevice({ deviceId: DEVICE, actorId: ACTOR, conversationId: CONVERSATION, activationDigest: ACTIVATION });
+  await adapter.handleDeviceEvent("conn1", { kind: "hello", deviceId: DEVICE, clientDigest: ACTIVATION, audioParams: { format: "opus", sampleRate: 24_000, channels: 1, frameDurationMs: 60 } });
+  await adapter.handleDeviceEvent("conn1", { kind: "session_issued", xiaozhiSessionId: SESSION });
+
+  // The playback binding is live (the delivery below sets state.playback),
+  // but the trusted core REFUSES the barge-in (fence unknown: the turn
+  // already settled CANCELLED in the trusted store — the scripted
+  // describeTurn returns CANCELLED while the device still tracks playback).
+  const finalOutcome = await adapter.handleDeviceEvent("conn1", { kind: "asr_final", xiaozhiSessionId: SESSION, text: "第一句。" });
+  assert.ok(finalOutcome.ok);
+  scripted.drain.deliverable = [{ itemId: "item-s1", turnId: "trn_tts000000001", epoch: 1 }];
+  const sessionKey = `ses_gw${gatewayContentDigest(`${DEVICE}|${CONVERSATION}`)}`;
+  const pumped = adapter.pumpPlayback(sessionKey);
+  assert.ok(pumped.ok && pumped.sent === 1);
+  assert.equal(adapter.metricsSnapshot().ttsStopEffectiveMs.count, 0, "no measure before the abort");
+
+  const abortOutcome = await adapter.handleDeviceEvent("conn1", { kind: "abort", xiaozhiSessionId: SESSION, reason: "manual" });
+  assert.ok(abortOutcome.ok);
+
+  // The SECOND stop-measure count point (the fence-unknown branch resolving
+  // the stop from describeTurn's terminal state) measured the latency.
+  const metrics = adapter.metricsSnapshot();
+  assert.equal(metrics.ttsStopEffectiveMs.count, 1, "the stop-effective latency was measured on the describeTurn path too");
+  assert.ok(Number.isFinite(metrics.ttsStopEffectiveMs.maxMs), "the measure is a real number, never hardcoded");
+  assert.equal(metrics.playbackStopsIssued, 1, "the device stop was issued exactly once");
+  assert.equal(metrics.abortsWithoutPlayback, 1, "the fence-unknown abort is recorded as the no-fence abort kind");
+  assert.equal(scripted.epochBox.epoch, 1, "a refused barge-in does NOT bump the trusted epoch (no second fence)");
+  assert.equal(metrics.ttsStaleAudioSuppressed, 0, "no drain ran on this path");
+  assert.ok(!directives.some((directive) => directive.kind === "tts.clear"), "no tts.clear was emitted");
+  const stopIdx = directives.findIndex((directive) => directive.kind === "tts.stop" && directive.turnId === "trn_tts000000001");
+  assert.ok(stopIdx >= 0, "the device stop names the interrupted turn");
+  assert.equal(
+    directives.slice(stopIdx + 1).filter((directive) => directive.kind === "tts.stop" && directive.turnId === "trn_tts000000001").length,
+    0,
+    "the stop stays exactly-once",
+  );
+});
+
+test("mid-turn disconnect then reconnect: the resumed delivery of the same turn is a new episode (ttsTurnsPlayed counts delivery episodes, 断线/重连)", async () => {
+  const scripted = createScriptedCore();
+  const directives: GatewayDeviceDirective[] = [];
+  let nowMs = 1_000;
+  const clock = () => {
+    nowMs += 1;
+    return nowMs;
+  };
+  const binding = createGatewayDeviceBindingRegistry({ clock });
+  const adapter = createVoiceGatewayAdapter({
+    core: scripted.core,
+    binding,
+    asrFingerprint: testAsrFingerprint,
+    clock,
+    framesPerSentence: 4,
+    sink: (directive) => directives.push(directive),
+  });
+  adapter.bindDevice({ deviceId: DEVICE, actorId: ACTOR, conversationId: CONVERSATION, activationDigest: ACTIVATION });
+  await adapter.handleDeviceEvent("conn1", { kind: "hello", deviceId: DEVICE, clientDigest: ACTIVATION, audioParams: { format: "opus", sampleRate: 24_000, channels: 1, frameDurationMs: 60 } });
+  await adapter.handleDeviceEvent("conn1", { kind: "session_issued", xiaozhiSessionId: SESSION });
+
+  // Episode 1: the turn's first sentence batch reaches the device sink.
+  const finalOutcome = await adapter.handleDeviceEvent("conn1", { kind: "asr_final", xiaozhiSessionId: SESSION, text: "第一句。" });
+  assert.ok(finalOutcome.ok);
+  scripted.drain.deliverable = [{ itemId: "item-s1", turnId: "trn_tts000000001", epoch: 1 }];
+  const sessionKey = `ses_gw${gatewayContentDigest(`${DEVICE}|${CONVERSATION}`)}`;
+  const pumpedA = adapter.pumpPlayback(sessionKey);
+  assert.ok(pumpedA.ok && pumpedA.sent === 1);
+  const metricsA = adapter.metricsSnapshot();
+  assert.equal(metricsA.ttsTurnsPlayed, 1);
+  assert.equal(metricsA.ttsFirstAudioMs.count, 1);
+
+  // Mid-turn disconnect: the transport fault suspends the playback binding
+  // (gateway.playback_suspended) while the trusted turn is still alive.
+  const dropped = await adapter.handleDeviceEvent("conn1", { kind: "connection_dropped", reason: "network" });
+  assert.ok(dropped.ok);
+  assert.equal(adapter.metricsSnapshot().suspensions, 1, "the disconnect suspended the playback binding");
+  const blocked = adapter.pumpPlayback(sessionKey);
+  assert.ok(!blocked.ok && blocked.code === "connection_closed", "the closed connection cannot deliver");
+
+  // Reconnect: the SAME trusted session continues on the new connection
+  // (fresh per-connection xiaozhi session id, renegotiated audio shape).
+  await adapter.handleDeviceEvent("conn2", { kind: "hello", deviceId: DEVICE, clientDigest: ACTIVATION, audioParams: { format: "opus", sampleRate: 24_000, channels: 1, frameDurationMs: 60 } });
+  await adapter.handleDeviceEvent("conn2", { kind: "session_issued", xiaozhiSessionId: SESSION_RECONNECT });
+  scripted.drain.deliverable = [{ itemId: "item-s2", turnId: "trn_tts000000001", epoch: 1 }];
+  const pumpedB = adapter.pumpPlayback(sessionKey);
+  assert.ok(pumpedB.ok && pumpedB.sent === 1, "the resumed delivery reaches the device sink again");
+
+  // The documented episode semantics (review R1 P2-3): the SAME turnId's
+  // resumed delivery counts as a NEW ttsTurnsPlayed episode and re-issues
+  // tts.start, while first-audio stays single-shot per accepted final.
+  // Candidate baseline metric: audit the count as delivery episodes, not
+  // unique turns.
+  const metricsB = adapter.metricsSnapshot();
+  assert.equal(metricsB.ttsTurnsPlayed, 2, "resumed delivery of the same turnId = a new delivery episode");
+  assert.equal(metricsB.ttsSentencesSent, 2);
+  assert.equal(metricsB.ttsFramesSent, 8);
+  assert.equal(metricsB.ttsFirstAudioMs.count, 1, "first-audio is single-shot per accepted final");
+  const starts = directives.filter((directive) => directive.kind === "tts.start" && directive.turnId === "trn_tts000000001");
+  assert.equal(starts.length, 2, "each delivery episode re-issues tts.start for the same turnId");
 });
 
 test("the adapter version bump is observable for the E2E-06 TTS metrics semantics", () => {

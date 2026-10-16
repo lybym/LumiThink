@@ -178,7 +178,14 @@ export interface GatewayMetricsSnapshot {
    * Candidate baseline (virtual-clock measurable), never an SLA claim.
    */
   readonly asrFinalAcceptMs: { readonly count: number; readonly maxMs: number };
-  /** E2E-06: turns whose TTS reached the device sink (first frame batch sent). */
+  /**
+   * E2E-06: TTS delivery EPISODES that reached the device sink (first frame
+   * batch sent). A mid-turn disconnect suspends the playback binding
+   * (gateway.playback_suspended); the SAME turnId's resumed delivery after a
+   * reconnect counts as a NEW episode (+1, tts.start re-issued; first-audio
+   * stays single-shot per accepted final) — review R1 P2-3 documented
+   * semantics, pinned by real-tts-stream.spec.ts.
+   */
   readonly ttsTurnsPlayed: number;
   /** E2E-06: TTS sentence items delivered to the device sink (frame batches). */
   readonly ttsSentencesSent: number;

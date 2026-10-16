@@ -538,3 +538,70 @@ test("the CI deployment gate renders and merge-scans the real-TTS tier without b
   assert.ok(workflow.includes("alibl_stream"));
   assert.ok(workflow.includes("longxiaochun_v2"));
 });
+
+test("gateway-tts-real vs gateway-minimal: the mechanical template diff is exactly the TTS tier (selected_module.TTS + TTS block + log_level)", () => {
+  // Review R1 test gap: the tier relationship was previously assembled from
+  // per-key assertions. This pins the COMPLETE comment-free line diff as a
+  // multiset — ANY other template change (shape, key, value) fails here and
+  // forces a conscious re-review of the "only TTS changed" claim. A
+  // legitimate tier-shape change must update the expected diff verbatim.
+  const activeLines = (raw: string): readonly string[] =>
+    raw
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter((line) => {
+        const trimmed = line.trim();
+        return trimmed.length > 0 && !trimmed.startsWith("#");
+      });
+
+  const multisetDiff = (a: readonly string[], b: readonly string[]): { readonly onlyA: string[]; readonly onlyB: string[] } => {
+    const counts = new Map<string, number>();
+    for (const line of a) counts.set(line, (counts.get(line) ?? 0) + 1);
+    for (const line of b) counts.set(line, (counts.get(line) ?? 0) - 1);
+    const onlyA: string[] = [];
+    const onlyB: string[] = [];
+    for (const [line, count] of counts) {
+      for (let i = 0; i < Math.abs(count); i += 1) {
+        (count > 0 ? onlyA : onlyB).push(line);
+      }
+    }
+    return { onlyA: onlyA.sort(), onlyB: onlyB.sort() };
+  };
+
+  const { onlyA, onlyB } = multisetDiff(
+    activeLines(read("deploy/xiaozhi/config/gateway-minimal.yaml")),
+    activeLines(read("deploy/xiaozhi/config/gateway-tts-real.yaml")),
+  );
+
+  assert.deepEqual(
+    [...onlyA].sort(),
+    [
+      '      input: "{prompt_text}"',
+      '      response_format: "mp3"',
+      "    format: mp3",
+      "    headers: {}",
+      "    method: POST",
+      "    params:",
+      "    type: custom",
+      '    url: "http://127.0.0.1:9/v1/tts"',
+      "  CustomTTS:",
+      "  TTS: CustomTTS",
+      "  log_level: INFO",
+    ],
+    "gateway-minimal carries active lines beyond the TTS tier change",
+  );
+  assert.deepEqual(
+    [...onlyB].sort(),
+    [
+      "    api_key: ${XIAOZHI_TTS_API_KEY}",
+      "    format: pcm",
+      "    model: cosyvoice-v2",
+      "    type: alibl_stream",
+      "    voice: longxiaochun_v2",
+      "  AliBLStreamTTS:",
+      "  TTS: AliBLStreamTTS",
+      "  log_level: WARNING",
+    ],
+    "gateway-tts-real carries active lines beyond the TTS tier change",
+  );
+});

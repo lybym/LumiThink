@@ -76,7 +76,7 @@ v1.0 中 `asr_final` 文本在 Adapter 内即刻降为 FNV-1a 摘要并丢弃—
 - `abort` → **fence 先行**（`core.bargeIn` = 组合层 `bargeInCancel`：原子 epoch 递增 → Bridge 进程内真取消 + `whenIdle` 复核 → CANCELLED）→ 才发 `tts.stop{reason:"interrupted"}`（每 turn 恰好一次）→ `drainTts` 丢弃全部旧 epoch 队列项并回执 `tts.clear{droppedStale}`。
 - 连续抢话：无播放中的 abort 是枚举化 no-op（`no_active_playback` 语义，无第二次 epoch bump、无重复 stop——"不是每一帧 VAD 都提升 epoch"）。
 - 出站帧批：`drainTts` 只交付当前 epoch 队列项 → 每批再过 `fenceOutput(kind:"audio_send")` 深度防御 → `tts.frames{frameCount, audioDigest}`（**帧数 + 十六进制摘要，协议内不存在音频字节字段**，真实编解码属 R5）。
-- **内容无关 TTS 指标（v1.3，issue #56 / ADR-0010）**：Adapter 记录 `ttsTurnsPlayed`/`ttsSentencesSent`/`ttsFramesSent`、`ttsFirstAudioMs`（final 接受 → 该 turn 首个帧批）、`ttsInterSentenceGapMs`（同 turn 帧批间隙）、`ttsStopEffectiveMs`（abort 到达 → 端侧 stop）与 `ttsStaleAudioSuppressed`（fence 拒绝 + 队列丢弃；旧 epoch 送出结构上为 0）；mapping 快照按设备记录 hello 协商下行采样率。真实供应商合成由钉死服务端的 `gateway-tts-real` 档位承载；服务器端解码/播放验证为运营者 opt-in，协议面不变。
+- **内容无关 TTS 指标（v1.3，issue #56 / ADR-0010）**：Adapter 记录 `ttsTurnsPlayed`（按**投递 episode** 计数：turn 中途断连→重连恢复投递会对同一 turnId 再次计数并重发 `tts.start`，first-audio 锚点对每次 final 接受只计一次；候选基线指标，审计口径 = 投递 episode 而非去重 turn 数）/`ttsSentencesSent`/`ttsFramesSent`、`ttsFirstAudioMs`（final 接受 → 该 turn 首个帧批）、`ttsInterSentenceGapMs`（同 turn 帧批间隙）、`ttsStopEffectiveMs`（abort 到达 → 端侧 stop）与 `ttsStaleAudioSuppressed`（fence 拒绝 + 队列丢弃；旧 epoch 送出结构上为 0）；mapping 快照按设备记录 hello 协商下行采样率。真实供应商合成由钉死服务端的 `gateway-tts-real` 档位承载；服务器端解码/播放验证为运营者 opt-in，协议面不变。
 
 ## 3. 兼容矩阵（v2.5.2 线协议 × Adapter 合同）
 
