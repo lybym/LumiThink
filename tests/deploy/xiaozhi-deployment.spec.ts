@@ -106,6 +106,27 @@ test("gateway-minimal config template: loopback-only, auth forced on, ASR/TTS/LL
   }
 });
 
+test("render placeholder contract: only the three injected keys, only on active lines", () => {
+  const raw = read("deploy/xiaozhi/config/gateway-minimal.yaml");
+  // Replicates render_config.py's placeholder extraction over ACTIVE lines.
+  // A literal ${...} inside a comment would be treated as a required env key
+  // and fail every render — this pins the contract so that class of bug
+  // cannot return silently.
+  const activeLines = raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .join("\n");
+  const placeholders = [...activeLines.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map(
+    (match) => match[1],
+  );
+  assert.deepEqual([...new Set(placeholders)].sort(), [
+    "XIAOZHI_AUTH_KEY",
+    "XIAOZHI_DEVICE_WS_URL",
+    "XIAOZHI_PUBLIC_DOMAIN",
+  ]);
+});
+
 test("env template carries no real secret values (shapes only)", () => {
   const raw = read("deploy/xiaozhi/env/gateway-minimal.example");
   for (const line of raw.split("\n")) {

@@ -3,7 +3,7 @@
 # 渲染目标：<server-dir>/main/xiaozhi-server/data/.config.yaml（上游的覆盖层，
 # 只覆盖 deploy 需要的键；其余值来自上游仓库内 config.yaml 原文件）。
 # 由 deploy/xiaozhi/render_config.py 从本模板 + 受控 env 文件渲染：
-#   - 所有 ${VAR} 必须由 env 注入，缺失/占位值 → fail-closed 拒绝渲染；
+#   - 模板中的每个占位符都必须由 env 注入，缺失/占位值 → fail-closed 拒绝渲染；
 #   - Secret 值永不回显、不进 Git/日志/CI（渲染产物 0600）。
 #
 # 档位语义（明确的"禁用"而非"静默接外部服务"）：
