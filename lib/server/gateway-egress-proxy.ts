@@ -21,7 +21,8 @@
  *    (server-minted contract ids, no identity fields) and answered from the
  *    gateway's outcome — the proxy owns no provider logic of its own.
  *  - FAIL CLOSED: bearer mismatch, unknown path, oversize/invalid payload,
- *    unregistered model and every gateway rejection map to static
+ *    unregistered model, non-text content blocks (never silently stripped —
+ *    issue #53 review r1 P2-2) and every gateway rejection map to static
  *    Messages-protocol error responses. Response text is value-free: no
  *    prompt text, no provider body, no key material is ever echoed.
  *  - CANCELLATION: a client disconnect aborts the gateway stream (the
@@ -143,6 +144,45 @@ function textOfContent(content: unknown): string {
     return parts.join("\n");
   }
   return "";
+}
+
+/**
+ * Fail-closed content guard (issue #53 review r1 P2-2): the gateway route
+ * serves a TEXT-ONLY Messages context (the pinned bridge profile mounts no
+ * tools, streams no reasoning and sends no images). A non-text content block
+ * (tool_use/tool_result/image/thinking/…) — or a malformed array element —
+ * can never be represented in the gateway's text context, and silently
+ * stripping it would shrink the model's context with zero audit trace
+ * (fabricated semantics). The proxy therefore rejects the request statically
+ * BEFORE the gateway: value-free 400, `rejected` counter, no vendor contact.
+ * Content that is merely EMPTY (empty string / empty text blocks) stays
+ * droppable: it is provably value-free, and an all-empty request still fails
+ * visibly in parseModelRequest.
+ */
+function contentCarriesNonTextBlock(content: unknown): boolean {
+  if (!Array.isArray(content)) {
+    return false; // string content is text by definition
+  }
+  return content.some((block) => {
+    if (block === null || typeof block !== "object") {
+      return true; // malformed element: not provably text
+    }
+    return (block as { type?: unknown }).type !== "text";
+  });
+}
+
+function requestCarriesNonTextBlock(payload: Record<string, unknown>): boolean {
+  if (contentCarriesNonTextBlock(payload.system)) {
+    return true;
+  }
+  const rawMessages = Array.isArray(payload.messages) ? payload.messages : [];
+  return rawMessages.some((message) => {
+    if (message === null || typeof message !== "object") {
+      // Message-level shapes stay with buildGatewayRequest/parseModelRequest.
+      return false;
+    }
+    return contentCarriesNonTextBlock((message as { content?: unknown }).content);
+  });
 }
 
 /** Server-minted contract id (`req_`/`trc_`/`trn_` + 24 hex). */
@@ -271,6 +311,14 @@ export function createGatewayEgressProxy(options: GatewayEgressProxyOptions): Ga
       stats.rejected += 1;
       // The submitted model id is never echoed (unregistered route).
       writeError(res, { status: 400, type: "invalid_request_error", message: "model is not registered on this gateway route" });
+      return;
+    }
+    if (requestCarriesNonTextBlock(payload)) {
+      // Fail closed on content the text-only route cannot represent
+      // (issue #53 review r1 P2-2): no silent stripping, no partial drop.
+      // The submitted block types/values are never echoed.
+      stats.rejected += 1;
+      writeError(res, { status: 400, type: "invalid_request_error", message: "request carries content blocks this route does not serve (text-only route)" });
       return;
     }
 

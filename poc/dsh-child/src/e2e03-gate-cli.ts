@@ -27,7 +27,7 @@ import {
 /** Exact baseline the E2E-03 gateway-route suite must produce. */
 export const E2E03_BASELINE = {
   /** Total `<testcase>` rows in the E2E-03 acceptance suite. */
-  tests: 4,
+  tests: 5,
   /** Suites in the E2E-03 acceptance report. */
   suites: 1,
   /** Exact `skipped` count. Never allowed to be anything but 0. */
@@ -55,6 +55,10 @@ export const E2E03_REQUIRED_TESTS: ReadonlyArray<{ file: string; name: string }>
   {
     file: 'tests/bridge/e2e03-gateway-route.spec.ts',
     name: 'propagates a mid-stream barge-in cancel to the gateway as an auditable caller cancellation',
+  },
+  {
+    file: 'tests/bridge/e2e03-gateway-route.spec.ts',
+    name: 'degrades a vendor mid-stream connection break to a FAILED turn with an auditable gateway failure and a live scheduler',
   },
 ]
 

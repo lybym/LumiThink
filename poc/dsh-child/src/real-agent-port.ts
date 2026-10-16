@@ -397,6 +397,18 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
     if (!handleState.attemptFailed || handleState.attemptSettled) return
     handleState.attemptFailed = false
     handleState.attemptSettled = true
+    // The failed attempt is OVER (its `end` frame arrived or the agent went
+    // idle without settling durably): release the attempt binding so the
+    // Bridge can schedule the NEXT turn against the same healthy worker
+    // without a rebuild — a model failure must not brick the session
+    // (issue #53 review r1 P1-1: scheduler liveness after a mid-stream
+    // failure). Mirrors the verified-stop cleanup in `whenIdle()`. A late
+    // durable settlement for this attempt can no longer map (the upstream
+    // mapping is cleared) and the Bridge's activeTurn is already cleared by
+    // the FAILED settlement, so neither path can double-settle.
+    handleState.adapterAttemptId = null
+    handleState.idleConfirmed = true
+    handleState.upstreamToAdapter.clear()
     for (const listener of [...handleState.failureListeners]) {
       try {
         listener({ attemptId, code: 'model_request_failed' })

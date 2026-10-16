@@ -4,6 +4,11 @@
  * domain service driven by the REAL locked-version DSH adapter from
  * `src/real-agent-port.ts` over the local synthetic Messages mock.
  *
+ * PRODUCTION CONSUMER (issue #53 review r1 P2-4): the opt-in E2E-03 evidence
+ * runner `src/e2e03-real-provider-run.ts` (`test:e2e03:real`) composes its
+ * stack through `startBridgeFixture` / `submitAndAwaitCompletion` — this
+ * module is load-bearing for DoD-1 evidence production, not test-only.
+ *
  * PRIVACY: every prompt here is a clearly marked synthetic sample
  * (`E2E02-…` markers). No real child data, credentials or audio exist in
  * this suite.

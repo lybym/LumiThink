@@ -39,12 +39,24 @@ const DISCARD_FALLBACK = 'http://127.0.0.1:9'
  * loopback fallback. Any other shape blocks. When the E2E-03 gateway-route
  * variable is set in THIS environment its concrete value is probed directly
  * (it must still be loopback — the guard stays honest about the new chain).
+ *
+ * Defense in depth (issue #53 review r1 P2-5): a caller that composed the
+ * worker environment itself (a runner/audit harness that knows the effective
+ * `DSH_BRIDGE_MODEL_BASE_URL`) can pass it via `options.routeBaseURL` so the
+ * guard probes the REAL composed value even when the CLI process env does not
+ * carry the variable (otherwise the probe would fall back to the discard port
+ * and stay blind to a drifted route). The explicit value still gets the full
+ * loopback inspection.
  */
-export function inspectComposedRoute(raw: string): EgressFinding[] {
+export function inspectComposedRoute(
+  raw: string,
+  options: { readonly routeBaseURL?: string } = {},
+): EgressFinding[] {
   const referencesMockOrGatewayRoute =
     raw.includes(MOCK_EXPRESSION_MARKER) || raw.includes(BRIDGE_MODEL_EXPRESSION_MARKER)
   if (referencesMockOrGatewayRoute || raw.trim().startsWith(DISCARD_FALLBACK)) {
     const probe =
+      options.routeBaseURL ??
       process.env.DSH_BRIDGE_MODEL_BASE_URL ??
       (referencesMockOrGatewayRoute ? DISCARD_FALLBACK : raw.trim())
     return inspectModelBaseUrl(probe, 'composed llm-deepseek baseURL')

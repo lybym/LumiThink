@@ -60,6 +60,29 @@ describe('unexpected-egress guard (synthetic-only model boundary)', () => {
     assert.ok(missing.length > 0, 'a fallback to the public API must block')
   })
 
+  it('probes an explicitly supplied composed route value (issue #53 review r1 P2-5)', () => {
+    const expression = "!!js process.env.DSH_BRIDGE_MODEL_BASE_URL ?? 'http://127.0.0.1:9'"
+    // A caller that composed the worker env itself can hand the REAL value to
+    // the guard even when the CLI process env does not carry the variable.
+    assert.deepEqual(inspectComposedRoute(expression, { routeBaseURL: 'http://127.0.0.1:45678' }), [])
+    const drifted = inspectComposedRoute(expression, { routeBaseURL: 'https://api.deepseek.com' })
+    assert.ok(drifted.some(item => item.rule === 'egress/non-loopback-host'), 'a drifted composed value must still block')
+  })
+
+  it('the explicit route override wins over the CLI process env, which is still probed without one', () => {
+    const expression = "!!js process.env.DSH_BRIDGE_MODEL_BASE_URL ?? 'http://127.0.0.1:9'"
+    const previous = process.env.DSH_BRIDGE_MODEL_BASE_URL
+    process.env.DSH_BRIDGE_MODEL_BASE_URL = 'https://env-level-drift.example.com'
+    try {
+      assert.deepEqual(inspectComposedRoute(expression, { routeBaseURL: 'http://127.0.0.1:45678' }), [])
+      const envProbe = inspectComposedRoute(expression)
+      assert.ok(envProbe.some(item => item.rule === 'egress/non-loopback-host'), 'without an override the process-env value is probed')
+    } finally {
+      if (previous === undefined) delete process.env.DSH_BRIDGE_MODEL_BASE_URL
+      else process.env.DSH_BRIDGE_MODEL_BASE_URL = previous
+    }
+  })
+
   it('blocks a child environment carrying a real credential', () => {
     const synthetic = buildChildEnv({ dshHome: 'C:/tmp/isolated', mockBaseUrl: 'http://127.0.0.1:9' })
     assert.deepEqual(inspectChildEnv(synthetic as Record<string, string | undefined>), [])

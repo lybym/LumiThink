@@ -18,7 +18,11 @@
  *    GATEWAY_AUTH_FAILED and no key material anywhere (DoD 2);
  *  - budget exhaustion refuses BEFORE the vendor and fails the turn (DoD 2);
  *  - a mid-stream barge-in cancel propagates to the gateway as an auditable
- *    caller cancellation (DoD 2).
+ *    caller cancellation (DoD 2);
+ *  - a vendor connection break AFTER visible deltas (mid-stream failure,
+ *    issue #53 review r1 P1-1) degrades the turn FAILED with an auditable
+ *    gateway attempt failure — the truncated stream is classified, never
+ *    treated as a clean end — and the scheduler stays alive for the next turn.
  *
  * PRIVACY: every prompt is a synthetic sample with explicit `E2E03` markers.
  */
@@ -124,6 +128,83 @@ async function startAuthRejectingVendor(): Promise<{ server: Server; baseUrl: st
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('no vendor port')
   return { server, baseUrl: `http://127.0.0.1:${address.port}`, requestCount: () => requests }
+}
+
+/**
+ * A loopback vendor whose mode the test flips (issue #53 review r1 P1-1):
+ *
+ *  - `truncate` (initial): streams SSE headers + `message_start` +
+ *    `content_block_start` + a few `content_block_delta` frames and then
+ *    DESTROYS the socket — a vendor connection break AFTER visible output.
+ *  - `complete`: serves a clean, full Messages SSE completion, so a following
+ *    turn can prove the scheduler/worker survived the mid-stream failure.
+ */
+async function startTruncatingVendor(): Promise<{
+  server: Server
+  baseUrl: string
+  requestCount: () => number
+  serveCompletions(): void
+}> {
+  let requests = 0
+  let mode: 'truncate' | 'complete' = 'truncate'
+  const server: Server = createServer((req, res) => {
+    void req
+    requests += 1
+    // A client (the gateway provider) vanishing mid-body must never become an
+    // unhandled write error inside the synthetic vendor.
+    res.on('error', () => undefined)
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+    const send = (type: string, data: Record<string, unknown>): void => {
+      if (res.destroyed) return
+      res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`)
+    }
+    const sleep = (ms: number): Promise<void> => new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms)
+      timer.unref?.()
+    })
+    void (async () => {
+      send('message_start', {
+        message: {
+          id: `msg_${requests.toString().padStart(8, '0')}`,
+          type: 'message',
+          role: 'assistant',
+          model: MODEL_ID,
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      })
+      send('content_block_start', { index: 0, content_block: { type: 'text', text: '' } })
+      if (mode === 'truncate') {
+        // Emit visible deltas, then break the connection mid-stream.
+        for (let index = 0; index < 3; index += 1) {
+          await sleep(25)
+          send('content_block_delta', { index: 0, delta: { type: 'text_delta', text: `E2E03 截断前增量${index}。` } })
+        }
+        if (!res.destroyed) {
+          res.destroy()
+        }
+        return
+      }
+      for (const text of ['E2E03 恢复回合。合成回复一。', '合成回复二。']) {
+        await sleep(5)
+        send('content_block_delta', { index: 0, delta: { type: 'text_delta', text } })
+      }
+      send('content_block_stop', { index: 0 })
+      send('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 6 } })
+      send('message_stop', {})
+      res.end()
+    })().catch(() => undefined)
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('no vendor port')
+  return { server, baseUrl: `http://127.0.0.1:${address.port}`, requestCount: () => requests, serveCompletions: () => { mode = 'complete' } }
 }
 
 describe('E2E-03 real DSH runtime through the Model Gateway egress proxy', { skip: pipedOk ? false : PIPED_CHILD_UNAVAILABLE }, () => {
@@ -322,5 +403,69 @@ describe('E2E-03 real DSH runtime through the Model Gateway egress proxy', { ski
       25,
     )
     assert.ok(proxy.stats().cancelled >= 1, `proxy stats: ${JSON.stringify(proxy.stats())}`)
+  })
+
+  it('degrades a vendor mid-stream connection break to a FAILED turn with an auditable gateway failure and a live scheduler', async () => {
+    // Issue #53 review r1 P1-1 (DoD 2 中途故障): the vendor streams visible
+    // deltas and then destroys the connection. The full chain — vendor break →
+    // gateway attempt.failed → proxy mid-stream res.destroy() → the worker
+    // classifies the TRUNCATED stream (never a clean end) → Bridge FAILED —
+    // must hold end to end, and the next turn must still complete.
+    const truncating = await startTruncatingVendor()
+    vendor = truncating.server
+    fixture = await startGatewayFixture({
+      vendor: { baseUrl: truncating.baseUrl, requestCount: truncating.requestCount },
+    })
+    const { fixture: stack, gateway, proxy } = fixture
+    const sessionKey = stack.sessionKey
+    const opened = await stack.stack.openSession({
+      sessionKey,
+      conversationId: 'conv_e2e03midfail01',
+      ownerActorId: 'act_e2e03parent01',
+    })
+    assert.equal(opened.ok, true)
+
+    const submitted = await submitSynthetic(stack.stack, sessionKey, 'E2E03-PROMPT-M1 合成转写（中途断连回合）。')
+    assert.equal(submitted.ok, true)
+    if (!submitted.ok) throw new Error('unreachable')
+
+    // Deltas crossed the proxy into the worker BEFORE the break: the failure
+    // is genuinely mid-stream, not a pre-output rejection.
+    await waitFor(
+      'first streamed delta through the proxy',
+      () => stack.frames.some((frame) => frame.name === 'assistant.delta'),
+      60_000,
+      25,
+      stack.forensics,
+    )
+
+    const state = await waitForTerminalTurn(stack.stack, sessionKey, submitted.turnId, 120_000, stack.forensics)
+    assert.equal(state, 'FAILED', `a mid-stream vendor break must settle the turn FAILED, got ${state}`)
+
+    // The gateway holds the auditable failure: the truncated vendor stream is
+    // a protocol violation (no message_stop), never a completed turn.
+    const failed = gateway.auditTrail().filter((event) => event.type === 'attempt.failed')
+    assert.ok(failed.length >= 1, `expected >=1 attempt.failed, trail: ${JSON.stringify(gateway.auditTrail().map((event) => event.type))}`)
+    for (const event of failed) {
+      assert.equal(event.code, 'GATEWAY_PROVIDER_PROTOCOL')
+    }
+    assert.ok(!gateway.auditTrail().some((event) => event.type === 'turn.completed'), 'a truncated turn is never billed as completed')
+    const stats = proxy.stats()
+    assert.ok(stats.failed >= 1, `proxy stats: ${JSON.stringify(stats)}`)
+    assert.equal(stats.completed, 0, 'no turn completed while the vendor kept breaking')
+
+    // The failure degraded WITHOUT quarantining the worker: a model failure is
+    // not a worker crash.
+    assert.equal(stack.faults.length, 0, `worker faults: ${JSON.stringify(stack.faults)}`)
+    assert.equal(stack.port.hasLiveWorker(sessionKey), true, 'the worker survived the mid-stream failure')
+
+    // Scheduler liveness: once the vendor recovers, the NEXT turn completes.
+    truncating.serveCompletions()
+    const second = await submitSynthetic(stack.stack, sessionKey, 'E2E03-PROMPT-M2 合成转写（恢复回合）。')
+    assert.equal(second.ok, true)
+    if (!second.ok) throw new Error('unreachable')
+    const secondState = await waitForTerminalTurn(stack.stack, sessionKey, second.turnId, 120_000, stack.forensics)
+    assert.equal(secondState, 'COMPLETED', `the turn after a mid-stream failure must complete, got ${secondState}`)
+    assert.ok(proxy.stats().completed >= 1, `proxy stats after recovery: ${JSON.stringify(proxy.stats())}`)
   })
 })

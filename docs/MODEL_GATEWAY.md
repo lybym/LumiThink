@@ -90,6 +90,7 @@ provider.stream(request: ModelRequest, { signal }): AsyncIterable<ProviderStream
 - **出网拓扑（唯一真实路径）**：真实 DSH 运行时（`poc/dsh-child` bridge worker）的模型适配器只能指向回环 `GatewayEgressProxy`（`lib/server/gateway-egress-proxy.ts`）——代理把每个 Messages 请求翻译成**一个** Model Gateway 请求（预算/重试/熔断/超时/取消/审计/单 Provider 路由全部由 Gateway 执行），不引入第二套不受控 Agent；供应商密钥永不进入 worker 进程（子进程保留其合成占位符凭据，仅用于回环代理鉴权）。非回环绑定在代理构造时即拒绝。
 - **儿童数据边界（DoD 4）**：`CHILD_DATA_EGRESS_REVIEW_STATUS = "not_performed"` 是常量而非开关——真实儿童数据的处理评审与监护人授权未完成前，本组合在结构上不存在解锁路径。激活记录只覆盖合成/成人内容的验证路径（issue #53 DoD 1 的运营者 opt-in 证据运行：`poc/dsh-child` `test:e2e03:real`，产出经脱敏的 token/费用/耗时/型号证据 JSON）。
 - **状态声明（不得改写为已完成）**：本 PR 交付的是**机制与门禁**；任何具体部署的供应商数据外发评审仍必须由运营者在激活时以 reviewer/reason 显式登记（激活解析不生成、不伪造该记录），CI 全套件保持 loopback-only（无任何真实出网路径）。
+- **生产组合根接线是后续任务（issue #53 review r1 P2-3，不得改写为已接线）**：`parseRealProviderActivation` / `buildRealProviderGateway` / `createGatewayEgressProxy` 目前仅被 opt-in 证据 runner（`test:e2e03:real`）与测试消费；主应用组合根（`lib/server/web-mvp-runtime.ts`）仍只组装 mock provider——在部署环境设置 `LUMITHINK_MODEL_ROUTE=real` 对主应用是 **no-op**（负向测试 `tests/server/real-provider-composition.spec.ts`）。把真实路由接入生产组合根（含 `deploy/env` 与 runbook 更新）是一个独立的后续任务，运营者不得误以为仅设置该变量即可切换部署环境的模型路由。
 
 ## 8. 与 DSH 的边界（R1-V2 预留；E2E-03 出网拓扑）
 

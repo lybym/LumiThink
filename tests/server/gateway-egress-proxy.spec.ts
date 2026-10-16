@@ -342,6 +342,120 @@ test("the registered per-attempt timeout bounds a hung provider and maps to 504"
   }
 });
 
+test("a vendor failure AFTER the first delta destroys the mid-stream response and stays auditable (no retry, no clean end)", async () => {
+  // Issue #53 review r1 P1-1: the `streamOpened → res.destroy()` branch of
+  // the proxy had zero coverage — every pre-existing failure test happens
+  // before the first delta. Here the mock provider streams several spaced
+  // deltas and then fails with a protocol classification; the gateway must
+  // not retry once output is visible, the proxy must destroy the stream
+  // (never fabricate a terminal frame), and the failure must stay auditable
+  // on the gateway. The chunk pacing mirrors a real vendor: the client has
+  // consumed deltas long before the break lands.
+  const { gateway, provider } = mockBackedGateway({
+    reply: { prefix: "MIDSTREAM", chunkCount: 12, delayMsPerChunk: 40 },
+    failure: { classification: "protocol", times: 1, afterChunks: 4 },
+  });
+  const { proxy, url } = await startProxy(gateway);
+  try {
+    const response = await fetch(`${url}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": GATEWAY_EGRESS_PROXY_DEFAULT_TOKEN },
+      body: JSON.stringify(turnPayload()),
+    });
+    assert.equal(response.status, 200, "the SSE stream opened with the first delta");
+    const reader = response.body?.getReader();
+    assert.ok(reader !== undefined);
+
+    const decoder = new TextDecoder();
+    let received = "";
+    let sawDelta = false;
+    let sawMessageStop = false;
+    let terminatedCleanly = false;
+    let readError: unknown = null;
+    for (;;) {
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        readError = error;
+        break;
+      }
+      if (chunk.done) {
+        terminatedCleanly = true;
+        break;
+      }
+      received += decoder.decode(chunk.value, { stream: true });
+      if (received.includes("event: content_block_delta")) {
+        sawDelta = true;
+      }
+      if (received.includes("event: message_stop")) {
+        sawMessageStop = true;
+      }
+    }
+    assert.ok(sawDelta, "at least one delta crossed the proxy before the failure");
+    assert.ok(!sawMessageStop, "the client never observes a fabricated terminal frame");
+    // Truncation evidence: the destroyed socket surfaces either as a rejected
+    // body read ("terminated"/socket closed) or as a body end that never
+    // carried the terminal `message_stop` frame — both are NOT a clean
+    // Messages completion, which is exactly the contract the worker must
+    // classify as a failure instead of a finished answer.
+    assert.ok(readError !== null || terminatedCleanly, "the truncated body terminates (error or end) after the deltas");
+
+    // The gateway keeps the audit; the proxy counts the failure; nothing
+    // completed and the provider was called exactly once (no post-delta retry).
+    const failed = gateway.auditTrail().filter((event) => event.type === "attempt.failed");
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0].code, "GATEWAY_PROVIDER_PROTOCOL");
+    assert.equal(failed[0].retriable, false);
+    assert.ok(!gateway.auditTrail().some((event) => event.type === "turn.completed"));
+    const stats = proxy.stats();
+    assert.equal(stats.failed, 1);
+    assert.equal(stats.completed, 0);
+    assert.equal(provider.stats().callCount, 1, "the gateway never retries once a delta is visible");
+  } finally {
+    await proxy.stop();
+  }
+});
+
+test("non-text content blocks are rejected fail-closed before the gateway (no silent stripping)", async () => {
+  // Issue #53 review r1 P2-2: tool_use/tool_result/image/thinking blocks (and
+  // malformed block elements) can never be represented in the gateway's
+  // text-only context; they must be rejected statically, not silently dropped.
+  const { gateway, provider } = mockBackedGateway();
+  const { proxy, url } = await startProxy(gateway);
+  try {
+    const headers = { "content-type": "application/json", "x-api-key": GATEWAY_EGRESS_PROXY_DEFAULT_TOKEN };
+    const dirtyToolInput = "EVIL-tool-input-should-never-echo";
+    const shapes: Record<string, unknown>[] = [
+      { ...turnPayload(), messages: [{ role: "user", content: [{ type: "tool_use", id: "toolu_01", name: "bash", input: { command: dirtyToolInput } }] }] },
+      { ...turnPayload(), messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_01", content: "output" }] }] },
+      { ...turnPayload(), messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "trace" }] }] },
+      { ...turnPayload(), messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", data: "aGk=" } }] }] },
+      { ...turnPayload(), messages: [{ role: "user", content: [{ type: "text", text: "ok" }, "not-a-block"] }] },
+      { ...turnPayload(), system: [{ type: "text", text: "sys" }, { type: "image", source: { type: "base64", data: "aGk=" } }] },
+    ];
+    for (const [index, body] of shapes.entries()) {
+      const { status, text } = await readFullBody(url, { method: "POST", headers, body: JSON.stringify(body) });
+      assert.equal(status, 400, `shape ${index} must be rejected statically`);
+      assert.match(text, /invalid_request_error/);
+      assert.ok(!text.includes(dirtyToolInput), "submitted block values are never echoed");
+    }
+    assert.equal(provider.stats().callCount, 0, "no gateway/provider contact for rejected shapes");
+    assert.equal(gateway.auditTrail().length, 0, "rejections happen before the gateway");
+    assert.equal(proxy.stats().rejected, shapes.length, "every rejection is counted on the proxy surface");
+    assert.equal(proxy.stats().requests, 0);
+
+    // A text-only request on the same proxy still completes (the guard is
+    // content-shape-scoped, not a blanket refusal).
+    const ok = await readFullBody(url, { method: "POST", headers, body: JSON.stringify(turnPayload()) });
+    assert.equal(ok.status, 200);
+    assert.match(ok.text, /event: message_stop/);
+    assert.equal(proxy.stats().completed, 1);
+  } finally {
+    await proxy.stop();
+  }
+});
+
 test("the proxy default bearer equals the pinned child synthetic placeholder (no vendor key in the child)", () => {
   assert.equal(GATEWAY_EGRESS_PROXY_DEFAULT_TOKEN, "dsh-poc-synthetic-key");
 });

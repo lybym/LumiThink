@@ -19,6 +19,16 @@
  * PRIVACY: prompts are synthetic operator samples marked `E2E03-REAL`; the
  * evidence file carries structural facts only (no prompt text, no key, no
  * child data — the child-data egress review stays `not_performed`).
+ *
+ * COUPLING NOTE (issue #53 review r1 P2-4): this evidence runner composes its
+ * stack through the test fixtures in `../tests/bridge/helpers.ts`
+ * (`startBridgeFixture` / `submitAndAwaitCompletion`) — the ONLY src/ consumer
+ * of that module. The fixture contract (BridgeFixture shape, submit/await
+ * semantics) is therefore load-bearing for DoD-1 evidence production: changes
+ * to those helpers must keep this runner type-checking (`pnpm --dir
+ * poc/dsh-child run typecheck`) and re-proven by an opt-in `test:e2e03:real`
+ * run. Extracting a dedicated non-test composition module remains an option
+ * if the fixture surface starts drifting.
  */
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'

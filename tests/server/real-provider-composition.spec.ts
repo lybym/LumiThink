@@ -10,6 +10,9 @@
  * - the credential is resolved at REQUEST time: with no key configured every
  *   request fails closed as GATEWAY_AUTH_FAILED and the (loopback) vendor is
  *   never contacted;
+ * - the main app composition root stays mock-only even with a complete real
+ *   activation env in the process environment (production wiring is a
+ *   declared follow-up task, issue #53 review r1 P2-3);
  * - the child-data egress review status is a locked constant (DoD 4).
  */
 
@@ -27,6 +30,7 @@ import {
   type RealProviderActivationRecord,
 } from "../../lib/server/real-provider-composition.ts";
 import { GatewayError } from "../../lib/domain/gateway/index.ts";
+import { createWebMvpRuntime, WEB_MVP_PROVIDER_ID } from "../../lib/server/web-mvp-runtime.ts";
 
 /** A complete, valid activation env for a LOOPBACK synthetic vendor (tests only). */
 function validRealEnv(overrides: Record<string, string | undefined> = {}): Record<string, string | undefined> {
@@ -188,4 +192,36 @@ test("the activation env enumeration names every variable the real route may con
   assert.ok(REAL_PROVIDER_ENV_VARS.includes("LUMITHINK_MODEL_ROUTE"));
   assert.ok(REAL_PROVIDER_ENV_VARS.includes("LUMITHINK_MODEL_PROVIDER_KEY"));
   assert.ok(!JSON.stringify(REAL_PROVIDER_ENV_VARS).includes("="), "names only, never values");
+});
+
+test("the main app composition root stays mock-only even with a complete real activation env (no-op negative test)", () => {
+  // Issue #53 review r1 P2-3 + test gap: the real route is NOT wired into the
+  // main app composition root yet (docs/MODEL_GATEWAY.md §7). A FULLY VALID
+  // activation record in the process environment must not change what the
+  // web MVP runtime composes — and the record itself parses as `real`, which
+  // rules out "nothing happened because the record was invalid".
+  const env = validRealEnv({ LUMITHINK_MODEL_PROVIDER_KEY: "sk-negative-test-key-do-not-leak" });
+  assert.equal(parseRealProviderActivation(env).mode, "real");
+
+  const previous: Record<string, string | undefined> = {};
+  for (const [name, value] of Object.entries(env)) {
+    previous[name] = process.env[name];
+    process.env[name] = value;
+  }
+  try {
+    const runtime = createWebMvpRuntime();
+    const view = runtime.gateway.describeConfig();
+    assert.equal(view.providers.length, 1);
+    assert.equal(view.providers[0].providerId, WEB_MVP_PROVIDER_ID, "only the local mock provider is registered");
+    assert.ok(!JSON.stringify(view).includes(REAL_PROVIDER_ID), "no real provider is registered on the main-app gateway");
+    assert.ok(!JSON.stringify(view).includes("sk-negative-test-key-do-not-leak"), "the credential material never enters the runtime view");
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
 });
