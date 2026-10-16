@@ -49,6 +49,7 @@ import { createMockCordisRuntime, type MockCordisRuntime, type MockGenerationScr
 import { canonicalBridgeProfile, type BridgeCordisProfile } from "../domain/voice/bridge/profile.ts";
 import { createVoiceTurnOrchestrator, type VoiceTurnOrchestrator } from "../domain/voice/orchestrator.ts";
 import { VOICE_TERMINAL_TURN_STATES } from "../domain/voice/schema.ts";
+import type { AdmittedSentenceEntry } from "../domain/voice/bridge/stream-gate.ts";
 import {
   createVoiceBridgeIpcClient,
   createVoiceBridgeIpcServer,
@@ -92,6 +93,13 @@ export interface VoiceBridgeStackOptions {
    * quarantine). The default mock runtime's fault channel is pre-wired.
    */
   readonly onAgentFault?: (listener: (info: { readonly sessionKey: string; readonly code: "worker_crashed" }) => void) => void;
+  /**
+   * E2E-07 (issue #57): optional delivery sink for Output-Gate-admitted
+   * sentences (stream-gate). Omitted ⇒ the pre-existing synthetic contract
+   * (text dropped after gating); present ⇒ the fence-stamped sentence text
+   * is delivered transiently to the wired device edge.
+   */
+  readonly onAdmittedSentence?: (entry: AdmittedSentenceEntry) => void;
   /** Injectable wall clock (ms) shared by orchestrator/gate/bridge. */
   readonly clock?: () => number;
   /** Injectable turn-id factory for deterministic tests. */
@@ -198,7 +206,11 @@ export function createVoiceBridgeStack(options: VoiceBridgeStackOptions): VoiceB
   const service = createVoiceBridge({ profile, agentPort, clock });
   mockRuntime.onFault((info) => service.handleAgentCrash(info.sessionKey));
   options.onAgentFault?.((info) => service.handleAgentCrash(info.sessionKey));
-  const gate = createBridgeStreamGate({ orchestrator, clock });
+  const gate = createBridgeStreamGate({
+    orchestrator,
+    clock,
+    ...(options.onAdmittedSentence !== undefined ? { onAdmittedSentence: options.onAdmittedSentence } : {}),
+  });
 
   const endpointName = options.endpointName ?? `lumithink-bridge-${process.pid}-${Math.floor(Math.random() * 0xffffff).toString(16)}`;
   const endpoint = resolveBridgeIpcEndpoint({ ...(options.socketDir !== undefined ? { socketDir: options.socketDir } : {}), name: endpointName });

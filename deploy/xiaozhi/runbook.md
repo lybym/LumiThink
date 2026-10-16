@@ -166,6 +166,40 @@ sudo XIAOZHI_AUTH_KEY="$(sudo grep -oP '(?<=^XIAOZHI_AUTH_KEY=).*' /etc/xiaozhi/
 
 **诚实边界**：私有服务端配置面已验证（CI 渲染/合并后扫描），**真实供应商合成质量、服务器端解码播放、实机打断/慢 TTS/解码错误行为未实机验证**；首音/句间间隙/停止生效时延为候选基线（非 SLA）。
 
+## 3.7 gateway-bridge 档位：Voice Gateway 接线（E2E-07，issue #57）
+
+`deploy/xiaozhi/config/gateway-bridge.yaml` + `deploy/xiaozhi/gateway_bridge/`（ADR-0011）。基于 gateway-minimal 安全骨架，唯一档位差异：`selected_module.LLM = LumithinkBridgeLLM`（type: lumithink）——LumiThink Voice Gateway 桥是**唯一选中的 LLM**，小智内置 AI 第二路径结构上不可达；ASR 保持回环占位（真实 ASR = §3.5 档位）、TTS 指向受控占位（真实 TTS = §3.6 档位）。
+
+```bash
+# 1. 渲染桥接档位（env 模板：deploy/xiaozhi/env/gateway-bridge.example；
+#    传输令牌 LUMITHINK_GATEWAY_BRIDGE_TOKEN 只按 env 名引用，值不进配置文件）
+sudo bash deploy/xiaozhi/bootstrap.sh \
+  --target /opt/xiaozhi-esp32-server \
+  --env-file /etc/xiaozhi/xiaozhi.env \
+  --template config/gateway-bridge.yaml
+
+# 2. 安装桥模块 + 5 个登记的 fork patch（逐字锚点、漂移即拒绝；登记见
+#    deploy/xiaozhi/fork-patches.md；上游 pin bump 必须重跑锚点核验）
+python3 deploy/xiaozhi/gateway_bridge/install_bridge.py \
+  --target /opt/xiaozhi-esp32-server
+python3 deploy/xiaozhi/gateway_bridge/install_bridge.py \
+  --target /opt/xiaozhi-esp32-server --verify-only
+
+# 3. 启动 LumiThink 网关宿主（真实受保护 UDS 传输 + 真实锁定版 DSH worker）：
+#    env：LUMITHINK_GATEWAY_SOCKET（UDS 绝对路径）、LUMITHINK_GATEWAY_BRIDGE_TOKEN
+#    （与第 1/2 步同一值）、LUMITHINK_GATEWAY_AUTH_KEY（= XIAOZHI_AUTH_KEY，
+#    网关侧逐字复算设备 token）、LUMITHINK_GATEWAY_BINDINGS（监护人绑定 JSON：
+#    [{deviceId, actorId, conversationId, activationDigest}]）、
+#    LUMITHINK_GATEWAY_HOME（DSH home 目录）。就绪行：GATEWAY-HOST READY。
+# 4. 服务端进程 env 需带 LUMITHINK_GATEWAY_BRIDGE_TOKEN（provider 按 env 名读取）。
+# 5. 联测探针（协议模拟设备；零内容输出）：
+#    python3 deploy/xiaozhi/probe_e2e07.py --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+#      --device-id aa:bb:cc:dd:ee:07 --auth-key "$XIAOZHI_AUTH_KEY"
+#    负例：--expect-duplicate-refusal（重复连接拒绝）/ --expect-abort-fence（打断零迟到帧）。
+```
+
+**运维要点**：内部传输仅限同宿主（UDS 0600，无 TCP 选项）；桥故障 = 当轮 fail-closed（无回答、无内置 LLM 回退），设备协议面不受影响；服务重启后桥随服务进程重连，网关自动失效旧租约并续接受信会话；监听/审计全内容无关，句文本只存在于瞬态帧路径与 TTS 队列。CI 证据：`e2e-07-gateway-wiring-gate.yml`（全链路 + 三个负例 + 重启续接）。**未验证边界**：真实固件设备（#E2E-08）、真实 ASR 音频上行、真实供应商组合档位。
+
 ## 4. gateway-minimal 档位：明确的"禁用"语义（AC 2）
 
 `deploy/xiaozhi/config/gateway-minimal.yaml`（渲染进 `data/.config.yaml`）。

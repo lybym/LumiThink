@@ -53,6 +53,14 @@
  *   on this contract surface (frame counts + hex digests only); the real
  *   vendor TTS runs inside the pinned xiaozhi server (deploy tier
  *   gateway-tts-real, lib/server/real-tts-composition.ts activation record).
+ * - Wired real audio accounting (E2E-07, issue #57): the pinned server's
+ *   fork-patched send path reports, per delivered utterance, the REAL Opus
+ *   frame count and the SHA-256 hex digest over the ACTUAL bytes it sent to
+ *   the device (both content-free). `noteAudioDelivery` records these into
+ *   `realAudioFramesDelivered`/`realAudioDeliveries` + the audit ring — the
+ *   v1.3 "frameCount/audioDigest placeholder" becomes observed byte-level
+ *   fact while the protocol surface itself stays content-free (no audio
+ *   bytes ever cross INTO LumiThink).
  * - client_abort (wire `abort`): the ONLY device signal that fences. Order
  *   is fence-first (VOICE_RUNTIME §4): the core barge-in atomically bumps
  *   the trusted epoch, then the Adapter issues the device playback-stop
@@ -203,6 +211,13 @@ export interface GatewayMetricsSnapshot {
   readonly ttsInterSentenceGapMs: { readonly count: number; readonly maxMs: number };
   /** E2E-06: abort arrival → device stop directive issued (ms; candidate). */
   readonly ttsStopEffectiveMs: { readonly count: number; readonly maxMs: number };
+  /**
+   * E2E-07: REAL Opus frames the pinned server reported as actually sent to
+   * the device (fork-patched send path accounting). Content-free count.
+   */
+  readonly realAudioFramesDelivered: number;
+  /** E2E-07: number of real audio delivery observations (per utterance). */
+  readonly realAudioDeliveries: number;
 }
 
 export interface GatewayAuditEntry {
@@ -220,6 +235,7 @@ export interface GatewayAuditEntry {
     | "gateway.playback_stopped"
     | "gateway.queue_cleared"
     | "gateway.playback_suspended"
+    | "gateway.audio_delivered"
     | "gateway.swept";
   readonly sessionKey: string | null;
   readonly turnId: string | null;
@@ -247,7 +263,7 @@ export interface GatewayMappingSnapshotEntry {
 // Adapter
 // ---------------------------------------------------------------------------
 
-export const GATEWAY_ADAPTER_VERSION = "1.3" as const;
+export const GATEWAY_ADAPTER_VERSION = "1.4" as const;
 
 /** Synthetic frames per admitted TTS sentence (POC stand-in for Opus framing). */
 export const GATEWAY_FRAMES_PER_SENTENCE_DEFAULT = 4;
@@ -296,7 +312,7 @@ export interface VoiceGatewayAdapterOptions {
 }
 
 export type GatewayEventOutcome =
-  | { readonly ok: true; readonly kind: GatewayDeviceEvent["kind"]; readonly sessionKey: string | null }
+  | { readonly ok: true; readonly kind: GatewayDeviceEvent["kind"]; readonly sessionKey: string | null; readonly turnId?: string }
   | { readonly ok: false; readonly code: GatewayRejectionCode };
 
 interface DeviceState {
@@ -373,6 +389,17 @@ export interface VoiceGatewayAdapter {
   noteTurnSettled(sessionKey: string, turnId: string, finalState: string): void;
   /** Core worker fault observation (runtime.error worker_crashed tap). */
   noteWorkerFault(sessionKey: string): void;
+  /**
+   * E2E-07: one REAL audio delivery observation from the wired server
+   * (frame count + hex digest over the actual bytes sent to the device;
+   * content-free). Only sessions with a known device mapping are recorded.
+   */
+  noteAudioDelivery(refs: {
+    readonly sessionKey: string;
+    readonly turnId: string | null;
+    readonly frames: number;
+    readonly digest: string;
+  }): void;
   /** Timeout sweep for one mapped session. */
   sweep(sessionKey: string): { readonly ok: true; readonly timedOutTurnIds: readonly string[] } | { readonly ok: false; readonly code: string };
   readonly findSessionKeyByDevice: (deviceId: string) => string | null;
@@ -433,6 +460,8 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
     ttsFirstAudioMs: { count: 0, maxMs: 0 },
     ttsInterSentenceGapMs: { count: 0, maxMs: 0 },
     ttsStopEffectiveMs: { count: 0, maxMs: 0 },
+    realAudioFramesDelivered: 0,
+    realAudioDeliveries: 0,
   };
 
   function pushAudit(entry: Omit<GatewayAuditEntry, "seq" | "atMs">): void {
@@ -817,7 +846,10 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
             detail: fingerprint,
             count: null,
           });
-          return { ok: true, kind: event.kind, sessionKey: state.sessionKey };
+          // E2E-07: the wired transport maps the accepted turn to the
+          // bridge-side generator (`turn_started`) so the pinned server's
+          // LLM stream can correlate sentences and the end-of-turn signal.
+          return { ok: true, kind: event.kind, sessionKey: state.sessionKey, turnId: submitted.turnId };
         }
         case "abort": {
           // client_abort semantics (wire `abort`): fence FIRST via the core
@@ -1044,6 +1076,40 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
       issuePlaybackStop(state, playback.turnId, "failed", playback.epoch);
       state.playback = null;
       state.lastFramesAtMs = null;
+    },
+
+    noteAudioDelivery(refs) {
+      if (typeof refs !== "object" || refs === null) {
+        return;
+      }
+      const { sessionKey, turnId, frames, digest } = refs as Record<string, unknown>;
+      if (
+        typeof sessionKey !== "string" ||
+        typeof frames !== "number" ||
+        !Number.isInteger(frames) ||
+        frames <= 0 ||
+        frames > 100_000 ||
+        typeof digest !== "string" ||
+        !/^[0-9a-f]{64}$/.test(digest) ||
+        (turnId !== null && typeof turnId !== "string")
+      ) {
+        // Malformed observations are ignored (never counted as deliveries).
+        return;
+      }
+      const state = deviceStateBySessionKey(sessionKey);
+      if (state === null) {
+        return; // Unknown session: the observation maps to nothing.
+      }
+      metrics.realAudioDeliveries += 1;
+      metrics.realAudioFramesDelivered += frames;
+      pushAudit({
+        action: "gateway.audio_delivered",
+        sessionKey: state.sessionKey,
+        turnId: typeof turnId === "string" ? turnId : null,
+        epoch: core.currentEpoch(state.sessionKey),
+        detail: digest,
+        count: frames,
+      });
     },
 
     sweep(sessionKey) {

@@ -1,0 +1,23 @@
+# E2E-07 (issue #57) — gateway-bridge 档位 env 模板
+#
+# 用法：复制为私有文件，填入真实值后交给
+#   render_config.py --env-file <file>
+# 语义与 gateway-minimal.example 相同：真实值不进 Git/CI/日志。
+
+# 服务端设备面鉴权共享密钥（HMAC-SHA256；网关侧用同一密钥复算设备 token）。
+XIAOZHI_AUTH_KEY=<generate: openssl rand -hex 32>
+
+# 设备拿到的 WebSocket 地址（单机回环冒烟用 ws://127.0.0.1:8000/xiaozhi/v1/）。
+XIAOZHI_DEVICE_WS_URL=
+
+# 公网域名（vision_explain 形状占位；gateway-bridge 档位下无路由、零外发）。
+XIAOZHI_PUBLIC_DOMAIN=xiaozhi.example.com
+
+# LumiThink 网关桥的受保护内部传输端点（UDS 绝对路径；无 TCP 选项）。
+LUMITHINK_GATEWAY_SOCKET=/run/lumithink/voice-gateway.sock
+
+# 内部传输令牌（运行时 env 注入到网关进程与服务端进程两侧；值不进配置文件）。
+LUMITHINK_GATEWAY_BRIDGE_TOKEN=<generate: openssl rand -hex 24>
+
+# 本地 TTS stub（CI/联调；生产真实 TTS = gateway-tts-real 档位）。
+XIAOZHI_TTS_STUB_URL=http://127.0.0.1:8097/tts
