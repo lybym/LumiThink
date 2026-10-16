@@ -128,8 +128,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if grep -E '^[A-Z_]+=.+' deploy/xiaozhi/env/gateway-bridge.example \
-             | grep -vE '(<generate|xiaozhi\.example\.com|/run/lumithink/)'; then
+          # Documented shapes only (same contract as
+          # tests/deploy/xiaozhi-gateway-bridge.spec.ts): generation
+          # placeholders, the example domain, the UDS path shape, and
+          # loopback URLs (the CI TTS stub is loopback by construction).
+          if grep -E '^[A-Z_]+=.' deploy/xiaozhi/env/gateway-bridge.example \
+             | grep -vE '(<generate|xiaozhi\.example\.com|/run/lumithink/|http://(127\.0\.0\.1|localhost))'; then
             echo "::error::env template must not carry real values"
             exit 1
           fi

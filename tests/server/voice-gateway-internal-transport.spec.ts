@@ -119,6 +119,9 @@ class TestBridgeClient {
 
   constructor(path: string) {
     this.socket = connect(path);
+    // A refused/destroyed connection can race a pending write (EPIPE): the
+    // close signal is the assertion surface, write faults are swallowed.
+    this.socket.on("error", () => undefined);
     this.closed = new Promise<string>((resolve) => {
       this.socket.on("close", (hadError) => resolve(hadError ? "error" : "clean"));
     });

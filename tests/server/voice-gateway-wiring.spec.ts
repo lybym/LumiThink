@@ -107,7 +107,18 @@ async function connectBridge(fixture: Fixture): Promise<BridgeDriver> {
   if (SOCKETS_AVAILABLE) {
     const endpoint = fixture.wired.endpoint;
     const path = endpoint.kind === "uds" ? endpoint.path : `\\\\.\\pipe\\${endpoint.name}`;
+    // The single-bridge lease refuses a second concurrent connection: a
+    // reconnect must wait until the transport observed the previous close
+    // (the server-side close handler is asynchronous), otherwise the new
+    // connection is refused and no bridge_ready ever arrives.
+    assert.ok(
+      await waitFor(() => !fixture.wired.transport.isBridgeConnected(), 5_000),
+      "the previous bridge connection must be closed before reconnecting",
+    );
     const socket = connect(path);
+    // Write faults (EPIPE when the server destroys a refused connection)
+    // are never assertion signals — close is.
+    socket.on("error", () => undefined);
     let buffer = Buffer.alloc(0);
     socket.on("data", () => undefined); // outbound frames are asserted via the tap
     await new Promise<void>((resolve, reject) => {
