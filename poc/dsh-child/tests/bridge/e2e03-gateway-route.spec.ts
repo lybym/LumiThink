@@ -269,7 +269,12 @@ describe('E2E-03 real DSH runtime through the Model Gateway egress proxy', { ski
     assert.equal(secondState, 'FAILED', 'a budget-exhausted turn must fail closed')
     assert.equal(mock.requestRecords.length, vendorCountBefore, 'the vendor must NOT be contacted once the budget is exhausted')
     assert.ok(gateway.auditTrail().some((event) => event.type === 'budget.rejected'), 'the pre-contact rejection must be audited')
-    assert.ok(proxy.stats().rejected >= 1, `proxy stats: ${JSON.stringify(proxy.stats())}`)
+    // Gateway-level rejections (including the pre-contact budget refusal)
+    // are served as mapped error responses and counted as `failed` on the
+    // proxy surface; `rejected` counts proxy-level pre-gateway refusals only.
+    const stats = proxy.stats()
+    assert.equal(stats.completed, 1, 'exactly the budgeted round completed')
+    assert.ok(stats.failed >= 1, `proxy stats: ${JSON.stringify(stats)}`)
   })
 
   it('propagates a mid-stream barge-in cancel to the gateway as an auditable caller cancellation', async () => {
