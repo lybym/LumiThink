@@ -45,4 +45,4 @@ DSH worker（子进程，仅合成占位符凭据）
 - 代理的回环鉴权使用仓库内已公开的合成占位符——**它不是安全边界**，边界是：回环绑定 + Gateway 预算/评审门禁 + 子进程无真实密钥。
 - `test:e2e03:real` 是唯一允许真实出网的运行入口，需要显式 `LUMITHINK_E2E03_REAL=1`；其证据 JSON 只含结构化事实（token/费用/耗时/型号 + 评审记录 reviewer/reason），不含提示词与密钥。
 - 具体供应商评审记录由运营者在激活时登记（激活解析不生成、不伪造）；本决策不宣告任何"实机模型验收已完成"。
-- **生产组合根接线是后续任务**（issue #53 review r1 P2-3）：本决策交付的激活/组合模块（`parseRealProviderActivation` / `buildRealProviderGateway` / `createGatewayEgressProxy`）目前仅被 opt-in 证据 runner 与测试消费；主应用组合根仍为 mock-only，部署环境设置 `LUMITHINK_MODEL_ROUTE=real` 对主应用 no-op。把该拓扑接入生产部署（组合根、`deploy/env`、runbook）是独立的后续任务。
+- **生产组合根接线是后续任务**（issue #53 review r1 P2-3）：本决策交付的激活/组合模块（`parseRealProviderActivation` / `buildRealProviderGateway` / `createGatewayEgressProxy`）目前仅被 opt-in 证据 runner 与测试消费；主应用组合根仍为 mock-only，部署环境设置 `LUMITHINK_MODEL_ROUTE=real` 对主应用 no-op。把该拓扑接入生产部署（组合根、`deploy/env`、runbook）是独立的后续任务。**该接线任务必须同时把儿童数据闸门变成可测试的激活前置条件**（issue #53 review r2 P2-2）：生产组合根组装 `real` 路由时必须显式消费 `CHILD_DATA_EGRESS_REVIEW_STATUS`（断言 `not_performed` 并据此结构性拒绝真实儿童数据外发路径，或作为显式 gate 参数）并附带负向测试——不允许"已接线但该常量无任何生产消费点"的状态，防止未来"接线但忘闸"（DoD 4）。

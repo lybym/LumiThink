@@ -91,6 +91,7 @@ provider.stream(request: ModelRequest, { signal }): AsyncIterable<ProviderStream
 - **儿童数据边界（DoD 4）**：`CHILD_DATA_EGRESS_REVIEW_STATUS = "not_performed"` 是常量而非开关——真实儿童数据的处理评审与监护人授权未完成前，本组合在结构上不存在解锁路径。激活记录只覆盖合成/成人内容的验证路径（issue #53 DoD 1 的运营者 opt-in 证据运行：`poc/dsh-child` `test:e2e03:real`，产出经脱敏的 token/费用/耗时/型号证据 JSON）。
 - **状态声明（不得改写为已完成）**：本 PR 交付的是**机制与门禁**；任何具体部署的供应商数据外发评审仍必须由运营者在激活时以 reviewer/reason 显式登记（激活解析不生成、不伪造该记录），CI 全套件保持 loopback-only（无任何真实出网路径）。
 - **生产组合根接线是后续任务（issue #53 review r1 P2-3，不得改写为已接线）**：`parseRealProviderActivation` / `buildRealProviderGateway` / `createGatewayEgressProxy` 目前仅被 opt-in 证据 runner（`test:e2e03:real`）与测试消费；主应用组合根（`lib/server/web-mvp-runtime.ts`）仍只组装 mock provider——在部署环境设置 `LUMITHINK_MODEL_ROUTE=real` 对主应用是 **no-op**（负向测试 `tests/server/real-provider-composition.spec.ts`）。把真实路由接入生产组合根（含 `deploy/env` 与 runbook 更新）是一个独立的后续任务，运营者不得误以为仅设置该变量即可切换部署环境的模型路由。
+- **接线任务的儿童数据闸门要求（issue #53 review r2 P2-2）**：生产接线落地时，`CHILD_DATA_EGRESS_REVIEW_STATUS` 必须随之从"代码中的文档常量"升级为**可测试的激活前置条件**——生产组合根在组装 `real` 路由时必须显式消费该常量（断言其仍为 `not_performed` 并据此结构性拒绝真实儿童数据外发路径，或将其作为组合函数的显式 gate 参数），并附带可执行的负向测试；不允许出现"真实路由已接线、但该常量仍无任何生产消费点"的中间状态（防止"接线但忘闸"，DoD 4）。
 
 ## 8. 与 DSH 的边界（R1-V2 预留；E2E-03 出网拓扑）
 

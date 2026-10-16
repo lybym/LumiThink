@@ -184,6 +184,20 @@ test("with no key configured every request fails closed as GATEWAY_AUTH_FAILED a
   }
 });
 
+test("buildRealProviderGateway fails closed on a non-loopback http baseURL (composition-layer https gate)", () => {
+  // Issue #53 review r2 test gap 5: the https enforcement lives in the
+  // provider adapter (lib/domain/gateway/http-provider.ts assertBaseURL);
+  // the composition layer must surface it as a construction failure for a
+  // public http origin — the activation parser deliberately allows the http
+  // SCHEME (loopback synthetic servers), so this is the gate that holds.
+  const publicHttpEnv = validRealEnv({ LUMITHINK_REAL_PROVIDER_BASEURL: "http://203.0.113.7/v1" });
+  assert.equal(parseRealProviderActivation(publicHttpEnv).mode, "real", "the record parses (scheme-level), so only the construction gate can refuse it");
+  assert.throws(
+    () => buildRealProviderGateway(realRecord(publicHttpEnv), validRealEnv()),
+    /must use https \(plain http is allowed for loopback test servers only\)/,
+  );
+});
+
 test("the child-data egress review is a locked constant (real child data stays unavailable)", () => {
   assert.equal(CHILD_DATA_EGRESS_REVIEW_STATUS, "not_performed");
 });
