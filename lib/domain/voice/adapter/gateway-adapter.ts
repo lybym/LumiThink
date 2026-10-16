@@ -26,6 +26,24 @@
  *   composition) used for idempotent dedup: a bare FNV-1a digest no longer
  *   poses as the transcript's privacy guarantee. Gate-blocked or over-long
  *   text fails closed with an enumerated code before any core call.
+ * - ASR duplicate finals (E2E-05, issue #55): a real streaming ASR path can
+ *   deliver the SAME final twice for one utterance (endpoint double-fire,
+ *   reconnect replay). A final whose keyed fingerprint equals the last
+ *   ACCEPTED final's fingerprint within a bounded dedup window (and with no
+ *   new-utterance device signal in between) is a suppressed enumerated
+ *   no-op — no second turn, no second model request, no text anywhere. A
+ *   `listen start`/`detect` (new utterance) or a fresh connection clears
+ *   the memory, so a legitimately repeated utterance is never confused with
+ *   a provider duplicate. The window also bounds the cost of the
+ *   conservative direction: a genuine same-text repeat WITHIN the window is
+ *   treated as part of the same utterance (fail-safe: one execution beats
+ *   two).
+ * - Content-independent ASR metrics (E2E-05): endpoint-window count, final
+ *   accept latency (event arrival → core submit completion, ms) and the
+ *   duplicate-suppression count are recorded content-free for the evidence
+ *   snapshot (docs/VOICE_RUNTIME.md §16; the pinned server's wire carries
+ *   transcript text only — provider confidence is structurally not exposed
+ *   and is recorded as such, never synthesized).
  * - client_abort (wire `abort`): the ONLY device signal that fences. Order
  *   is fence-first (VOICE_RUNTIME §4): the core barge-in atomically bumps
  *   the trusted epoch, then the Adapter issues the device playback-stop
@@ -141,6 +159,16 @@ export interface GatewayMetricsSnapshot {
   readonly possessionRefused: number;
   readonly forgedSessionsRefused: number;
   readonly suspensions: number;
+  /** E2E-05: new-utterance windows opened by device listen start/detect. */
+  readonly asrEndpointWindows: number;
+  /** E2E-05: duplicate finals suppressed inside the dedup window (no-op). */
+  readonly asrDuplicateFinalsSuppressed: number;
+  /**
+   * E2E-05: content-independent processing latency of accepted finals —
+   * device-edge event arrival → protected single-turn submit completion.
+   * Candidate baseline (virtual-clock measurable), never an SLA claim.
+   */
+  readonly asrFinalAcceptMs: { readonly count: number; readonly maxMs: number };
 }
 
 export interface GatewayAuditEntry {
@@ -150,6 +178,7 @@ export interface GatewayAuditEntry {
     | "gateway.event_rejected"
     | "gateway.asr_final_accepted"
     | "gateway.asr_partial_seen"
+    | "gateway.asr_duplicate_suppressed"
     | "gateway.abort_fenced"
     | "gateway.abort_no_playback"
     | "gateway.frames_sent"
@@ -182,10 +211,21 @@ export interface GatewayMappingSnapshotEntry {
 // Adapter
 // ---------------------------------------------------------------------------
 
-export const GATEWAY_ADAPTER_VERSION = "1.1" as const;
+export const GATEWAY_ADAPTER_VERSION = "1.2" as const;
 
 /** Synthetic frames per admitted TTS sentence (POC stand-in for Opus framing). */
 export const GATEWAY_FRAMES_PER_SENTENCE_DEFAULT = 4;
+
+/**
+ * E2E-05: bounded window in which a second final with the SAME keyed
+ * fingerprint as the last accepted one is treated as a provider duplicate
+ * (endpoint double-fire / reconnect replay) and suppressed as an enumerated
+ * no-op. A device listen start/detect (new utterance) clears the memory
+ * unconditionally, so a legitimately repeated utterance is never confused
+ * with a duplicate once the device signals a new turn; the memory itself
+ * is PER DEVICE and survives a reconnect (see the hello handler).
+ */
+export const GATEWAY_ASR_DUPLICATE_WINDOW_MS_DEFAULT = 2_000;
 
 /** Timeout sweep budget default for gateway-driven sweeps (ms). */
 export const GATEWAY_SWEEP_BUDGET_MS_DEFAULT = 30_000;
@@ -213,6 +253,8 @@ export interface VoiceGatewayAdapterOptions {
   readonly framesPerSentence?: number;
   readonly sweepBudgetMs?: number;
   readonly auditCapacity?: number;
+  /** E2E-05: dedup window for same-fingerprint duplicate finals (ms). */
+  readonly asrDuplicateWindowMs?: number;
   /** Direction sink for device-bound directives (mock in tests). */
   readonly sink?: (directive: GatewayDeviceDirective) => void;
 }
@@ -231,6 +273,15 @@ interface DeviceState {
   playback: { readonly turnId: string; readonly epoch: number } | null;
   readonly stopsIssued: Set<string>;
   turnCounter: number;
+  /**
+   * E2E-05: the last ACCEPTED final's keyed fingerprint and accept time —
+   * the duplicate-dedup memory. PER DEVICE: cleared by every new-utterance
+   * signal (listen start/detect) and by window expiry; it intentionally
+   * SURVIVES a reconnect (a re-delivered final must not mint an error turn
+   * on the continued trusted session). Never holds text — the fingerprint
+   * is the injected keyed digest, 64 hex.
+   */
+  lastAcceptedFinal: { readonly fingerprint: string; readonly atMs: number } | null;
 }
 
 function failAdapterInput(path: string, message: string): never {
@@ -297,6 +348,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
   const framesPerSentence = Math.max(1, Math.min(options.framesPerSentence ?? GATEWAY_FRAMES_PER_SENTENCE_DEFAULT, 1024));
   const sweepBudgetMs = Math.max(0, options.sweepBudgetMs ?? GATEWAY_SWEEP_BUDGET_MS_DEFAULT);
   const auditCapacity = Math.max(1, Math.min(options.auditCapacity ?? GATEWAY_MAX_AUDIT_ENTRIES, 10_000));
+  const asrDuplicateWindowMs = Math.max(0, options.asrDuplicateWindowMs ?? GATEWAY_ASR_DUPLICATE_WINDOW_MS_DEFAULT);
   const sink = options.sink ?? (() => undefined);
 
   const devices = new Map<string, DeviceState>(); // deviceId -> state
@@ -320,6 +372,9 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
     possessionRefused: 0,
     forgedSessionsRefused: 0,
     suspensions: 0,
+    asrEndpointWindows: 0,
+    asrDuplicateFinalsSuppressed: 0,
+    asrFinalAcceptMs: { count: 0, maxMs: 0 },
   };
 
   function pushAudit(entry: Omit<GatewayAuditEntry, "seq" | "atMs">): void {
@@ -469,6 +524,7 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
             playback: null,
             stopsIssued: new Set<string>(),
             turnCounter: 0,
+            lastAcceptedFinal: null,
           };
           devices.set(deviceId, state);
         } else {
@@ -476,6 +532,14 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
           // bridge worker may need recovery, which session.open handles.
           state.connectionId = connectionId;
           state.xiaozhiSessionId = null;
+          // E2E-05: the duplicate-dedup memory is PER DEVICE and survives a
+          // reconnect: a final the server re-delivers right after a
+          // drop/restart (same keyed fingerprint, inside the bounded window)
+          // must not mint an error turn on the continued trusted session
+          // (issue #55 DoD: 断线/重连无错轮). The memory is cleared only by
+          // a new-utterance device signal (listen start/detect) or by the
+          // window expiring — both directions are bounded and documented.
+          // state.lastAcceptedFinal intentionally persists here.
           const reopened = await core.openCoreSession({
             sessionKey: state.sessionKey,
             conversationId: state.conversationId,
@@ -586,6 +650,13 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
 
       switch (event.kind) {
         case "listen": {
+          if (event.state === "start" || event.state === "detect") {
+            // E2E-05: a new-utterance device signal opens a new window and
+            // clears the duplicate-dedup memory — a legitimately repeated
+            // utterance is never mistaken for a provider duplicate.
+            metrics.asrEndpointWindows += 1;
+            state.lastAcceptedFinal = null;
+          }
           if (event.state === "detect" && state.playback !== null) {
             // A wake-word detect during playback is an interrupt CANDIDATE
             // — recorded, never a fence by itself (VOICE_RUNTIME §4).
@@ -623,8 +694,30 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
             return reject("input_gate_blocked", state.sessionKey);
           }
           const fingerprint = asrFingerprint(event.text);
+          // E2E-05 duplicate-final dedup: a same-fingerprint final inside
+          // the bounded window (no new-utterance signal since — the memory
+          // is cleared by listen start/detect) is a provider duplicate
+          // (endpoint double-fire / replay). Enumerated no-op: no second
+          // turn, no second model request, no text residue beyond the
+          // keyed digest already permitted for accepted finals.
+          const nowMs = clock();
+          const last = state.lastAcceptedFinal;
+          if (last !== null && last.fingerprint === fingerprint && nowMs - last.atMs <= asrDuplicateWindowMs) {
+            metrics.asrDuplicateFinalsSuppressed += 1;
+            pushAudit({
+              action: "gateway.asr_duplicate_suppressed",
+              sessionKey: state.sessionKey,
+              turnId: state.playback?.turnId ?? null,
+              epoch: core.currentEpoch(state.sessionKey),
+              detail: fingerprint,
+              count: 1,
+            });
+            metrics.eventsAccepted += 1;
+            return { ok: true, kind: event.kind, sessionKey: state.sessionKey };
+          }
           state.turnCounter += 1;
           const idempotencyKey = `idem-gw${fingerprint.slice(0, 8)}t${state.turnCounter.toString().padStart(3, "0")}`;
+          const submitStartedAtMs = clock();
           const submitted = await core.submitPrompt({
             sessionKey: state.sessionKey,
             traceId: null,
@@ -635,6 +728,17 @@ export function createVoiceGatewayAdapter(options: VoiceGatewayAdapterOptions): 
           if (!submitted.ok) {
             return reject(submitted.code as GatewayRejectionCode, state.sessionKey);
           }
+          // Content-independent processing latency (E2E-05): event arrival
+          // → protected single-turn submit completion. Candidate baseline
+          // only; the value is a number, never content.
+          const acceptMs = Math.max(0, clock() - submitStartedAtMs);
+          metrics.asrFinalAcceptMs = {
+            count: metrics.asrFinalAcceptMs.count + 1,
+            maxMs: Math.max(metrics.asrFinalAcceptMs.maxMs, acceptMs),
+          };
+          // Seed the dedup memory only on ACCEPTED submissions: a rejected
+          // submit (e.g. scheduler refusal) must stay retryable.
+          state.lastAcceptedFinal = { fingerprint, atMs: nowMs };
           metrics.asrFinalsAccepted += 1;
           metrics.eventsAccepted += 1;
           pushAudit({
