@@ -130,14 +130,18 @@ describe('E2E-02 bridge profile security and negative permissions', { skip: pipe
       assert.ok(llmRow !== undefined, 'the llm adapter row is required')
       // The dump renders `!!js` config expressions VERBATIM (documented in
       // src/dump-config.ts). Resolve the pinned expression exactly as the
-      // runtime would — the ONLY permitted shape references
-      // DSH_POC_MOCK_BASE_URL with a loopback discard fallback — then inspect
-      // the resulting URL. A plain URL row resolves to itself.
+      // runtime would — the ONLY permitted shape is the E2E-03 chain
+      // (DSH_BRIDGE_MODEL_BASE_URL ?? DSH_POC_MOCK_BASE_URL ?? loopback
+      // discard fallback; issue #53) — then inspect the resulting URL. A
+      // plain URL row resolves to itself.
       const rawBaseURL = String((llmRow?.config as { baseURL?: unknown } | undefined)?.baseURL ?? '')
       const expressionPattern =
-        /^process\.env\.DSH_POC_MOCK_BASE_URL \?\? '(https?:\/\/[^']+)'$/
+        /^process\.env\.DSH_BRIDGE_MODEL_BASE_URL \?\? process\.env\.DSH_POC_MOCK_BASE_URL \?\? '(https?:\/\/[^']+)'$/
       const match = expressionPattern.exec(rawBaseURL)
-      const resolved = match !== null ? (process.env.DSH_POC_MOCK_BASE_URL ?? match[1]) : rawBaseURL
+      const resolved =
+        match !== null
+          ? (process.env.DSH_BRIDGE_MODEL_BASE_URL ?? process.env.DSH_POC_MOCK_BASE_URL ?? match[1])
+          : rawBaseURL
       assert.deepEqual(inspectModelBaseUrl(resolved, 'bridge profile llm baseURL'), [])
 
       // The Lumi-side domain contract must stay intact and consistent with

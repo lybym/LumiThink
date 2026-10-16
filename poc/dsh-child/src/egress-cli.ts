@@ -25,7 +25,9 @@ import { assertNoEgress, inspectChildEnv, inspectModelBaseUrl, inspectRequestRec
 
 /** The `!!js` expression the patch file declares; resolved by the child at boot. */
 const MOCK_EXPRESSION_MARKER = 'DSH_POC_MOCK_BASE_URL'
-/** The loopback discard fallback the profile uses when the mock variable is absent. */
+/** The E2E-03 (issue #53) gateway-egress route variable (loopback proxy only). */
+const BRIDGE_MODEL_EXPRESSION_MARKER = 'DSH_BRIDGE_MODEL_BASE_URL'
+/** The loopback discard fallback the profile uses when no variable is present. */
 const DISCARD_FALLBACK = 'http://127.0.0.1:9'
 
 /**
@@ -33,14 +35,18 @@ const DISCARD_FALLBACK = 'http://127.0.0.1:9'
  *
  * The dump prints the raw `!!js` expression verbatim (parsed as a literal
  * string by our loader), so the route is only provably loopback when the
- * expression itself references the mock variable or the loopback fallback.
- * Any other shape blocks.
+ * expression itself references the mock/gateway-route variables or the
+ * loopback fallback. Any other shape blocks. When the E2E-03 gateway-route
+ * variable is set in THIS environment its concrete value is probed directly
+ * (it must still be loopback — the guard stays honest about the new chain).
  */
 export function inspectComposedRoute(raw: string): EgressFinding[] {
-  if (raw.includes(MOCK_EXPRESSION_MARKER) || raw.trim().startsWith(DISCARD_FALLBACK)) {
-    // The expression resolves at child boot to either the loopback mock or the
-    // loopback discard port; both are loopback and both fail closed.
-    const probe = raw.includes(MOCK_EXPRESSION_MARKER) ? DISCARD_FALLBACK : raw.trim()
+  const referencesMockOrGatewayRoute =
+    raw.includes(MOCK_EXPRESSION_MARKER) || raw.includes(BRIDGE_MODEL_EXPRESSION_MARKER)
+  if (referencesMockOrGatewayRoute || raw.trim().startsWith(DISCARD_FALLBACK)) {
+    const probe =
+      process.env.DSH_BRIDGE_MODEL_BASE_URL ??
+      (referencesMockOrGatewayRoute ? DISCARD_FALLBACK : raw.trim())
     return inspectModelBaseUrl(probe, 'composed llm-deepseek baseURL')
   }
   return inspectModelBaseUrl(raw, 'composed llm-deepseek baseURL')
