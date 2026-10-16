@@ -395,6 +395,19 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
   /** Notify the Bridge that the attempt ended without a durable settlement. */
   function fireAttemptFailure(handleState: RealBridgeHandleState, attemptId: string): void {
     if (!handleState.attemptFailed || handleState.attemptSettled) return
+    if (handleState.cancelRequested && !handleState.idleConfirmed) {
+      // Issue #53 review r2 P1-1: a user-cancelled attempt's settlement is
+      // owned by the cancel path. An `end` frame for the interrupted attempt
+      // commonly arrives BEFORE the `whenIdle` reply — and after a
+      // request/step error the failure flag is still set — so this guard must
+      // hold for EVERY fire path (streaming `end` and the `status:'idle'`
+      // fallback alike), not just the idle one. Firing here would settle the
+      // turn FAILED while the Bridge is CANCELLING it (the cancel-path
+      // `activeTurn` clear happens after `whenIdle`), flipping an audited
+      // user cancel into a model failure. The in-flight state is left for
+      // the cancel path's own cleanup (`whenIdle()` or quarantine).
+      return
+    }
     handleState.attemptFailed = false
     handleState.attemptSettled = true
     // The failed attempt is OVER (its `end` frame arrived or the agent went
@@ -463,9 +476,13 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       }
     }
     if (frame.kind === 'end') {
-      // The attempt's stream ended: with a still-set failure flag, no durable
-      // settlement and no user cancel in flight, the turn must settle FAILED
-      // (issue #53 DoD 2) instead of hanging RUNNING forever.
+      // The attempt's stream ended: with a still-set failure flag and no
+      // durable settlement, the turn must settle FAILED (issue #53 DoD 2)
+      // instead of hanging RUNNING forever. The user-cancel guard ("MUST NOT
+      // fire it for a user-cancelled attempt", agent-port.ts) is enforced
+      // inside fireAttemptFailure itself, so the end frame of an INTERRUPTED
+      // attempt — which commonly arrives before the `whenIdle` reply — can
+      // never race the cancel path's settlement (issue #53 review r2 P1-1).
       fireAttemptFailure(handleState, adapterId)
     }
   }

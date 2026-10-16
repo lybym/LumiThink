@@ -26,10 +26,10 @@ import {
 
 /** Exact baseline the E2E-03 gateway-route suite must produce. */
 export const E2E03_BASELINE = {
-  /** Total `<testcase>` rows in the E2E-03 acceptance suite. */
-  tests: 5,
-  /** Suites in the E2E-03 acceptance report. */
-  suites: 1,
+  /** Total `<testcase>` rows in the E2E-03 acceptance suite (issue #53 review r2: +5 scripted failure-guard scenarios). */
+  tests: 10,
+  /** Suites in the E2E-03 acceptance report (gateway route + agent-port failure guard). */
+  suites: 2,
   /** Exact `skipped` count. Never allowed to be anything but 0. */
   skipped: 0,
   /** Exact `failures` count. */
