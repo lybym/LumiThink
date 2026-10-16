@@ -33,16 +33,17 @@ while [ $# -gt 0 ]; do
     --env-file) ENV_FILE="$2"; shift 2 ;;
     --skip-clone) SKIP_CLONE=1; shift ;;
     --service-user) SERVICE_USER="$2"; shift 2 ;;
-    --template)
-      TEMPLATE="$2"
-      case "${TEMPLATE}" in
-        /*) ;;
-        *) TEMPLATE="${REPO_ROOT}/deploy/xiaozhi/${TEMPLATE}" ;;
-      esac
-      shift 2 ;;
+    --template) TEMPLATE="$2"; shift 2 ;;
     *) echo "[xiaozhi:bootstrap] unknown arg: $1" >&2; exit 1 ;;
   esac
 done
+
+# Relative --template values resolve against deploy/xiaozhi/ (the documented
+# short form and the default both stay relative; absolute paths pass through).
+case "${TEMPLATE}" in
+  /*) ;;
+  *) TEMPLATE="${REPO_ROOT}/deploy/xiaozhi/${TEMPLATE}" ;;
+esac
 
 [ -n "${XIAOZHI_SERVER_COMMIT}" ] || { echo "[xiaozhi:bootstrap] version.env pin missing" >&2; exit 1; }
 # The render step is unconditional (also on --skip-clone re-renders), so the

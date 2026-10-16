@@ -28,7 +28,7 @@ import { CHILD_DATA_EGRESS_REVIEW_STATUS } from "../../lib/server/real-provider-
 const REVIEWER = "guardian-review-001";
 const REASON = "成人合成对照样例外发评审（E2E-05 运营者 opt-in 证据路径）";
 
-function realEnv(overrides: Readonly<Record<string, string>> = {}): EnvSource {
+function realEnv(overrides: EnvSource = {}): EnvSource {
   return {
     LUMITHINK_ASR_ROUTE: "real",
     LUMITHINK_ASR_VENDOR_ENDPOINT: REAL_ASR_VENDOR_ENDPOINT,

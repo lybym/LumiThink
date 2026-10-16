@@ -111,10 +111,10 @@ sudo systemctl reload caddy
 # 1. env 追加供应商键（模板 shapes 见 deploy/xiaozhi/env/gateway-asr-real.example）
 sudo vi /etc/xiaozhi/xiaozhi.env          # + XIAOZHI_ASR_API_KEY=<百炼 API-KEY>
 
-# 2. 以真实 ASR 档位重渲染（--template 显式选档；缺省仍是 gateway-minimal）
+# 2. 以真实 ASR 档位重渲染（--template 显式选档，相对 deploy/xiaozhi/ 解析；缺省仍是 gateway-minimal）
 sudo env "PATH=$PATH" bash deploy/xiaozhi/bootstrap.sh \
   --target /opt/xiaozhi-esp32-server --env-file /etc/xiaozhi/xiaozhi.env \
-  --skip-clone --template deploy/xiaozhi/config/gateway-asr-real.yaml
+  --skip-clone --template config/gateway-asr-real.yaml
 
 # 3. 重启并复核
 sudo systemctl restart xiaozhi-server
