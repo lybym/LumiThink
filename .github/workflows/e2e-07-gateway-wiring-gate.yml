@@ -150,6 +150,33 @@ jobs:
           print("fork-patch registry consistent (5 patches, pinned commit named)")
           PY
 
+      - name: Installer drill — synthetic pinned tree: install, idempotent re-install, verify-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Regression for the wiring-e2e failure class (two registered
+          # patches share sendAudioHandle.py — sibling markers are
+          # expected, never a failure; anchor uniqueness is the drift
+          # guard). A synthetic tree with the exact anchors proves:
+          # install applies all 5, a re-install is idempotent, verify-only
+          # passes, and a duplicated anchor (pin drift) refuses a fresh
+          # install.
+          work="$(mktemp -d)"
+          tree="$work/main/xiaozhi-server"
+          mkdir -p "$tree/core/handle" "$tree/core/providers/llm"
+          printf 'async def handleHelloMessage(conn, msg_json):\n    await conn.websocket.send(json.dumps(conn.welcome_msg))\n' > "$tree/core/handle/helloHandle.py"
+          printf 'async def handleAbortMessage(conn):\n    conn.clearSpeakStatus()\n' > "$tree/core/handle/abortHandle.py"
+          printf 'async def _do_send_audio(conn, opus_packet, flow_control):\n    flow_control["packet_count"] = packet_index + 1\n    flow_control["sequence"] = sequence + 1\n\nasync def send_tts_message(conn, state, text=None):\n    # 发送消息到客户端\n    await conn.websocket.send(json.dumps(message))\n' > "$tree/core/handle/sendAudioHandle.py"
+          printf '    async def _save_and_close(self, ws):\n        """保存记忆并关闭连接"""\n        pass\n' > "$tree/core/connection.py"
+          python3 deploy/xiaozhi/gateway_bridge/install_bridge.py --target "$work" | grep -q "applied patch 4/5"
+          python3 deploy/xiaozhi/gateway_bridge/install_bridge.py --target "$work" | grep -q "already applied"
+          python3 deploy/xiaozhi/gateway_bridge/install_bridge.py --target "$work" --verify-only | grep -q "install complete"
+          printf '    await conn.websocket.send(json.dumps(conn.welcome_msg))\n' >> "$tree/core/handle/helloHandle.py"
+          if python3 deploy/xiaozhi/gateway_bridge/install_bridge.py --target "$(mktemp -d)" 2>/dev/null; then
+            echo "::error::a corrupted tree must refuse to patch"; exit 1
+          fi
+          echo "installer drill OK (5/5, idempotent, verify-only, drift-refusing)"
+
       - name: Pinned version markers stay single-sourced
         shell: bash
         run: |

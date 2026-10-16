@@ -124,7 +124,7 @@ _HOOK_MARKER = "[LumiThink E2E-07 fork patch"
 def main() -> int:
     parser = argparse.ArgumentParser(description="Install the LumiThink gateway bridge into the pinned checkout")
     parser.add_argument("--target", required=True, help="xiaozhi-esp32-server checkout root (bootstrap --target)")
-    parser.add_argument("--verify-only", action="store_true", help="check anchor integrity without writing")
+    parser.add_argument("--verify-only", action="store_true", help="verify the module + all five patches are present without writing")
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[3]
@@ -162,13 +162,13 @@ def main() -> int:
             continue
         content = file_path.read_text(encoding="utf-8")
         hook = "\n".join(patch["hook_lines"]) + "\n"
-        if _HOOK_MARKER in content:
-            # Idempotency: verify each patch's own marker exists.
-            if patch["hook_lines"][0] in content:
-                print(f"[lumi-bridge] verify: patch {patch['number']} ({patch['name']}) already applied")
-                continue
-            print(f"[lumi-bridge] PATCH FAIL {patch['number']}: another LumiThink patch marker present", file=sys.stderr)
-            failed = True
+        if patch["hook_lines"][0] in content:
+            # Idempotency: this patch's own marker is present → already
+            # applied. sendAudioHandle.py carries TWO patches (3/5 and
+            # 4/5) — sibling markers in the same file are expected and
+            # never a failure condition (anchor uniqueness below is the
+            # drift guard).
+            print(f"[lumi-bridge] verify: patch {patch['number']} ({patch['name']}) already applied")
             continue
         anchor = patch["anchor"]
         count = content.count(anchor)
