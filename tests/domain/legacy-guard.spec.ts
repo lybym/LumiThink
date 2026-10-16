@@ -179,11 +179,19 @@ test("explicit legacy migration drops all capability scores and keeps provenance
   // The archive itself must pass the same guarded intake as new facts.
   assert.doesNotThrow(() => assertFreeOfLegacyShapes(archive, "legacyProfileArchive"));
 
-  // No numeric score value may appear anywhere in the serialized archive.
-  const serialized = JSON.stringify(archive);
+  // No numeric score value may appear anywhere in the serialized archive —
+  // except the archivedAt clock stamp, which is scanned separately below: it
+  // is a fixed-format ISO timestamp and cannot carry a score by construction,
+  // while its millisecond field legitimately contains digit runs like "0.87"
+  // ("…:00.873Z"), which made this whole-string scan time-of-day dependent
+  // (CI flake at 18:34:00.873Z).
+  const serialized = JSON.stringify({ ...archive, archivedAt: "" });
   for (const value of [0.87, 0.4, 0.25]) {
     assert.equal(serialized.includes(String(value)), false);
   }
+  // The clock stamp stays a parseable ISO instant (already covered above) and
+  // the ISO shape keeps the archive self-describing.
+  assert.match(archive.archivedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 });
 
 test("explicit RawEvent migration counts events without copying payload content", () => {
