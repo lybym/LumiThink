@@ -150,7 +150,7 @@ jobs:
           print("fork-patch registry consistent (5 patches, pinned commit named)")
           PY
 
-      - name: Installer drill — synthetic pinned tree: install, idempotent re-install, verify-only
+      - name: Installer drill — synthetic pinned tree (install, idempotent re-install, verify-only)
         shell: bash
         run: |
           set -euo pipefail
