@@ -64,16 +64,17 @@ fi
 echo "[xiaozhi:health] loopback-only binding OK (8000/8003)"
 
 # 探针带小重试环：OTA HTTP 与 WS bind 的就绪存在毫秒级竞态，避免单次探测抖动。
+# abort 断言是默认模式（--without-abort 才关闭），无需传参。
 probe_ok=""
 for attempt in 1 2 3 4 5; do
-  if probe --with-abort >/dev/null 2>&1; then
+  if probe >/dev/null 2>&1; then
     probe_ok="1"
     break
   fi
   sleep 2
 done
 if [ -z "${probe_ok}" ]; then
-  probe --with-abort   # 最后一次不带重定向，让失败原因可见
+  probe   # 最后一次不带重定向，让失败原因可见
   exit 1
 fi
 echo "[xiaozhi:health] simulated-device hello + abort OK"
