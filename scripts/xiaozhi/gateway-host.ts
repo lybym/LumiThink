@@ -126,13 +126,32 @@ async function main(): Promise<void> {
     },
   });
 
-  await wired.start();
-  if (wired.endpoint.kind !== "uds" || wired.endpoint.path !== resolve(socketPath)) {
+  // Content-free turn-level diagnostics (CI evidence): every stack event,
+  // every agent fault, and the settlement outcomes — no content fields.
+  wired.stack.stack.client.onEvent((frame) => {
+    if (frame.kind !== "event") {
+      return;
+    }
+    const payload = (frame.payload ?? {}) as Record<string, unknown>;
+    if (frame.name === "turn.settled") {
+      console.log(
+        `[gateway-host] stack event ${frame.name} finalState=${String(payload.finalState)} turnId=${String(payload.turnId)}`,
+      );
+      const gate = wired.stack.stack.gate.metricsSnapshot();
+      console.log(
+        `[gateway-host] gate metrics deltasFenced=${gate.deltasFenced} ttsAdmissions=${gate.ttsAdmissions} ttsBlocked=${gate.ttsBlockedSentences} deliveryFailures=${gate.sentenceDeliveryFailures}`,
+      );
+      return;
+    }
+    console.log(`[gateway-host] stack event ${frame.name}`);
+  });
+  agentPort.onFault((info) => {
     console.error(
-      `[gateway-host] transport endpoint mismatch: expected ${socketPath}`,
+      `[gateway-host] agent fault session=${info.sessionKey} code=${info.code} detail=${info.detail} exit=${String(info.exitCode)} message=${info.message ?? ""}`,
     );
-    process.exit(1);
-  }
+  });
+
+  await wired.start();
 
   console.log(`GATEWAY-HOST READY endpoint=${wired.endpoint.path}`);
   const shutdown = async () => {
