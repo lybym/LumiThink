@@ -34,6 +34,15 @@ name: E2E-07 gateway wiring gate
 #      The launcher itself is scoped-typechecked in this job (issue #58
 #      P1-2 clearance: scripts/xiaozhi/gateway-host.ts used to sit outside
 #      every static gate).
+#      Then — E2E-11 (issue #61): the reliability-regression probe
+#      (probe_e2e11.py) runs fault-injected wired rounds against the REAL
+#      agent runtime — long-haul rounds with a per-round latency
+#      decomposition (candidate baselines) plus the device-transport fault
+#      matrix: wifi_drop (mid-playback hard close → reconnect → recovery),
+#      cancel_flood (abort burst → stop → ZERO late frames → recovery) and
+#      server_restart (operator-supplied restart command fires
+#      MID-PLAYBACK → reconnect → recovery). Hard gates are structural
+#      invariants only; the physical fault faces stay with runbook §14.
 # No real credentials, no external egress (gateway-bridge tier: ASR stays
 # the loopback placeholder, TTS a loopback stub, the LLM path is the local
 # protected transport; real-device acceptance stays with #E2E-08).
@@ -93,7 +102,8 @@ jobs:
             deploy/xiaozhi/gateway_bridge/install_bridge.py \
             deploy/xiaozhi/tts_stub.py \
             deploy/xiaozhi/probe_e2e07.py \
-            deploy/xiaozhi/probe_e2e09.py
+            deploy/xiaozhi/probe_e2e09.py \
+            deploy/xiaozhi/probe_e2e11.py
           echo "py_compile OK (module, installer, stub, probes)"
 
       - name: gateway-bridge tier template — bridge LLM only, loopback, token by env name
@@ -578,6 +588,59 @@ jobs:
             --trials 2 --variants consecutive,delayed --turn-timeout 90 \
             --expect-barge-in-measurement
 
+      - name: Reliability regression — fault-injected wired rounds (issue 61)
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source e2e07.env; set +a
+          # E2E-11 (issue #61): the wired-loop RELIABILITY regression probe.
+          # Long-haul rounds with a per-round latency decomposition
+          # (stt echo / first gated sentence / first Opus frame / turn total
+          # — candidate baselines, never device acceptance numbers), plus
+          # the device-transport fault matrix:
+          #   wifi_drop       mid-playback hard close (cable pull) → reconnect
+          #                   → recovery turn (pre-detect audio RECORDED);
+          #   cancel_flood    mid-playback abort + abort burst → stop → ZERO
+          #                   late frames → idle burst (recorded) → recovery;
+          #   server_restart  the operator-supplied restart command fires
+          #                   MID-PLAYBACK → connection must drop → reconnect
+          #                   → recovery turn (CI passes a kill+relaunch
+          #                   snippet; an operator maps it to
+          #                   `systemctl restart xiaozhi-server`).
+          # HARD gates are the structural invariants only (every gated trial
+          # reaches its stop, zero late frames, full recovery). Physical
+          # fault faces (device Wi-Fi radio, OTA, wake word) stay with
+          # runbook §14 — this step never claims them.
+          cat > "$RUNNER_TEMP/restart-wired-server.sh" <<'RESTART'
+          #!/bin/bash
+          set -u
+          # Kill EVERY wired-server process by command line — pid files can
+          # go stale across the earlier restart step; the probe's
+          # server_restart trial REQUIRES the connection to actually drop
+          # MID-TURN (a ~3.5s playback window after the first frame), so the
+          # graceful TERM window stays SHORT (2s) and KILL guarantees the
+          # drop lands before the turn completes.
+          pkill -TERM -f "xiaozhi-esp32-server/venv/bin/python app.py" 2>/dev/null || true
+          for _ in $(seq 1 2); do
+            pgrep -f "xiaozhi-esp32-server/venv/bin/python app.py" >/dev/null 2>&1 || break
+            sleep 1
+          done
+          pkill -KILL -f "xiaozhi-esp32-server/venv/bin/python app.py" 2>/dev/null || true
+          cd "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server"
+          setsid "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" app.py \
+            >> wired-server3.log 2>&1 < /dev/null &
+          echo $! > wired-server.pid
+          RESTART
+          chmod +x "$RUNNER_TEMP/restart-wired-server.sh"
+          "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" deploy/xiaozhi/probe_e2e11.py \
+            --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+            --device-id aa:bb:cc:dd:ee:08 --client-id e2e11-reliability \
+            --auth-key "${XIAOZHI_AUTH_KEY}" \
+            --rounds 3 --faults wifi_drop,cancel_flood,server_restart \
+            --restart-command "$RUNNER_TEMP/restart-wired-server.sh" \
+            --turn-timeout 90 \
+            --expect-reliability-regression
+
       - name: Real-agent evidence — host log stays content-free
         shell: bash
         run: |
@@ -596,4 +659,5 @@ jobs:
           tail -40 gateway-host-real.log 2>/dev/null || true
           tail -40 "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server/wired-server.log" 2>/dev/null || true
           tail -40 "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server/wired-server2.log" 2>/dev/null || true
+          tail -40 "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server/wired-server3.log" 2>/dev/null || true
           tail -20 tts-stub.log 2>/dev/null || true

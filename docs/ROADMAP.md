@@ -101,7 +101,9 @@
 5. 有人工审核的情绪/学习双专业合成测试用例，覆盖适用、无效、拒绝、危机升级和过度介入；每次路由追踪到已核验 Evidence Card。
 6. 能完成偏好记忆“确认 → 跨会话引用 → 更正 → 删除”闭环，且不需要真实儿童数据。
 
-> **E2E MVP 进度（issue #60 / E2E-10）**：儿童专业场景端到端验收面已交付（自动化面由 CI 证明：双 Skill 多轮专业场景与逐轮 Persona/Skill/Evidence 版本追溯、危机确定性转介、专业边界自动化卡——幻觉/角色诱导/设备旁路/无效策略、受控记忆"确认→跨会话引用→修订→删除"全环与禁止自动沉淀心理诊断/人格标签、快照恢复不复活已删除内容、监护人治理旅程——撤权/记录开关/导出/清除对儿童会话实际生效与未授权拒绝）。**真实 LLM + 真实设备多轮样例、监护人端逐项点击、专业边界测试卡人工审阅与真实调用记录**由运营者按 [deploy/xiaozhi runbook §13](../deploy/xiaozhi/runbook.md) 执行留证（#58/#59 同模式），未执行前 issue 保持 OPEN，不代领 PASS。
+> **E2E MVP 进度（issue #61 / E2E-11）**：实机可靠性回归的自动化面已交付（接线环故障注入探针 `probe_e2e11.py`——真实 agent 档长稳轮次逐轮时延分解候选基线 + `wifi_drop`/`cancel_flood`/`server_restart` 硬不变量；组合栈 `tests/server/e2e11-reliability.spec.ts`——模型挂起超时清扫与迟到流良性、取消洪泛恰一次 fence/零泄漏、真实 SQLite 栅栏存储洪泛下持久化/恢复一致性；既有 #48 whenIdle 有界超时/#49 server_restart 鉴权清理/tts.clear epoch/真 IPC 联测专项回归复核在列，见 [deploy/xiaozhi runbook §14.1](../deploy/xiaozhi/runbook.md)）。**实机故障注入矩阵 F1–F10、≥100 轮成人/合成对话实测（成功率/失败类别/P50/P95/恢复时间/费用）、安全核验 S1–S5 与空环境重建/回滚/控制面留证**由运营者按 [runbook §14](../deploy/xiaozhi/runbook.md) 执行留证（#58/#59/#60 同模式），未执行前 issue 保持 OPEN，不代领 PASS。
+>
+> **E2E-10 已交付（issue #60）**：儿童专业场景端到端验收面（自动化面由 CI 证明：双 Skill 多轮专业场景与逐轮 Persona/Skill/Evidence 版本追溯、危机确定性转介、专业边界自动化卡——幻觉/角色诱导/设备旁路/无效策略、受控记忆"确认→跨会话引用→修订→删除"全环与禁止自动沉淀心理诊断/人格标签、快照恢复不复活已删除内容、监护人治理旅程——撤权/记录开关/导出/清除对儿童会话实际生效与未授权拒绝）。**真实 LLM + 真实设备多轮样例、监护人端逐项点击、专业边界测试卡人工审阅与真实调用记录**由运营者按 [deploy/xiaozhi runbook §13](../deploy/xiaozhi/runbook.md) 执行留证（#58/#59 同模式），未执行前 issue 保持 OPEN，不代领 PASS。
 
 ## 3.5 R1-V · Voice Runtime Lifecycle（跨阶段先导、当前计划）
 

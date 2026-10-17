@@ -1,4 +1,4 @@
-# 小智私有服务端部署 Runbook（E2E-04，issue #54；E2E-08 实机 §11（issue #58）；E2E-09 打断/AEC §12（issue #59））
+# 小智私有服务端部署 Runbook（E2E-04，issue #54；E2E-08 实机 §11（issue #58）；E2E-09 打断/AEC §12（issue #59）；E2E-10 儿童场景 §13（issue #60）；E2E-11 可靠性回归 §14（issue #61））
 
 > 状态：随 E2E-04 交付 ｜ 日期：2026-10-17 ｜ 对应 [Issue #54](https://github.com/lybym/LumiThink/issues/54) · [Issue #58](https://github.com/lybym/LumiThink/issues/58) · [Issue #59](https://github.com/lybym/LumiThink/issues/59) · [VOICE_GATEWAY_PROTOCOL §1](../../docs/VOICE_GATEWAY_PROTOCOL.md) · [VOICE_HARDWARE §2/§3](../../docs/VOICE_HARDWARE.md) · [R1-08 Runbook](../runbook.md)
 >
@@ -529,3 +529,75 @@ LUMITHINK_GATEWAY_AGENT=real node --experimental-strip-types scripts/xiaozhi/gat
 ### 13.6 回退
 
 - 服务端换档/回退沿用 §3.7（real → mock）与 §8；本节不引入新配置或新数据面。验收失败按 RELEASE_GATE 口径阻止发版，不影响既有门禁。
+
+## 14. E2E-11 实机可靠性回归（issue #61）：故障注入矩阵与 ≥100 轮实测 runbook
+
+> 口径先行：本节是**运营者执行脚本 + 记录合同**（沿用 §11/§12/§13 模式）。可自动化面（接线环故障注入回归 + 组合栈模型挂起/取消洪泛/持久化回归）已由 CI 证明（§14.1）；**真实设备的故障注入矩阵、≥100 轮成人/合成对话实测、时延分解与停止响应实测、安全核验与生产控制面记录（DoD 1–4 的物理/运维面）必须由本节实机执行留证，CI 与文档不代领、不标 PASS**。未执行前 issue 保持 OPEN（#58/#59/#60 先例）；不创建 Tag/Release；合成/Mock 指标不得冒充真模型/真实硬件性能。
+
+### 14.1 已由 CI 证明的自动化面（本 PR 起）
+
+- **接线环可靠性回归探针**（`deploy/xiaozhi/probe_e2e11.py`，`e2e-07-gateway-wiring-gate.yml` 真实档步骤）：真实 agent 运行时（锁定版 DSH worker）接线环内——长稳轮次（缺省 3 轮，运营者可放大至 ≥100 做服务端满量程回归）逐轮采集**时延分解**（`stt_echo_ms` / `first_sentence_ms`（LLM 首安全短句代理——句子已过 Output Gate）/ `first_audio_ms`（TTS 首音代理）/ `turn_total_ms`）+ 故障注入：`wifi_drop`（播放中硬断连→重连→恢复轮必达）、`cancel_flood`（播放中 abort + abort 洪泛→停→**零迟到帧**→空闲洪泛 recorded→恢复轮必达）、`server_restart`（探针在播放中执行运营者提供的重启命令→连接必断→重连→恢复轮必达）。**硬门禁仅结构不变量**；时延为客观服务端测量、候选基线（非 SLA、非实机数值）。CI 复现 = `e2e-07-gateway-wiring-gate.yml` 的 "Reliability regression — fault-injected wired rounds (issue 61)" 步骤。
+- **组合栈模型挂起/取消洪泛/持久化回归**（`tests/server/e2e11-reliability.spec.ts`，`r1-baseline-gate.yml` 的 `pnpm test`）：真实组合栈（Adapter + R1-V1 Orchestrator + R1-V2 Bridge）上——模型挂起→超时清扫 `TIMED_OUT`→设备恰一次 stop→迟到流完全良性（零迟到帧、无复活、下一轮完成，无死锁）；取消洪泛→每播放轮恰一次 fence、洪泛与空闲洪泛枚举 no-op、零旧帧泄漏；**真实 SQLite 栅栏存储**洪泛下持久化/恢复一致性（重复取消枚举化、post-fence 写入拒绝、陈旧 TTS 队列清空、进程重启 epoch 单调、已取消轮不复活、新工作自恢复 epoch 继续）。
+- **既有专项风险回归清单（本 PR 复核仍绿，逐项对应 issue 实现范围 2）**：#48 的 whenIdle 有界超时与隔离（`poc/dsh-child` e2e02 gate "bounds a hung whenIdle" + `tests/domain/voice/bridge/bridge.spec.ts` cancel_timeout quarantine）；#49 的 server_restart 鉴权清理（`tests/domain/voice/adapter/fault-injection.spec.ts` server_restart 家族 + 组合栈 `voice-gateway-wiring.spec.ts` 注入面 + 接线环重启续接步骤）；`tts.clear` 兜底 epoch（adapter/barge-in 套件 + 探针零迟到帧硬断言）；Adapter 真 IPC 联测（`tests/server/voice-gateway-internal-transport.spec.ts` 真 UDS + 接线环真实受保护传输）；延迟观测回归（fault-injection/race 的 `candidateLatency` 采集断言）；持久化/恢复一致性（`tests/server/runtime-snapshot.spec.ts` 恢复不复活 + `voice-turn-sqlite-store.spec.ts` 重启单调性 + 本 PR 洪泛增量）；重复设备会话（`probe_e2e07.py --expect-duplicate-refusal` + duplicate_connection 家族）；升级回滚演练（`r1-deployment-gate.yml` 的 upgrade-rollback drill artifact）。
+
+### 14.2 实机故障注入矩阵与逐项记录表（DoD 2 物理面）
+
+每项注入后立即执行**同一恢复轮**（成人合成语音"那我们读书吧"级样例）并记录恢复时间。预期语义与 §14.1 自动化面一致：**不存在旧 epoch 音频/记忆泄漏，不存在跨设备权限冒用；所有拒绝 fail-closed 且有枚举码**。
+
+| # | 故障 | 注入方法（物理/运维） | 预期（对照自动化面） | 记录列 |
+| --- | --- | --- | --- | --- |
+| F1 | Wi-Fi 断开/重连 | 播放中关闭路由器/设备飞行模式 30s→恢复 | 恢复后自动重连；恢复轮完整播报；无旧音频在重连后先行漏出（续播语义如实记录） | 断开时长、重连耗时、恢复轮结果、旧音频记录 |
+| F2 | WS 重绑 | 播放中重启服务端进程（`systemctl restart xiaozhi-server`） | 设备自动重连、新 session_id、同一受信会话续接；播放挂起不复活 | 重连耗时、恢复轮结果、越权尝试（旧句柄拒绝）结果 |
+| F3 | 服务进程重启 | `systemctl restart xiaozhi-server`（或网关宿主进程重启） | 同 F2；网关宿主/DSH worker 不残留死连接 | 进程状态、恢复轮结果 |
+| F4 | 真实 DSH 超时/挂起 | 受控停掉模型出口（断 LLM 供应商出网/挂起网桥进程）单轮 | 该轮超时终止（枚举失败码），设备不挂死；恢复出口后下一轮完整 | 轮次结局、恢复时间 |
+| F5 | ASR 不可用 | 断 ASR 供应商出口（real 档）或重渲染 gateway-minimal | 该轮明确失败/禁用语义（不悄然换路径）；恢复后正常 | 轮次结局、恢复时间 |
+| F6 | TTS 不可用 | 断 TTS 供应商出口 | 同 F5 | 同上 |
+| F7 | LLM 不可用 | 断 LLM 出口（gateway-bridge 环路断开） | 轮次超时/失败枚举；无死连接残留 | 同上 |
+| F8 | 取消洪泛 | 播报中连续按键打断 ≥10 次 + 空闲连续打断 | 每播放轮恰一次 stop；零迟到帧；协议面不死锁 | 打断次数、迟到帧计数、恢复轮结果 |
+| F9 | 重复设备会话 | 同一设备第二连接（第二台机同 MAC/重放 hello） | 服务端边缘拒绝重复租约，第一连接不受影响 | 拒绝码、第一连接结果 |
+| F10 | OTA 失败/回退（若已配置 OTA） | 构建期错误 `OTA_URL` 重烧/升级中断电 | 设备保持可用旧固件或按服务端语义失败——**如实记录，不代领 PASS** | OTA 结果、设备状态 |
+
+### 14.3 ≥100 轮成人/合成对话实测（DoD 1 物理面）
+
+- **前置**：§3.7 real 档（真实 LLM 经回环 Model Gateway）+ §11 设备绑定 + §13.5 授权/外发评审生效；语料为成人/合成测试句，不使用真实儿童个人数据。
+- **环境一致性锚点（每次实测逐项记录，防跨日漂移）**：设备固件版本串（§11.2 表）、服务端 pinned commit（`version.env`）、网关宿主/DSH 版本与 `LUMITHINK_GATEWAY_AGENT` 档位、ASR/TTS/LLM 供应商档位、`XIAOZHI_AUTH_KEY` 轮换代次——探针与实机共用同一 pinned 栈（探针输出含 `reliability summary` 行可留证）。
+- **探针并行面（服务端满量程回归）**：`probe_e2e11.py --rounds 100 --faults wifi_drop,cancel_flood,server_restart --restart-command "<重启命令>"`（协议模拟设备，零内容输出）——实机执行**前/后**各跑一轮，输出 P50/P95/P99 时延分解与失败类别作为对照基线。
+- **逐轮记录表列（运营者证据目录）**：轮次、触发方式（语音/按键/唤醒）、结果（成功/失败类别）、T0 唤醒（设备侧录屏时间戳）、T1 ASR 完成、T2 首安全短句（服务端内容无关日志 `sentence_start` 到达）、T3 TTS 首音（设备侧）、T4 播报完成、打断轮停止响应延迟、故障轮恢复时间、当轮模型费用（provider 账单/计量记录）、备注。
+- **报告字段**：总轮数、成功率、失败类别分布（对照 §14.2 类别 + 探针类别枚举）、各时延段 P50/P95、平均/最差恢复时间、费用合计、探针服务端对照结果。
+
+### 14.4 端到端时延分解与停止响应（测法；门限冻结纪律沿用 §12.3）
+
+- **唤醒→ASR**：设备侧串口日志/录屏（物理面，无线上等价物——`probe_e2e11` 不测量唤醒）。
+- **ASR→LLM 首安全短句**：服务端 `stt` 到达 → 线协议 `sentence_start` 到达（句子已过儿童 Output Gate）；探针 `first_sentence_ms` 为服务端候选基线。
+- **首短句→TTS 首音→播报**：设备侧录屏（首音）+ 服务端 `first_audio_ms`/`turn_total_ms` 对照。
+- **停止响应**：打断触发（人声/按键）→ 设备实际停播（录屏）；服务端 `stop_response_ms`（abort→tts stop 线协议）对照。
+- **门限冻结**：实机门限必须在试验前冻结并记录（表式同 §12.3）；探针/合成数值永不充当实机门限；未达冻结门限按 §12.8 同款流程走"阻止 Release 或显式降级"决定。
+
+### 14.5 安全核验清单（fail-closed；逐项记录时间/结果/证据）
+
+| # | 核对项 | 方法 | 预期 |
+| --- | --- | --- | --- |
+| S1 | 激活凭据轮换 | 更换 `XIAOZHI_AUTH_KEY`/`LUMITHINK_GATEWAY_AUTH_KEY` 并重启 | 旧 token 设备被拒（重连失败），新凭据设备正常；无凭据残留于日志 |
+| S2 | 安全 WSS/内部 IPC | 设备走 `wss://`（Caddy 证书有效）；`LUMITHINK_GATEWAY_SOCKET` 为 0600 UDS；`ss -x/-tlnp` 复核 | 无公网 TCP 监听面；`nmap -p-` 复核仅 80/443（§2 步骤 6） |
+| S3 | 数据外发白名单 | 复核 `selected_module` 仅注册模块（无第二 AI 路径）；real 档三闸（`delete_audio`/上报队列关闭/`log_level: WARNING`） | 模板三闸保持；儿童数据外发评审 `not_performed` 闸门未变 |
+| S4 | 清理策略 | 触发主体级清除后设备续接旧会话 | 会话映射关闭不可续（§13.3 #9 实机版）；无旧内容复活 |
+| S5 | 跨设备权限 | 设备 A 的绑定摘要尝试在设备 B 上重放（含无凭据/错凭据变体） | `device_possession_denied`/绑定拒绝（对照 forged_identity 家族语义） |
+
+### 14.6 空环境重建、健康检查、受控回滚与生产控制面（DoD 4）
+
+- **空环境重建**：按 §2（小智服务端）与 [deploy/runbook.md §2](../deploy/runbook.md)（LumiThink 主应用）在全新主机完整执行一次，记录每步时间线与验证输出（`GATEWAY-HOST READY`、healthcheck、probe_hello）。
+- **健康检查**：`deploy/xiaozhi/healthcheck.sh` + 主应用 `/api/health` 与 manifest 版本一致性核对（RELEASE_GATE Gate 3 口径）。
+- **受控回滚**：§8（版本切回 + 重渲染 + 重启）；自动化面证据 = `r1-deployment-gate.yml` upgrade-rollback drill artifact（`allPhasesPassed`）；回退前确认目标版本能读当前快照（RELEASE_GATE Gate 4）。
+- **生产控制面实测**：systemd 单元状态抽查（`systemctl status`）、Caddy 访问日志抽查、结构化追踪/审计字段抽查（**脱敏口径同 §7**：只记 id/版本/计数，不记正文）；记录为证据链接。
+
+### 14.7 DoD 口径对照（如实声明）
+
+| DoD | 自动化面（本 PR 已证） | 物理面（本节执行后留证） |
+| --- | --- | --- |
+| 1. 真实设备 ≥100 轮成人/合成对话：成功率/失败类别/P50/P95 延迟/恢复时间/费用 | 接线环长稳轮次 + 逐轮时延分解采集（`probe_e2e11.py`，缺省 3 轮；运营者可放大至 100 轮做服务端对照） | §14.3 实机 ≥100 轮逐轮记录——**未执行前不标 PASS** |
+| 2. 断网/服务重启/DB-快照恢复/模型失败可重复注入，无旧 epoch 音频/记忆泄漏或跨设备权限冒用 | `wifi_drop`/`cancel_flood`/`server_restart` 探针硬断言 + 组合栈挂起/洪泛/SQLite 洪泛恢复 spec + 既有 server_restart/duplicate/forged 家族 + 快照恢复不复活（§14.1/§14.2 对照） | §14.2 F1–F10 实机矩阵 + §14.5 S1–S5 安全核验 |
+| 3. 此前 P0/P1 漏项关闭；P2 有 owner/风险/时间，不用"CI 全绿"掩盖真实环境失败 | §14.1 专项风险回归清单逐项在列且本 PR 复核仍绿（#48 whenIdle 有界、#49 server_restart 鉴权清理、tts.clear epoch、真 IPC 联测、延迟观测、持久化恢复） | §14.3 实测结果如实报告失败类别；P2 遗留按 PR"遗留风险"节的 owner/风险/时间口径披露 |
+| 4. 空环境重建/健康检查/受控回滚证据 + 生产控制面实测 | 升级回滚演练 artifact + bootstrap/healthcheck/探针全链路 CI | §14.6 重建时间线 + 控制面抽查留证 |
+
+- **完成判定**：§14.2–§14.6 留证齐备 + 自动化面 CI 绿 → 依 #58/#59/#60 先例在 issue comment 留证，由运营者/用户决定 issue 关闭或保持 OPEN 待实机执行；**本 PR 交付后 issue 预期保持 OPEN（物理项未执行）**。
+- **回退**：本 PR 不改任何部署配置/数据面；探针与 spec 均为增量证据面，revert 即完全回滚。验收失败按 RELEASE_GATE 口径阻止发版。
