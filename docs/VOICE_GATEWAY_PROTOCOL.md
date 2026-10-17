@@ -1,6 +1,6 @@
 # Voice Gateway Adapter：小智 v2.5.2 协议兼容矩阵与合同（R1-V3）
 
-> 版本：1.4 ｜ 2026-10-15（1.4 修订 2026-10-17）｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30)，1.1 修订 Issue [#51](https://github.com/lybym/LumiThink/issues/51)，1.2 修订 Issue [#55](https://github.com/lybym/LumiThink/issues/55)，1.3 修订 Issue [#56](https://github.com/lybym/LumiThink/issues/56)，1.4 修订 Issue [#57](https://github.com/lybym/LumiThink/issues/57)，1.4 增补 Issue [#59](https://github.com/lybym/LumiThink/issues/59)（打断实测面 §9——测量与验收合同，不改 Adapter 合同） ｜ **合同 + 合成验证 + 服务端接线联测；固件/服务端兼容与私有 OTA 均【未实机验证】；真实 ASR/TTS 供应商行为未实机验证；真实设备验收未开始**
+> 版本：1.4 ｜ 2026-10-15（1.4 修订 2026-10-17；1.4 增补 §10 issue [#61](https://github.com/lybym/LumiThink/issues/61)）｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30)，1.1 修订 Issue [#51](https://github.com/lybym/LumiThink/issues/51)，1.2 修订 Issue [#55](https://github.com/lybym/LumiThink/issues/55)，1.3 修订 Issue [#56](https://github.com/lybym/LumiThink/issues/56)，1.4 修订 Issue [#57](https://github.com/lybym/LumiThink/issues/57)，1.4 增补 Issue [#59](https://github.com/lybym/LumiThink/issues/59)（打断实测面 §9——测量与验收合同，不改 Adapter 合同），1.4 增补 Issue [#61](https://github.com/lybym/LumiThink/issues/61)（可靠性回归面 §10——测量与验收合同，不改 Adapter 合同） ｜ **合同 + 合成验证 + 服务端接线联测；固件/服务端兼容与私有 OTA 均【未实机验证】；真实 ASR/TTS 供应商行为未实机验证；真实设备验收未开始**
 > [VOICE_RUNTIME](./VOICE_RUNTIME.md) · [ADR-002](./adr/0002-voice-runtime-bridge.md) · [ADR-007](./adr/0007-asr-transient-text-channel.md) · [ADR-0009](./adr/0009-real-asr-provider-transient-channel.md) · [ADR-0010](./adr/0010-real-tts-provider-dual-stream.md) · [ADR-0011](./adr/0011-xiaozhi-gateway-wiring.md) · [硬件选型](./VOICE_HARDWARE.md) · [Roadmap R1-V3](./ROADMAP.md)
 
 ## 1. 固定评估基线（版本/契约钉死）
@@ -238,3 +238,20 @@ v1.4 把本合同的 Adapter 从"纯合成可重放"接入**真实服务端消�
 - 真实固件 AEC 的**效果**（回声抑制对照录音/转写）与**打断可靠性**（≥100 次播报中打断试验：成功率/误打断率/P50/P95/P99/失败类别/可复现步骤）只能在真机上产生，CI 与本文档**不代领、不标 PASS**；门限在试验前冻结（runbook §12.3），Mock/探针毫秒数永不充当实机门限。
 - 服务端 AEC 链路的代码事实（@ pinned commit）：hello `features.aec=true` → `conn.client_aec` → 播放中 VAD 出人声自动 abort；**普通 WebSocket 下行无服务端回声对消（参考缓存仅 MQTT 网关分支）——回声对消只能来自设备侧**。设备 hello 的 `features.aec`/`audio_params` 实际取值随 runbook §12.2 实录。
 - 未达冻结门限时按 runbook §12.8：阻止 Release 或用户显式决定按键中断降级；不虚构全双工能力。
+
+## 10. 可靠性回归面（1.4 增补，issue #61 / E2E-11）
+
+本节不改 §2/§8 的 Adapter 合同——它把 §3 兼容矩阵的合成故障族与 §9 打断测量升级为**接线环故障注入矩阵 + 组合栈挂起/洪泛回归 + 实机可靠性验收合同**。载体：`deploy/xiaozhi/probe_e2e11.py`（协议模拟设备可靠性探针）、`tests/server/e2e11-reliability.spec.ts`（组合栈回归）、[runbook §14](../deploy/xiaozhi/runbook.md)（物理面）。
+
+### 10.1 测量与注入合同（自动化面）
+
+- **长稳轮次时延分解**（候选基线，非 SLA）：`stt_echo_ms`（detect → `stt` 回显）、`first_sentence_ms`（detect → 首个 `sentence_start`——**LLM 首安全短句代理**，句子已过儿童 Output Gate）、`first_audio_ms`（detect → 首个真实 Opus 下行帧）、`turn_total_ms`（detect → `tts stop`）。唤醒→ASR 无线上等价物，归物理面（§14.4）。P50/P95/P99 只采集打印不作门禁。
+- **故障注入（设备传输面，真实 agent 档接线环内）**：`wifi_drop`（播放中**硬断连**——无 abort 的非自愿掉线代理 → 重连重试 → 恢复轮必达音频与 stop；重连后自身 detect 之前的音频**只记录不判定**——当前 epoch 续播语义如实披露）、`cancel_flood`（播放中 abort + 洪泛 burst → 恰一次 stop → **零迟到帧** → 空闲洪泛 recorded → 恢复轮必达；§9 单发 abort 的洪泛升级）、`server_restart`（探针在播放中执行**运营者提供**的重启命令 → 连接必断（若轮次先完成即 `restart_no_disconnect` 失败——命令必须真实生效）→ 重连重试 → 恢复轮必达）。重复设备会话不重复探——`probe_e2e07.py --expect-duplicate-refusal` 既有证明（§8.1）。
+- **组合栈回归**（Node 套件，`pnpm test`）：模型挂起 → 网关超时清扫 `TIMED_OUT`（`sweepTimeouts` 语义：`RUNNING`/`CANCELLING` 超预算即终态）→ 设备恰一次 stop → **迟到流完全良性**（`fenceOutput` 对终态轮 `turn_terminal` 拒绝——迟到 delta/队列/audio_send 全部栅栏，无复活、无迟到帧）；取消洪泛每播放轮恰一次 fence；**真实 SQLite 栅栏存储**洪泛下重启单调（epoch 不重置不分叉、已取消轮不复活、post-fence 写入 `stale_turn_rejected`/`turn_terminal` 枚举拒绝、陈旧 TTS 队列 `droppedStale` 清空）。
+- **失败类别枚举**：`no_stt_echo` / `turn_incomplete` / `no_playback_start` / `no_stop_after_abort` / `late_frames_after_stop` / `recovery_no_audio` / `recovery_timeout` / `connection_lost` / `reconnect_timeout` / `restart_no_disconnect`。
+- **agent 运行时口径**：探针在 CI 的真实档（`LUMITHINK_GATEWAY_AGENT=real`）接线环内执行——故障注入穿越真实桥接重连路径（bridge 模块每轮 `ensure_connected`）。
+
+### 10.2 实机验收合同（物理面，归 runbook §14）
+
+- 真实设备的故障矩阵（Wi-Fi 断开/重连、WS 重绑、服务进程重启、DSH/ASR/TTS/LLM 不可用、取消洪泛、重复设备会话、OTA 失败/回退若已配置）、≥100 轮成人/合成对话（成功率/失败类别/P50/P95/恢复时间/费用）、安全核验（激活凭据轮换/安全 WSS-IPC/外发白名单/清理策略）与空环境重建/回滚/控制面留证只能实机产生，CI 与本文档**不代领、不标 PASS**（runbook §14.2–§14.6）；门限冻结纪律沿用 §12.3。
+- 未执行前 issue 保持 OPEN（#58/#59/#60 先例）；合成/Mock 指标不得冒充真模型/真实硬件性能。

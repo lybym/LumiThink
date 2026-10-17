@@ -1,6 +1,6 @@
 # 语音硬件和私有化接入选型
 
-> 更新：2026-10-17（§2.3 增补 issue #59） ｜ 状态：**目标硬件与语音平台已选；板级适配/实机验收未完成**  
+> 更新：2026-10-17（§2.4 增补 issue #61） ｜ 状态：**目标硬件与语音平台已选；板级适配/实机验收未完成**  
 > [总体架构](./ARCHITECTURE.md) · [实时语音设计](./VOICE_RUNTIME.md)
 
 ## 1. 当前确定选择
@@ -47,6 +47,11 @@
 - **服务端 AEC 代码事实（@ pinned commit，2026-10-17 逐字核验）**：hello `features.aec=true` → `conn.client_aec`（`core/handle/helloHandle.py`）→ 播放中（非 manual 模式）VAD 出人声即自动 `handleAbortMessage`（`core/handle/receiveAudioHandle.py`）；**WebSocket 直连路径的下行参考缓存仅用于 MQTT 网关分支，普通 WS 下行无服务端回声对消——回声对消只能来自设备侧 `CONFIG_USE_DEVICE_AEC`**（其效果验收归本节物理面）。
 - **物理面待实机**（[runbook §12](../deploy/xiaozhi/runbook.md) 的记录表/冻结门限/≥100 轮矩阵/对照证据）：固件 binary/commit/配置与 AEC 启用链路实录（含扬声器参考信号是否存在）、成人测试语音 ≥100 次播报中打断试验（成功率/误打断率/P50/P95/P99/失败类别）、AEC 回声抑制对照录音/转写、三时间点（人声触发→设备停播→服务端取消 ACK→whenIdle 停稳）实测、未达门限时按 runbook §12.8 走"阻止 Release 或显式按键降级"决定。**未执行前不得标注任何实机 PASS**；不创建 Tag/Release。
 - 不采购 XVF3800、不做远场阵列/板级改造（issue 非目标）；本 Issue 预期在实机验收完成前保持 OPEN（沿用 #58 先例）。
+
+### 2.4 E2E-11 实机可靠性回归状态（issue #61——自动化面闭环，物理项待实机）
+
+- **自动化面已由 CI 证明**（`e2e-07-gateway-wiring-gate.yml` + `r1-baseline-gate.yml`，E2E-11 起）：接线环可靠性回归探针 `deploy/xiaozhi/probe_e2e11.py`（真实 agent 运行时档：长稳轮次逐轮时延分解 `stt_echo_ms`/`first_sentence_ms`/`first_audio_ms`/`turn_total_ms` 候选基线 + `wifi_drop` 播放中硬断→重连→恢复轮必达 + `cancel_flood` abort 洪泛→停→零迟到帧→恢复轮必达 + `server_restart` 运营者重启命令播放中注入→连接必断→重连→恢复轮必达）；组合栈回归 `tests/server/e2e11-reliability.spec.ts`（模型挂起→超时清扫 TIMED_OUT→设备恰一次 stop→迟到流完全良性无复活；取消洪泛恰一次 fence/轮、零旧帧泄漏；真实 SQLite 栅栏存储洪泛下持久化/恢复一致性——epoch 单调、不复活、post-fence 写入拒绝）。执行与复现命令见 [runbook §14.1](../deploy/xiaozhi/runbook.md)。
+- **物理面待实机**（[runbook §14](../deploy/xiaozhi/runbook.md) 的故障注入矩阵 F1–F10/≥100 轮记录表/门限冻结/安全核验 S1–S5/重建-回滚-控制面留证）：真实设备 Wi-Fi 断开重连、WS 重绑、服务进程重启、DSH/ASR/TTS/LLM 不可用、取消洪泛、重复设备会话、OTA 失败/回退（若已配置）的实机注入与恢复实测；≥100 轮成人/合成对话（成功率/失败类别/P50/P95/恢复时间/费用）；唤醒→ASR→首安全短句→TTS 首音→播报的实机时延分解与停止响应；激活凭据轮换/安全 WSS-IPC/外发白名单/清理策略 fail-closed 核验；空环境重建、健康检查、受控回滚与生产控制面记录。**未执行前不得标注任何实机 PASS**；不创建 Tag/Release；本 Issue 预期在实机执行前保持 OPEN（沿用 #58/#59/#60 先例）。
 
 ## 3. 语音平台部署原则
 
