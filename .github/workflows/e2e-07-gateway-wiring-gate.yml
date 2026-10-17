@@ -260,10 +260,12 @@ jobs:
           set -a; source e2e07.env; set +a
           RUN_DIR="$(dirname "$LUMITHINK_GATEWAY_SOCKET")"
           # One guardian-issued synthetic binding (activation digest is a
-          # content-free test value, never a real credential).
+          # content-free test value, never a real credential). The deviceId
+          # MUST equal the probe's --device-id in the Adapter grammar
+          # (separator-stripped, lower-cased MAC).
           printf '%s\n' \
             '[' \
-            '  {"deviceId": "aabbccddeeff", "actorId": "act_parent0001", "conversationId": "conv_child0001", "activationDigest": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"}' \
+            '  {"deviceId": "aabbccddee07", "actorId": "act_parent0001", "conversationId": "conv_child0001", "activationDigest": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"}' \
             ']' > "$RUN_DIR/bindings.json"
           echo "LUMITHINK_GATEWAY_BINDINGS=$RUN_DIR/bindings.json" >> e2e07.env
           echo "LUMITHINK_GATEWAY_HOME=$RUN_DIR/dsh-home" >> e2e07.env

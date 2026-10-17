@@ -246,6 +246,13 @@ class _BridgeClient:
                 if waiter is not None:
                     waiter.put(frame)
                 continue
+            if kind == "device_hello_result":
+                if not frame.get("ok"):
+                    # Content-free enumerated rejection (device_unbound /
+                    # device_possession_denied / lease conflict) — visible
+                    # in the server log instead of a silent dead mapping.
+                    logger.bind(tag=TAG).warning(f"[lumi-bridge] device hello rejected by the gateway: {frame.get('code')}")
+                continue
             # Unknown kinds are ignored: the gateway parses fail-closed on
             # ITS side; the bridge never acts on unregistered frames.
 
