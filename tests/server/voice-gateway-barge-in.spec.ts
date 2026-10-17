@@ -252,6 +252,12 @@ test("barge-in trials: interrupt → stop effective → zero stale delivery → 
       );
 
       // 2. The barge-in: fence first (trusted epoch bump), then the stop.
+      // NO pump between the abort and the stop signal: on the REAL IPC
+      // transport the abort's routing (cancel + CANCELLED settlement) is
+      // asynchronous, and pumping the mock runtime before the cancel lands
+      // would complete the still-live attempt as COMPLETED instead. Both
+      // stop paths (the Adapter's playback-bound directive and the
+      // settlement tap on the CANCELLED event) are pump-independent.
       const abortIndex = fixture.outFrames.length;
       const abortSentAt = Date.now();
       await driver.send({ kind: "abort", connId: "conn-bi-main", xiaozhiSessionId: SESSION_ID, reason: "vad_detected" });
@@ -259,7 +265,6 @@ test("barge-in trials: interrupt → stop effective → zero stale delivery → 
         await waitFor(() => (fixture.wired.stack.stack.orchestrator.currentEpoch(sessionKey) ?? 0) > epochBeforeAbort),
         `trial ${trial}: the abort fenced (trusted epoch bump)`,
       );
-      fixture.wired.stack.stack.pumpRuntime(sessionKey, 20);
       assert.ok(
         await waitFor(() =>
           fixture.outFrames.some(
@@ -300,8 +305,17 @@ test("barge-in trials: interrupt → stop effective → zero stale delivery → 
       );
 
       // 4. Playback resume / next-round pickup: the recovery turn works.
+      // `turn_started` is the dispatch-complete signal (sent once
+      // turn.prompt + turn.stream both succeeded) — pumping before it on
+      // the REAL IPC transport races the still-in-flight dispatch and
+      // feeds an attempt that does not exist yet (no deltas would ever
+      // follow).
       await driver.send({ kind: "turn_prompt", connId: "conn-bi-main", xiaozhiSessionId: SESSION_ID, text: RECOVERY_TEXT });
       assert.ok(await waitFor(() => fixture.wired.adapterMetrics().asrFinalsAccepted >= 2 * trial), `trial ${trial}: the recovery prompt was accepted`);
+      assert.ok(
+        await waitFor(() => fixture.outFrames.some((entry) => entry.frame.kind === "turn_started" && (entry.frame.epoch as number) > epochBeforeAbort)),
+        `trial ${trial}: the recovery turn was dispatched`,
+      );
       fixture.wired.stack.stack.pumpRuntime(sessionKey, 20);
       assert.ok(
         await waitFor(() =>
@@ -426,8 +440,20 @@ test("a LATE abort (after several delivered sentences) still fences zero stale d
       await waitFor(() => (fixture.wired.stack.stack.orchestrator.currentEpoch(sessionKey) ?? 0) > epochBeforeAbort),
       "the late abort still fenced",
     );
-    fixture.wired.stack.stack.pumpRuntime(sessionKey, 20);
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // NO pump before the stop signal (the same IPC-transport race as the
+    // trial loop: pumping before the cancel lands would complete the
+    // still-live attempt as COMPLETED).
+    assert.ok(
+      await waitFor(() =>
+        fixture.outFrames.some(
+          (entry) =>
+            entry.frame.kind === "tts_end" &&
+            entry.frame.turnId === turnId &&
+            entry.frame.reason === "interrupted",
+        ),
+      ),
+      "the LATE abort's device-stop directive (tts_end interrupted) arrived",
+    );
     const after = fixture.outFrames.slice(abortIndex);
     assert.ok(
       !after.some((entry) => entry.frame.kind === "tts_sentence" && entry.frame.turnId === turnId),
@@ -437,8 +463,14 @@ test("a LATE abort (after several delivered sentences) still fences zero stale d
       await waitFor(() => fixture.settledTurns.some((entry) => entry.turnId === turnId && entry.finalState === "CANCELLED")),
       "the late-aborted turn settled CANCELLED",
     );
-    // Recovery on the new epoch.
+    // Recovery on the new epoch (turn_started = the dispatch-complete
+    // signal; pumping earlier races the in-flight dispatch on the REAL
+    // IPC transport).
     await driver.send({ kind: "turn_prompt", connId: "conn-bi-late", xiaozhiSessionId: SESSION_ID, text: RECOVERY_TEXT });
+    assert.ok(
+      await waitFor(() => fixture.outFrames.some((entry) => entry.frame.kind === "turn_started" && (entry.frame.epoch as number) > epochBeforeAbort)),
+      "the recovery turn was dispatched",
+    );
     fixture.wired.stack.stack.pumpRuntime(sessionKey, 20);
     assert.ok(
       await waitFor(() =>
