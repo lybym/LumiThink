@@ -200,7 +200,7 @@ python3 deploy/xiaozhi/gateway_bridge/install_bridge.py \
 #    负例：--expect-duplicate-refusal（重复连接拒绝）/ --expect-abort-fence（打断零迟到帧）。
 ```
 
-**运维要点**：内部传输仅限同宿主（UDS 0600，无 TCP 选项）；桥故障 = 当轮 fail-closed（无回答、无内置 LLM 回退），设备协议面不受影响；服务重启后桥随服务进程重连，网关自动失效旧租约并续接受信会话；监听/审计全内容无关，句文本只存在于瞬态帧路径与 TTS 队列。CI 证据：`e2e-07-gateway-wiring-gate.yml`（全链路 + 三个负例 + 重启续接）。**未验证边界**：真实固件设备（#E2E-08）、真实 ASR 音频上行、真实供应商组合档位。
+**运维要点**：内部传输仅限同宿主（UDS 0600，无 TCP 选项）；桥故障 = 当轮 fail-closed（无回答、无内置 LLM 回退），设备协议面不受影响；服务重启后桥随服务进程重连，网关自动失效旧租约并续接受信会话；监听/审计全内容无关，句文本只存在于瞬态帧路径与 TTS 队列。CI 证据：`e2e-07-gateway-wiring-gate.yml`（全链路 + 三个负例 + 重启续接 + **E2E-08 增量：real 档接线环**——同一钉死服务端以 `LUMITHINK_GATEWAY_AGENT=real` 重启网关宿主并重跑全链路，真实锁定版 DSH worker 子进程在环内应答；运营者复现 = 上述第 3 步加该 env 重启宿主即可，READY 行 `agent=real` 为选择确认）。启动器 `scripts/xiaozhi/gateway-host.ts` 由 scoped 项目 `scripts/xiaozhi/tsconfig.json` 静态类型检查（`pnpm run typecheck:gateway-host`，接入同一 workflow）。**未验证边界**：真实固件设备（#E2E-08，§11）、真实 ASR 音频上行、真实供应商组合档位。
 
 ## 4. gateway-minimal 档位：明确的"禁用"语义（AC 2）
 
@@ -278,3 +278,73 @@ python3 deploy/xiaozhi/gateway_bridge/install_bridge.py \
 - **OTA 差异（需配置项）**：v2.5.2 固件编译期默认 OTA URL 为 `https://api.tenclass.net/xiaozhi/ota/`（`main/Kconfig.projbuild`）。指向私有服务端 = 构建期覆盖 `OTA_URL` 为 `https://<私有域名>/xiaozhi/ota/`——**本 issue 不改写固件**，该步骤与烧录验证归 #E2E-08。
 - **激活配置差异（如实记录）**：v2.5.2 设备侧 OTA 契约含可选 `activation{code,challenge}` 对象（xiaozhi.me 的六位码/HMAC 挑战激活流，`Activation-Version: 1/2` 头区分）；**钉死的服务端单模块 OTA 只返回 `firmware` + `websocket`（含 HMAC token），不返回 `activation` 对象**——私有部署不依赖、也不复现 xiaozhi.me 激活链路，设备鉴权走 token（§3）。该差异对协议面（hello/abort）无影响，已在 VOICE_GATEWAY_PROTOCOL §3 兼容矩阵语义内（设备激活/OTA 一行标注"未实机验证"）。
 - **未验证项（不提前宣称）**：盒内实际烧录版本串、编译期 OTA_URL 实际值、设备 `Activation-Version` 头形态、实机 hello/abort/OTA 行为——记入 #E2E-08 checklist（对照 VOICE_GATEWAY_PROTOCOL §6 既有清单）。
+
+## 11. E2E-08 实机接入（issue #58）：设备验收 runbook
+
+> 口径先行：本节是**运营者执行脚本 + 记录合同**。可自动化面（真实 DSH 进程接线环、未绑定拒绝、服务端重启续接、启动器静态检查）已由 CI 证明（§11.1）；**真实设备项（DoD 1/2 的物理面）必须由本节实机执行留证，CI 与文档不代领、不标 PASS**。不创建 Tag/Release；Mock/合成验证不标注为真实设备验收。
+
+### 11.1 已由 CI 证明的自动化面（E2E-08 起，`e2e-07-gateway-wiring-gate.yml`）
+
+- **真实 DSH 进程在接线环内**：同一钉死服务端以 `LUMITHINK_GATEWAY_AGENT=real` 换档重启网关宿主后，**10 连轮**全链路（hello→session→detect→stt→真实 worker 推理→Output Gate 句子→TTS→真实 Opus 下行→stop）由锁定版 DSH worker 子进程应答；装配/`canSpawnPipedChild` 守卫/存活记账全部在环内执行；READY 行 `agent=real`。
+- **未绑定/模拟盗用无法接入（DoD 3 自动化面）**：有效 token 但无监护人绑定的设备在服务端边缘被拒（`device_unbound` → 连接关闭）；坏令牌/伪造 session/重复连接负例既有（wiring 套件 + CI 探针）；设备凭证 = 共享密钥 HMAC 签名 + 新鲜度 + 绑定记录，MAC 单独无价值（`verifyDeviceAuthorization` 逐字复算，契约级专测）。
+- **服务端重启 → 重连 → 同一受信会话续接**（既有步骤）；网关宿主换档即运营者 §3.7 real 档的机器复现。
+- 启动器 `scripts/xiaozhi/gateway-host.ts` scoped 静态类型检查（`pnpm run typecheck:gateway-host`）。
+- **注入面回归守卫**：`tests/server/voice-gateway-wiring.spec.ts` "injected agentPort takes the Bridge's upstream seat"——`agentPort` 的组合层转发链断裂（#57 review P1-1 发现的静默丢弃缺陷已修复）再发生即测试失败。
+
+### 11.2 设备侧记录表（实施范围 1：核对并记录；不强制换官方 v2.5.2 原版）
+
+实机开始前逐项记录（留存于运营者证据目录，**不入 Git** 的是串口日志原文；仅内容无关事实可入档）：
+
+| 记录项 | 取得方式 | 备注 |
+| --- | --- | --- |
+| 固件版本串 | 设备串口启动日志（115200 baud）+ `hello` 协商帧 | 预期 `v2.5.2_nulllab-ai-vox-v3`（§10 差异记录） |
+| 来源 SHA / 构建配置 | 固件提供方的构建记录；`78/xiaozhi-esp32` tag `v2.5.2` 树内板级 | 官方基线 + 官方树内 board，非协议分叉 |
+| ESP-IDF 版本 | 构建记录 / 启动日志 | 与构建方核对 |
+| 麦克风/扬声器/编解码 | 板级 `config.h`（ES8311，I2S 24 kHz）+ 实听 | ML307 4G 备用网络（默认 WiFi） |
+| AEC 配置 | `CONFIG_USE_DEVICE_AEC`（nulllab 默认开） | 效果验收归 E2E-09（DoD 4） |
+| 音频协议/Opus 帧时长 | 设备 hello `audio_params` 与服务端日志 | 16 kHz 上行/24 kHz 板级输出，帧时长实记 |
+| 串口日志 | 首次激活 + 一次完整对话全程 | 时间戳与 §11.4 轮次记录对齐 |
+
+### 11.3 固件指向私有服务端（实施范围 2）
+
+1. **构建期覆盖 OTA URL**（v2.5.2 编译期默认 `https://api.tenclass.net/xiaozhi/ota/`，§10）：`idf.py menuconfig` 改 `OTA_URL` 为 `https://<私有域名>/xiaozhi/ota/`（或构建参数等价覆盖）→ 重编译。**不改任何协议代码**。
+2. **烧录**：`idf.py flash`（或 esptool 等价）；烧录前后留存原厂 bin 以便回退（§11.6）。
+3. **激活/鉴权**：设备 POST OTA → 钉死服务端返回 `firmware` + `websocket`（HMAC token）→ 设备携 token 连 WSS。**全程不出现 xiaozhi.me 登录**（私有部署不返回 `activation` 对象，§10；`Activation-Version` 头形态如实记录）。
+4. **重启自动重连验证（DoD 2 之一）**：断电重启 → 串口日志 hello 成功 → 服务端连接日志出现同一 Device-Id；连续三次重启均自动重连，留日志。
+
+### 11.4 实机闭环与稳定性（实施范围 3 + DoD 1/2 物理面）
+
+- **闭环**：近场唤醒（或按键启动）→ 收音 → ASR → 真实 DSH 推理 → Safety → 真实 TTS → 播放；记录音量、清晰度、2–3 米近场表现。
+- **10 轮多轮对话（DoD 1）**：成人测试语音逐轮提问，**不得**后台补发文本/人工播报；逐轮记录：轮次、触发方式、成功/失败、首音时延、端到端时延、异常备注。工具 = 串口日志时间戳 + 录屏（内容脱敏由留存方负责）。
+- **故障恢复（DoD 2）**：冷启动、重连、再次配网、断网恢复各至少一次，留存客观日志/录屏/脱敏 trace；同一固件 + 同一服务器版本可复现（记录 `deploy/xiaozhi/version.env` 与服务端 git SHA）。
+- **首批仅成人测试语音**——儿童真实语音不进任何调试环（数据闸门不变，ADR-0009/0010 同口径）。
+
+### 11.5 服务端侧可复现实验脚本（与实机记录并行的机器面）
+
+```bash
+# 真实 DSH worker 应答的 10 连轮（协议模拟设备；同 CI real 档步骤）
+sudo systemctl start xiaozhi-server   # §2 部署；gateway-bridge 档位
+LUMITHINK_GATEWAY_AGENT=real node --experimental-strip-types scripts/xiaozhi/gateway-host.ts &
+# …就绪行 GATEWAY-HOST READY agent=real 后：
+for round in 01 02 03 04 05 06 07 08 09 10; do
+  python3 deploy/xiaozhi/probe_e2e07.py --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+    --device-id aa:bb:cc:dd:ee:07 --client-id "exp10-r${round}" \
+    --auth-key "$XIAOZHI_AUTH_KEY" --turn-timeout 90
+done
+```
+
+### 11.6 回退与故障恢复（保留方法）
+
+1. **固件回退**：烧录 §11.3 步 2 留存的原厂 bin（esptool write_flash）；或重刷官方基线构建（OTA URL 指回官方）。回退后设备回到原服务端语义，与 LumiThink 部署无关。
+2. **服务端侧回退**：§8（版本/配置/停用/凭证应急）。
+3. **网络故障**：设备侧按协议自动重连（§11.3 步 4 已验证）；服务端侧 `healthcheck.sh` + §6 故障表定位。
+4. **网关宿主故障**：桥当轮 fail-closed（无内置回退）；`LUMITHINK_GATEWAY_AGENT` 缺省即回 synthetic 档（证据口径随之变化，须在记录中注明）。
+
+### 11.7 DoD 口径对照（如实声明）
+
+| DoD | 自动化面（本 PR 已证） | 物理面（本节执行后留证） |
+| --- | --- | --- |
+| 1. 实机 10 轮真实 LLM 语音回答 | real 档接线环 **10 连轮**（协议模拟设备；§11.5 可复现） | §11.4 实机 10 轮逐轮记录——**未执行前不标 PASS** |
+| 2. 冷启动/重连/再配网/断网恢复客观留证 | 服务端重启续接 + 租约/会话语义（既有 CI） | §11.3 步 4 + §11.4 故障恢复记录 |
+| 3. 监护人绑定有效；未绑定/盗用无法接入；无凭据暴露 | 未绑定负例探针（新）+ 鉴权映射套件 + 凭证非 MAC 派生专测 | 实机复核随 §11.4 |
+| 4. 不引入 XVF3800/四麦/新板级；AEC/打断归 E2E-09 | 本 PR 零硬件面改动（文档记录） | AEC 效果实测归 E2E-09 |

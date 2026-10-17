@@ -16,10 +16,15 @@
  *
  * NEITHER runtime is the pinned server's built-in AI second path (that is
  * structurally unreachable: the bridge module is the ONLY selected LLM).
- * The real-runtime CI proof is the E2E-02 gate (poc/dsh-child, same HEAD).
+ * The real profile IS wired-loop proven in CI since E2E-08 (issue #58): the
+ * wiring-e2e job swaps the host to `LUMITHINK_GATEWAY_AGENT=real` behind the
+ * SAME pinned server and re-runs the full loop — the REAL locked-version DSH
+ * worker child process answers inside the wired stack (the E2E-02 gate
+ * remains the worker-mechanics bisection anchor, same HEAD).
  *
- * Readiness line: prints `GATEWAY-HOST READY endpoint=<uds-path>` once the
- * protected transport is listening; exits non-zero on any boot failure.
+ * Readiness line: prints `GATEWAY-HOST READY endpoint=<uds-path>
+ * agent=<synthetic|real>` once the protected transport is listening; exits
+ * non-zero on any boot failure.
  * Secrets arrive via env, never argv; nothing secret is ever logged.
  *
  * Env contract:
@@ -31,13 +36,13 @@
  *   LUMITHINK_GATEWAY_AGENT         `synthetic` (default) | `real`
  *   LUMITHINK_GATEWAY_HOME          scratch dir for the DSH home (`real`)
  *
- * TYPECHECK NOTE: this launcher imports `poc/dsh-child` sources and is
- * therefore excluded from the ROOT tsconfig — `poc/dsh-child` is an
- * isolated package with its own toolchain and @types resolution
- * (pnpm-workspace.yaml: "poc/dsh-child ... must stay fully isolated").
- * The launcher is validated at RUNTIME by the e2e-07 CI wiring job (boot
- * readiness is a hard gate) and by `pnpm --dir poc/dsh-child run
- * typecheck` for the imported poc surface.
+ * TYPECHECK NOTE (updated by E2E-08, issue #58): this launcher imports
+ * `poc/dsh-child` sources; it is typechecked by the scoped project
+ * `scripts/xiaozhi/tsconfig.json` (extends the poc toolchain so the poc
+ * types resolve) wired into CI as `pnpm run typecheck:gateway-host`
+ * (e2e-07-gateway-wiring-gate.yml wiring-e2e job). The ROOT tsconfig still
+ * excludes this path (its program must stay poc-free), and `poc/dsh-child`
+ * is an isolated package with its own toolchain and @types resolution.
  */
 
 import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -185,6 +190,16 @@ async function main(): Promise<void> {
       console.log(
         `[gateway-host] gate metrics deltasFenced=${gate.deltasFenced} ttsAdmissions=${gate.ttsAdmissions} ttsBlocked=${gate.ttsBlockedSentences} deliveryFailures=${gate.sentenceDeliveryFailures}`,
       );
+      // E2E-08 (issue #58) real-profile evidence: a settled turn in real
+      // mode must have been served by a LIVE locked-version DSH worker
+      // child process (content-free; session keys are synthetic).
+      if (agentRuntime === "real") {
+        const workers = wired.stack
+          .mappingSnapshot()
+          .map((entry) => `${entry.sessionKey}:${(agentPort as RealCordisAgentPort).hasLiveWorker(entry.sessionKey) ? "live" : "dead"}`)
+          .join(",");
+        console.log(`[gateway-host] real agent workers ${workers}`);
+      }
       return;
     }
     console.log(`[gateway-host] stack event ${frame.name}`);
@@ -266,7 +281,12 @@ async function main(): Promise<void> {
 
   await wired.start();
 
-  console.log(`GATEWAY-HOST READY endpoint=${wired.endpoint.path}`);
+  // The endpoint union mirrors the protected transport (UDS production /
+  // named pipe on Windows dev): print the actual endpoint label — a naked
+  // `.path` access would not typecheck on the union (E2E-08 scoped
+  // typecheck, issue #58).
+  const endpointLabel = wired.endpoint.kind === "uds" ? wired.endpoint.path : `\\\\.\\pipe\\${wired.endpoint.name}`;
+  console.log(`GATEWAY-HOST READY endpoint=${endpointLabel} agent=${agentRuntime}`);
   const shutdown = async () => {
     try {
       await wired.stop();

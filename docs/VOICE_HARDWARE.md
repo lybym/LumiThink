@@ -35,6 +35,12 @@
 - 激活差异：v2.5.2 设备侧 OTA 契约含可选 `activation{code,challenge}`（xiaozhi.me 六位码/HMAC 挑战流）；钉死的自建服务端单模块 OTA 只返回 `firmware` + `websocket`（HMAC token），**不返回 `activation` 对象**——私有部署不走 xiaozhi.me 激活链路，设备鉴权走 token。
 - 未验证项（不提前宣称）：盒内实际烧录版本串、编译期 OTA_URL 实际值、`Activation-Version` 头形态、实机行为——归 #E2E-08 checklist。
 
+### 2.2 E2E-08 实机接入状态（issue #58——自动化面闭环，物理项待实机）
+
+- **自动化面已由 CI 证明**（`e2e-07-gateway-wiring-gate.yml`，E2E-08 起）：真实锁定版 DSH worker 子进程在接线环内应答 10 连轮全链路（`LUMITHINK_GATEWAY_AGENT=real` 换档，#57 review P1-1 清零）；有效 token 但无监护人绑定的设备在服务端边缘被拒（DoD 3 自动化面）；服务端重启续接；网关宿主启动器 scoped 静态类型检查（P1-2 清零）。执行与复现命令见 [runbook §11](../deploy/xiaozhi/runbook.md)。
+- **物理面待实机**（runbook §11.2–§11.4 的记录表与实验协议）：盒内固件版本串/来源 SHA/ESP-IDF/AEC 配置/Opus 帧时长实记、构建期 `OTA_URL` 覆盖 + 烧录 + 激活、重启自动重连、近场唤醒→收音→ASR→真实 DSH→Safety→真实 TTS→播放闭环、成人测试语音 10 轮逐轮记录、冷启动/再配网/断网恢复留证。**未执行前不得标注任何实机 PASS**；不创建 Tag/Release。
+- 不引入 XVF3800/四麦阵列/新板级移植；现有固件 AEC 的效果验收与打断可靠性归 E2E-09（issue DoD 4）。
+
 ## 3. 语音平台部署原则
 
 初期一台 Linux 云服务器，优先小智**单模块 Server** 加独立 LumiThink Orchestrator、DSH Bridge Worker；可由 Docker Compose/受控进程编排。VAD/ASR/TTS 由小智处理，领域 Agent 和记忆由 LumiThink 管理；不引入第二个 Agent 的工具或记忆真相来源。

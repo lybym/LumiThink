@@ -25,6 +25,15 @@ name: E2E-07 gateway wiring gate
 #          server edge), first connection unaffected;
 #        - mid-playback abort → tts stop with ZERO late frames;
 #        - server restart → reconnect → same trusted session continues.
+#      Then — E2E-08 (issue #58), the #57-review P1-1 clearance: the SAME
+#      running pinned server swaps the gateway host to the REAL agent
+#      runtime (LUMITHINK_GATEWAY_AGENT=real) and re-runs the full loop —
+#      the locked-version DSH worker child process (poc/dsh-child) answers
+#      inside the wired stack (assembly + piped-child guard + live-worker
+#      accounting proven in-loop; the bridge module reconnects per turn).
+#      The launcher itself is scoped-typechecked in this job (issue #58
+#      P1-2 clearance: scripts/xiaozhi/gateway-host.ts used to sit outside
+#      every static gate).
 # No real credentials, no external egress (gateway-bridge tier: ASR stays
 # the loopback placeholder, TTS a loopback stub, the LLM path is the local
 # protected transport; real-device acceptance stays with #E2E-08).
@@ -39,6 +48,7 @@ on:
       - 'scripts/xiaozhi/**'
       - 'tests/server/voice-gateway-*.spec.ts'
       - 'tests/domain/voice/bridge/stream-gate-sink.spec.ts'
+      - 'poc/dsh-child/src/**'
       - '.github/workflows/e2e-07-gateway-wiring-gate.yml'
   push:
     branches: [main]
@@ -51,6 +61,7 @@ on:
       - 'scripts/xiaozhi/**'
       - 'tests/server/voice-gateway-*.spec.ts'
       - 'tests/domain/voice/bridge/stream-gate-sink.spec.ts'
+      - 'poc/dsh-child/src/**'
       - '.github/workflows/e2e-07-gateway-wiring-gate.yml'
   workflow_dispatch:
 
@@ -224,6 +235,18 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm --dir poc/dsh-child install --frozen-lockfile
 
+      - name: Scoped static typecheck of the gateway host (issue 58, P1-2 clearance)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The CI entry point imports poc/dsh-child sources: the ROOT
+          # tsconfig excludes it and the poc project does not include it,
+          # so before E2E-08 it sat outside EVERY static gate. This scoped
+          # project (scripts/xiaozhi/tsconfig.json) extends the poc
+          # toolchain so the poc types resolve — the launcher, its real
+          # branch, the watchdog and the shutdown handler are all checked.
+          pnpm run typecheck:gateway-host
+
       - name: Node-side wiring regression (real UDS transport + real Bridge IPC)
         shell: bash
         run: |
@@ -383,6 +406,20 @@ jobs:
             --auth-key "${XIAOZHI_AUTH_KEY}" \
             --expect-duplicate-refusal
 
+      - name: Negative — unbound device cannot open a child session (issue 58 DoD 3)
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source e2e07.env; set +a
+          # Device ee:09 carries a VALID token but NO guardian binding: the
+          # gateway must refuse it (device_unbound) and close the device at
+          # the server edge — possession by MAC alone opens nothing.
+          "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" deploy/xiaozhi/probe_e2e07.py \
+            --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+            --device-id aa:bb:cc:dd:ee:09 --client-id e2e08-unbound \
+            --auth-key "${XIAOZHI_AUTH_KEY}" \
+            --expect-unbound-refusal
+
       - name: Mid-playback abort fences with zero late frames
         shell: bash
         run: |
@@ -433,11 +470,89 @@ jobs:
           fi
           echo "gateway-host log content-free OK"
 
+      - name: REAL agent runtime in the wired loop (issue 58, 57-review P1-1 clearance)
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source e2e07.env; set +a
+          # Swap the agent runtime BEHIND the same running pinned server and
+          # the SAME UDS path: the bridge module reconnects per turn
+          # (ensure_connected), so this full loop runs through the REAL
+          # locked-version DSH worker child process inside the wired stack —
+          # materializeBridgeProfileInto + createRealCordisAgentPort
+          # assembly, the piped-child guard and the worker liveness
+          # accounting all execute here (previously synthetic-only:
+          # the #57 review P1-1 zero-coverage gap).
+          kill -TERM "$(cat gateway-host.pid)" 2>/dev/null || true
+          for _ in $(seq 1 20); do
+            kill -0 "$(cat gateway-host.pid)" 2>/dev/null || break
+            sleep 1
+          done
+          if kill -0 "$(cat gateway-host.pid)" 2>/dev/null; then
+            kill -KILL "$(cat gateway-host.pid)" 2>/dev/null || true
+          fi
+          LUMITHINK_GATEWAY_AGENT=real node --experimental-strip-types scripts/xiaozhi/gateway-host.ts > gateway-host-real.log 2>&1 &
+          echo $! > gateway-host-real.pid
+          for _ in $(seq 1 60); do
+            if grep -q "GATEWAY-HOST READY" gateway-host-real.log 2>/dev/null; then
+              break
+            fi
+            if ! kill -0 "$(cat gateway-host-real.pid)" 2>/dev/null; then
+              echo "::error::real-agent gateway host exited during boot"; cat gateway-host-real.log; exit 1
+            fi
+            sleep 1
+          done
+          grep -q "GATEWAY-HOST READY.*agent=real" gateway-host-real.log \
+            || { echo "::error::real agent runtime not ready/selected"; cat gateway-host-real.log; exit 1; }
+          test -S "$LUMITHINK_GATEWAY_SOCKET" || { echo "::error::protected UDS endpoint missing (real swap)"; exit 1; }
+          stat -c '%a' "$LUMITHINK_GATEWAY_SOCKET" | grep -qx '600' || { echo "::error::protected UDS endpoint is not 0600 (real swap)"; exit 1; }
+          # E2E-08 (issue #58) AC1's automated proxy: TEN consecutive wired
+          # rounds answered by the REAL locked-version DSH worker (the
+          # issue's device-side 10-round loop stays a physical acceptance
+          # item; each round opens a fresh device WebSocket, so the
+          # lease-release + session-resume path is exercised every round).
+          # A timeout is a wiring failure, never a fallback; the first
+          # round's bounded retry absorbs the bridge's stale-socket
+          # reconnect race after the host swap.
+          for round in 1 2 3 4 5 6 7 8 9 10; do
+            round_id=$(printf '%02d' "$round")
+            ok=""
+            max_attempts=3
+            if [ "$round" = "1" ]; then max_attempts=5; fi
+            for attempt in $(seq 1 "$max_attempts"); do
+              if "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" deploy/xiaozhi/probe_e2e07.py \
+                --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+                --device-id aa:bb:cc:dd:ee:07 --client-id "e2e08-real-r${round_id}" \
+                --auth-key "${XIAOZHI_AUTH_KEY}" \
+                --turn-timeout 90 > "/tmp/e2e08-real-r${round_id}.log" 2>&1; then
+                ok="1"
+                break
+              fi
+              tail -5 "/tmp/e2e08-real-r${round_id}.log" || true
+              sleep 3
+            done
+            cat "/tmp/e2e08-real-r${round_id}.log"
+            [ -n "${ok}" ] || { echo "::error::real-agent wired round ${round_id} failed"; exit 1; }
+          done
+          grep -q "real agent workers .*live" gateway-host-real.log \
+            || { echo "::error::no live real DSH worker observed at settlement"; exit 1; }
+
+      - name: Real-agent evidence — host log stays content-free
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q "我们来玩个游戏好不好" gateway-host-real.log 2>/dev/null; then
+            echo "::error::transcript residue in the real-agent gateway host log"
+            exit 1
+          fi
+          echo "real-agent gateway-host log content-free OK"
+
       - name: Failure evidence (small tails only)
         if: failure()
         shell: bash
         run: |
           tail -40 gateway-host.log 2>/dev/null || true
+          tail -40 gateway-host-real.log 2>/dev/null || true
           tail -40 "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server/wired-server.log" 2>/dev/null || true
           tail -40 "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server/wired-server2.log" 2>/dev/null || true
           tail -20 tts-stub.log 2>/dev/null || true
