@@ -227,7 +227,7 @@ class _BridgeClient:
             try:
                 frame = self._recv_frame_on(sock, timeout_s=3600.0)
             except (BridgeTransportError, OSError, json.JSONDecodeError, struct.error) as exc:
-                logger.bind(tag=TAG).warning(f"[lumi-bridge] gateway reader stopped: {exc.__class__.__name__} (in-flight turns fail closed; the next turn reconnects)")
+                logger.bind(tag=TAG).warning(f"[lumi-bridge] gateway reader stopped: {exc.__class__.__name__}: {exc} (in-flight turns fail closed; the next turn reconnects)")
                 self.close()
                 self._fail_all_waiters()
                 return

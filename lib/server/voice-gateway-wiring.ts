@@ -457,9 +457,12 @@ export function createWiredVoiceGateway(options: WiredVoiceGatewayOptions): Wire
   transport.onBridgeAuthenticated(announceServerRestart);
   transport.onBridgeClosed(announceServerRestart);
   transport.onFrame((frame) => {
-    void routeFrame(frame).catch(() => {
-      // A routing fault must never crash the transport; the failure stays
-      // observable through the Adapter's enumerated rejection counters.
+    void routeFrame(frame).catch((error: unknown) => {
+      // A routing fault must never crash the transport, but it must be
+      // DIAGNOSABLE: log the frame kind + error class only (content-free).
+      console.error(
+        `[gateway-wiring] frame routing failed kind=${frame.kind} error=${error instanceof Error ? `${error.message}` : String(error)}`,
+      );
     });
   });
 

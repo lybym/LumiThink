@@ -464,6 +464,9 @@ export function createVoiceGatewayInternalServer(options: GatewayInternalServerO
     socket.on("data", (chunk: Buffer) => {
       const outcome = decoder.push(chunk);
       if (outcome.oversized || outcome.malformed) {
+        // Content-free diagnostics: a destroyed connection must be
+        // explainable from the host log.
+        console.error(`[gateway-internal] connection destroyed: ${outcome.oversized ? "oversize" : "malformed"} frame`);
         destroySocket(socket);
         return;
       }
@@ -472,11 +475,13 @@ export function createVoiceGatewayInternalServer(options: GatewayInternalServerO
           let auth: { readonly token: string };
           try {
             auth = parseGatewayInternalAuthFrame(raw);
-          } catch {
+          } catch (error) {
+            console.error(`[gateway-internal] auth frame rejected: ${error instanceof Error ? error.message : String(error)}`);
             destroySocket(socket);
             return;
           }
           if (!tokensEqual(auth.token, options.authToken)) {
+            console.error("[gateway-internal] auth token mismatch");
             destroySocket(socket);
             return;
           }
@@ -504,7 +509,8 @@ export function createVoiceGatewayInternalServer(options: GatewayInternalServerO
         try {
           const frame = parseGatewayInternalInboundFrame(raw);
           frameHandler?.(frame);
-        } catch {
+        } catch (error) {
+          console.error(`[gateway-internal] inbound frame rejected: ${error instanceof Error ? error.message : String(error)}`);
           destroySocket(socket);
           return;
         }
