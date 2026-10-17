@@ -101,6 +101,8 @@
 5. 有人工审核的情绪/学习双专业合成测试用例，覆盖适用、无效、拒绝、危机升级和过度介入；每次路由追踪到已核验 Evidence Card。
 6. 能完成偏好记忆“确认 → 跨会话引用 → 更正 → 删除”闭环，且不需要真实儿童数据。
 
+> **R1 发布 Gate 收口核验（Epic #11 关闭记录，2026-10-17）**：Epic #11 的 8 项发布 Gate 在 main `05eff7d` 全量核验通过——16 张 R1 子 Issue（#12–#27）均随 Feature PR 合并关闭，逐 Gate 证据映射与收口时点本地/CI 验证记录见 [R1_EPIC_CLOSURE](./R1_EPIC_CLOSURE.md)。收口范围仍限于合成数据与 Mock/受审真实 Provider；实机/人工验收面归 Epic #50（#58–#62，runbook §11–§15），不含在本记录内。Epic #11 随收口记录 PR 合并关闭；后续路线见 §4。
+>
 > **E2E-12 首版产品验收门禁已组装（issue #62）**：发布候选 **1.0.0-rc.1**（package.json ↔ [release manifest](../release/release-manifest.json) ↔ [验收注册表](../release/release-candidate.json) 三方一致，CI 强制）；冻结首版产品范围（现有 ESP32-S3 + `v2.5.2_nulllab-ai-vox-v3` AEC/打断 + 私有化小智 + 真实 DSH/LLM/ASR/TTS + 双 Skill + 家长 Web；排除 XVF3800/四麦改版与真实儿童数据联调）；逐条登记验收证据（自动化面由既有门禁 CI 持续证明，物理/人工面按 [runbook §15](../deploy/xiaozhi/runbook.md) 留证）；发行说明与已知限制见 [RELEASE_NOTES](./RELEASE_NOTES.md)。**独立验收人六维 Go/No-Go（技术安全/产品体验/隐私授权/专业 Skill/运维/回退）与用户显式发版批准为人工面，未执行前 issue 保持 OPEN；Go + 用户批准前不创建 Tag/Release**（注册表 invariant 由 CI fail-closed 强制）。
 >
 > **E2E MVP 进度（issue #61 / E2E-11）**：实机可靠性回归的自动化面已交付（接线环故障注入探针 `probe_e2e11.py`——真实 agent 档长稳轮次逐轮时延分解候选基线 + `wifi_drop`/`cancel_flood`/`server_restart` 硬不变量；组合栈 `tests/server/e2e11-reliability.spec.ts`——模型挂起超时清扫与迟到流良性、取消洪泛恰一次 fence/零泄漏、真实 SQLite 栅栏存储洪泛下持久化/恢复一致性；既有 #48 whenIdle 有界超时/#49 server_restart 鉴权清理/tts.clear epoch/真 IPC 联测专项回归复核在列，见 [deploy/xiaozhi runbook §14.1](../deploy/xiaozhi/runbook.md)）。**实机故障注入矩阵 F1–F10、≥100 轮成人/合成对话实测（成功率/失败类别/P50/P95/恢复时间/费用）、安全核验 S1–S5 与空环境重建/回滚/控制面留证**由运营者按 [runbook §14](../deploy/xiaozhi/runbook.md) 执行留证（#58/#59/#60 同模式），未执行前 issue 保持 OPEN，不代领 PASS。
