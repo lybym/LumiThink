@@ -356,7 +356,8 @@ jobs:
           "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" deploy/xiaozhi/probe_e2e07.py \
             --url ws://127.0.0.1:8000/xiaozhi/v1/ \
             --device-id aa:bb:cc:dd:ee:07 --client-id e2e07-probe \
-            --auth-key "${XIAOZHI_AUTH_KEY}"
+            --auth-key "${XIAOZHI_AUTH_KEY}" \
+            --turn-timeout 90
 
       - name: Negative — duplicate device connection refused at the server edge
         shell: bash

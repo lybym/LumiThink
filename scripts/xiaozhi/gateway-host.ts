@@ -107,7 +107,7 @@ async function main(): Promise<void> {
   await materializeBridgeProfileInto(dshHome);
   const mock = new MockMessagesServer({ fixedTurnTexts: FIXED_TURN_TEXTS });
   const mockBaseUrl = await mock.listen();
-  const agentPort = createRealCordisAgentPort({ dshHome, mockBaseUrl });
+  const agentPort = createRealCordisAgentPort({ dshHome, mockBaseUrl, childBootTimeoutMs: 20_000 });
 
   const wired = createWiredVoiceGateway({
     bindings,
