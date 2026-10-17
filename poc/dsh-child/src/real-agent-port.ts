@@ -55,6 +55,18 @@ import type {
 } from '../../../lib/domain/voice/bridge/agent-port.ts'
 import { buildChildEnv } from './child-env.ts'
 
+/**
+ * E2E-08 (issue #58): per-PORT-PROCESS boot epoch. The worker's DSH-side
+ * session identity must be fresh per rebuild AND per port boot: when the
+ * gateway host restarts against a PERSISTENT dshHome (operator deployment),
+ * the DSH runtime reloads its persisted sessions and a counter-only `#w<n>`
+ * suffix re-mints identities the persisted store already holds (observed
+ * live: worker_error "session ... already exists" on the first create after
+ * a gateway restart). The boot epoch salts every minted id so identities can
+ * never collide with a previous port process's persisted store.
+ */
+const PORT_BOOT_EPOCH = randomBytes(4).toString('hex')
+
 // ---------------------------------------------------------------------------
 // Profile materialization
 // ---------------------------------------------------------------------------
@@ -813,12 +825,13 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       // Register the agent inside the child BEFORE any followup can arrive:
       // the worker processes control requests strictly in order, so a
       // runPrompt issued right after this call still handles after `create`.
-      // The DSH-side session identity is FRESH per worker rebuild: a rebuilt
-      // worker must not collide with the persisted identity of the previous
-      // worker's runtime (docs/VOICE_RUNTIME.md §7 — recovery binds the
+      // The DSH-side session identity is FRESH per worker rebuild AND per
+      // port boot (PORT_BOOT_EPOCH above): a rebuilt worker — or a gateway
+      // restart against a persistent dshHome — must never collide with a
+      // persisted identity (docs/VOICE_RUNTIME.md §7 — recovery binds the
       // confirmed logical session only, replays nothing).
       workerCounter += 1
-      const dshSessionId = `${sessionKey}#w${workerCounter}`
+      const dshSessionId = `${sessionKey}#w${workerCounter}e${PORT_BOOT_EPOCH}`
       state.dshSessionId = dshSessionId
       void request(state, 'create', { sessionId: dshSessionId }).then((reply) => {
         if (!reply.ok && !state.handle.state.crashed && !state.handle.state.disposed) {

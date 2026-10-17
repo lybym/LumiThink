@@ -50,6 +50,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { createWiredVoiceGateway, type WiredVoiceGateway } from "../../lib/server/voice-gateway-wiring.ts";
+import { createGatewayModelRoute, type GatewayModelRoute } from "../../lib/server/gateway-model-route.ts";
 import type { MockGenerationScript } from "../../lib/domain/voice/bridge/mock-cordis.ts";
 import type { BridgeAgentPort } from "../../lib/domain/voice/bridge/agent-port.ts";
 import { MockMessagesServer } from "../../poc/dsh-child/src/mock-model.ts";
@@ -106,6 +107,24 @@ async function main(): Promise<void> {
     }
   }
 
+  // ---- model route (E2E-08, issue #58): synthetic mock (default, CI) or the
+  // operator opt-in REAL provider route (LUMITHINK_MODEL_ROUTE=real + the
+  // full LUMITHINK_REAL_PROVIDER_* record, E2E-03 contract). The REAL route
+  // starts the loopback gateway egress proxy and overrides the worker's model
+  // base URL via workerEnv (the pinned profile prefers
+  // DSH_BRIDGE_MODEL_BASE_URL over the synthetic mock); the vendor credential
+  // never leaves the host-side keySource closure.
+  let modelRoute: GatewayModelRoute;
+  try {
+    modelRoute = await createGatewayModelRoute(process.env);
+  } catch (error) {
+    console.error(`[gateway-host] model route failed closed: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+  if (modelRoute.mode === "real") {
+    console.log(`[gateway-host] model route mode=real provider=${modelRoute.providerId} proxy=loopback`);
+  }
+
   // ---- agent runtime selection -----------------------------------------
   const agentRuntime = process.env.LUMITHINK_GATEWAY_AGENT ?? "synthetic";
   let agentPort: BridgeAgentPort | undefined;
@@ -126,6 +145,13 @@ async function main(): Promise<void> {
       dshHome,
       mockBaseUrl,
       childBootTimeoutMs: 20_000,
+      ...(modelRoute.mode === "real"
+        ? {
+            provider: modelRoute.providerId ?? undefined,
+            model: modelRoute.modelId ?? undefined,
+            workerEnv: modelRoute.workerEnv,
+          }
+        : {}),
     });
     realPort.onFault((info) => {
       console.error(
@@ -293,6 +319,7 @@ async function main(): Promise<void> {
       if (mock !== null) {
         await mock.close();
       }
+      await modelRoute.stop();
     } catch {
       // Best-effort teardown.
     }
