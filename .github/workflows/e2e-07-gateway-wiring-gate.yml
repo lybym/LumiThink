@@ -270,13 +270,15 @@ jobs:
           set -euo pipefail
           set -a; source e2e07.env; set +a
           RUN_DIR="$(dirname "$LUMITHINK_GATEWAY_SOCKET")"
-          # One guardian-issued synthetic binding (activation digest is a
-          # content-free test value, never a real credential). The deviceId
-          # MUST equal the probe's --device-id in the Adapter grammar
-          # (separator-stripped, lower-cased MAC).
+          # Two guardian-issued synthetic bindings (activation digests are
+          # content-free test values, never real credentials). The deviceIds
+          # MUST equal the probes' --device-id in the Adapter grammar
+          # (separator-stripped, lower-cased MAC); each probe uses its OWN
+          # device so per-device server-side state never crosses probes.
           printf '%s\n' \
             '[' \
-            '  {"deviceId": "aabbccddee07", "actorId": "act_parent0001", "conversationId": "conv_child0001", "activationDigest": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"}' \
+            '  {"deviceId": "aabbccddee07", "actorId": "act_parent0001", "conversationId": "conv_child0001", "activationDigest": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"},' \
+            '  {"deviceId": "aabbccddee08", "actorId": "act_parent0001", "conversationId": "conv_child0001", "activationDigest": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"}' \
             ']' > "$RUN_DIR/bindings.json"
           echo "LUMITHINK_GATEWAY_BINDINGS=$RUN_DIR/bindings.json" >> e2e07.env
           echo "LUMITHINK_GATEWAY_HOME=$RUN_DIR/dsh-home" >> e2e07.env
@@ -388,8 +390,9 @@ jobs:
           set -a; source e2e07.env; set +a
           "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" deploy/xiaozhi/probe_e2e07.py \
             --url ws://127.0.0.1:8000/xiaozhi/v1/ \
-            --device-id aa:bb:cc:dd:ee:07 --client-id e2e07-abort \
+            --device-id aa:bb:cc:dd:ee:08 --client-id e2e07-abort \
             --auth-key "${XIAOZHI_AUTH_KEY}" \
+            --turn-timeout 90 \
             --expect-abort-fence
 
       - name: Server restart → reconnect → same trusted session continues

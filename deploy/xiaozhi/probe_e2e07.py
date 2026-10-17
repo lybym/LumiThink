@@ -234,7 +234,12 @@ async def probe_abort_fence(args):
         collector = TurnCollector()
         deadline = time.monotonic() + args.turn_timeout
         while time.monotonic() < deadline and collector.tts_stop == 0:
-            raw = await recv_msg(ws, args.timeout)
+            try:
+                raw = await recv_msg(ws, args.timeout)
+            except asyncio.TimeoutError:
+                break  # a frame gap: the loop's assertions decide below
+            except websockets.ConnectionClosed:
+                break
             if isinstance(raw, bytes):
                 saw_audio = True
                 collector.audio_frames += 1
