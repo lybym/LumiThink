@@ -560,6 +560,7 @@ LUMITHINK_GATEWAY_AGENT=real node --experimental-strip-types scripts/xiaozhi/gat
 ### 14.3 ≥100 轮成人/合成对话实测（DoD 1 物理面）
 
 - **前置**：§3.7 real 档（真实 LLM 经回环 Model Gateway）+ §11 设备绑定 + §13.5 授权/外发评审生效；语料为成人/合成测试句，不使用真实儿童个人数据。
+- **环境一致性锚点（每次实测逐项记录，防跨日漂移）**：设备固件版本串（§11.2 表）、服务端 pinned commit（`version.env`）、网关宿主/DSH 版本与 `LUMITHINK_GATEWAY_AGENT` 档位、ASR/TTS/LLM 供应商档位、`XIAOZHI_AUTH_KEY` 轮换代次——探针与实机共用同一 pinned 栈（探针输出含 `reliability summary` 行可留证）。
 - **探针并行面（服务端满量程回归）**：`probe_e2e11.py --rounds 100 --faults wifi_drop,cancel_flood,server_restart --restart-command "<重启命令>"`（协议模拟设备，零内容输出）——实机执行**前/后**各跑一轮，输出 P50/P95/P99 时延分解与失败类别作为对照基线。
 - **逐轮记录表列（运营者证据目录）**：轮次、触发方式（语音/按键/唤醒）、结果（成功/失败类别）、T0 唤醒（设备侧录屏时间戳）、T1 ASR 完成、T2 首安全短句（服务端内容无关日志 `sentence_start` 到达）、T3 TTS 首音（设备侧）、T4 播报完成、打断轮停止响应延迟、故障轮恢复时间、当轮模型费用（provider 账单/计量记录）、备注。
 - **报告字段**：总轮数、成功率、失败类别分布（对照 §14.2 类别 + 探针类别枚举）、各时延段 P50/P95、平均/最差恢复时间、费用合计、探针服务端对照结果。
