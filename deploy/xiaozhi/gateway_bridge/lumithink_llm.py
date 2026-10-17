@@ -531,10 +531,32 @@ class LLMProvider:
         self._control.submit(lambda: self._stop_state(session_id))
 
     def lumi_on_device_closed(self, conn):
+        """Device WebSocket closed: tell the gateway to release the lease.
+
+        Without this frame the gateway's connection lease for the device
+        stays open and every later hello fails with
+        device_connection_conflict (the observed restart-retry loop)."""
+        session_id = getattr(conn, "session_id", None)
         with self._conns_lock:
-            state = self._conns.pop(getattr(conn, "session_id", None), None)
-        if state is not None:
-            state.closed = True
+            state = self._conns.pop(session_id, None)
+        if state is None:
+            return
+        state.closed = True
+        conn_id = state.conn_id
+        if not conn_id:
+            return
+
+        def _closed():
+            try:
+                self._client.send({
+                    "kind": "device_closed",
+                    "connId": conn_id,
+                    "reason": "device",
+                })
+            except (BridgeTransportError, OSError):
+                pass
+
+        self._control.submit(_closed)
 
     # ------------------------------------------------------------------
     # Control-worker bodies (single-threaded state discipline)

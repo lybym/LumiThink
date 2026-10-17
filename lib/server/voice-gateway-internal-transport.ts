@@ -135,6 +135,15 @@ export type GatewayInternalInboundFrame =
       readonly reason: GatewayAbortReason;
     }
   | {
+      /** The device WebSocket closed (bridge fork patch 5/5): the gateway
+       * MUST release the Adapter connection lease and the ephemeral
+       * session mapping — a stuck lease would refuse every later hello
+       * for the same device (device_connection_conflict). */
+      readonly kind: "device_closed";
+      readonly connId: string;
+      readonly reason: "network" | "server" | "device";
+    }
+  | {
       readonly kind: "audio_delivered";
       readonly connId: string;
       /** Current turn when known (bridge-side best effort). */
@@ -306,6 +315,21 @@ export function parseGatewayInternalInboundFrame(raw: unknown): GatewayInternalI
         kind: "abort",
         connId: str(record, "connId", GATEWAY_INTERNAL_CONN_ID_PATTERN),
         xiaozhiSessionId: str(record, "xiaozhiSessionId", XIAOZHI_SESSION_ID_PATTERN),
+        reason,
+      };
+    }
+    case "device_closed": {
+      rejectUnknownFields(record, ["kind", "connId", "reason"]);
+      let reason: "network" | "server" | "device" = "network";
+      if (record.reason !== undefined && record.reason !== null) {
+        if (typeof record.reason !== "string" || !["network", "server", "device"].includes(record.reason)) {
+          failFrame("device_closed reason must be network, server or device.");
+        }
+        reason = record.reason as "network" | "server" | "device";
+      }
+      return {
+        kind: "device_closed",
+        connId: str(record, "connId", GATEWAY_INTERNAL_CONN_ID_PATTERN),
         reason,
       };
     }

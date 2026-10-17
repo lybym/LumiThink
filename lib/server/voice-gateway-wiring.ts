@@ -429,6 +429,17 @@ export function createWiredVoiceGateway(options: WiredVoiceGatewayOptions): Wire
         await enforceAbortFence(frame.connId);
         return;
       }
+      case "device_closed": {
+        // The device WebSocket closed (the bridge's device-closed hook):
+        // release the Adapter lease and the ephemeral mapping — without
+        // this, a stuck lease refuses every later hello for the device.
+        await stack.handleDeviceEvent(frame.connId, {
+          kind: "connection_dropped",
+          reason: frame.reason,
+        });
+        dropMapEntry(frame.connId);
+        return;
+      }
       case "audio_delivered": {
         const record = connById.get(frame.connId);
         if (record === undefined || record.sessionKey === null) {
