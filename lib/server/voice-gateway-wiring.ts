@@ -461,9 +461,10 @@ export function createWiredVoiceGateway(options: WiredVoiceGatewayOptions): Wire
   transport.onBridgeAuthenticated(announceServerRestart);
   transport.onBridgeClosed(announceServerRestart);
   transport.onFrame((frame) => {
-    void routeFrame(frame).catch((error: unknown) => {
-      // A routing fault must never crash the transport, but it must be
-      // DIAGNOSABLE: log the frame kind + error class only (content-free).
+    // The transport awaits this per frame (strict arrival order), so a
+    // routing fault can never reorder or crash the stream; it is logged
+    // content-free (frame kind + error class).
+    return routeFrame(frame).catch((error: unknown) => {
       console.error(
         `[gateway-wiring] frame routing failed kind=${frame.kind} error=${error instanceof Error ? `${error.message}` : String(error)}`,
       );

@@ -408,8 +408,13 @@ export interface GatewayInternalServer {
   stop(): Promise<void>;
   /** Send one frame to the authenticated bridge (no-op when not connected). */
   send(frame: GatewayInternalOutboundFrame): void;
-  /** Registered inbound-frame handler (after authentication). */
-  onFrame(handler: (frame: GatewayInternalInboundFrame) => void): void;
+  /**
+   * Registered inbound-frame handler (after authentication). MAY return a
+   * promise — frames are then dispatched STRICTLY IN ARRIVAL ORDER (each
+   * awaited before the next; a routing frame like session_issued must
+   * never overtake the hello that registers its connection).
+   */
+  onFrame(handler: (frame: GatewayInternalInboundFrame) => void | Promise<void>): void;
   /** Fired after a bridge authenticates (fresh server instance). */
   onBridgeAuthenticated(listener: (info: { readonly serverInstanceId: string }) => void): void;
   /** Fired when the bridge connection closes. */
@@ -448,7 +453,7 @@ export function createVoiceGatewayInternalServer(options: GatewayInternalServerO
   let bridgeAuthenticated = false;
   let refusedLeases = 0;
   const decoder = new GatewayInternalFrameDecoder();
-  let frameHandler: ((frame: GatewayInternalInboundFrame) => void) | null = null;
+  let frameHandler: ((frame: GatewayInternalInboundFrame) => void | Promise<void>) | null = null;
   const authListeners: ((info: { readonly serverInstanceId: string }) => void)[] = [];
   const closedListeners: ((info: { readonly hadLease: boolean }) => void)[] = [];
 
@@ -470,59 +475,79 @@ export function createVoiceGatewayInternalServer(options: GatewayInternalServerO
     bridgeSocket = socket;
     bridgeAuthenticated = false;
     let serverInstanceId = "";
+    let destroyed = false;
+    const kill = (reason: string): void => {
+      if (destroyed) {
+        return;
+      }
+      destroyed = true;
+      if (reason) {
+        console.error(`[gateway-internal] ${reason}`);
+      }
+      destroySocket(socket);
+    };
+    /**
+     * Inbound frames are dispatched STRICTLY IN ARRIVAL ORDER (one
+     * serialized chain): a routing frame like session_issued must never
+     * overtake the hello that registers its connection — concurrent
+     * routing produced device_drop{connection_unknown} before the hello
+     * completed (the observed CI failure order drop→result).
+     */
+    let processing = Promise.resolve();
     socket.on("data", (chunk: Buffer) => {
+      if (destroyed) {
+        return;
+      }
       const outcome = decoder.push(chunk);
       if (outcome.oversized || outcome.malformed) {
-        // Content-free diagnostics: a destroyed connection must be
-        // explainable from the host log.
-        console.error(`[gateway-internal] connection destroyed: ${outcome.oversized ? "oversize" : "malformed"} frame`);
-        destroySocket(socket);
+        kill(`connection destroyed: ${outcome.oversized ? "oversize" : "malformed"} frame`);
         return;
       }
       for (const raw of outcome.frames) {
-        if (!bridgeAuthenticated) {
-          let auth: { readonly token: string };
-          try {
-            auth = parseGatewayInternalAuthFrame(raw);
-          } catch (error) {
-            console.error(`[gateway-internal] auth frame rejected: ${error instanceof Error ? error.message : String(error)}`);
-            destroySocket(socket);
+        processing = processing.then(async () => {
+          if (destroyed) {
             return;
           }
-          if (!tokensEqual(auth.token, options.authToken)) {
-            console.error("[gateway-internal] auth token mismatch");
-            destroySocket(socket);
-            return;
-          }
-          bridgeAuthenticated = true;
-          // The auth frame may carry a server instance marker (field-checked
-          // inside the parser is NOT done for extra fields — the auth frame
-          // allows only kind/v/token, so instance identity is implicit in a
-          // fresh TCP/UDS connection after a server restart).
-          serverInstanceId = `srv-${Date.now().toString(36)}`;
-          try {
-            socket.write(encodeGatewayInternalFrame({ kind: "bridge_ready" }));
-          } catch {
-            destroySocket(socket);
-            return;
-          }
-          for (const listener of authListeners) {
+          if (!bridgeAuthenticated) {
+            let auth: { readonly token: string };
             try {
-              listener({ serverInstanceId });
-            } catch {
-              // Listener faults must not break the transport.
+              auth = parseGatewayInternalAuthFrame(raw);
+            } catch (error) {
+              kill(`auth frame rejected: ${error instanceof Error ? error.message : String(error)}`);
+              return;
             }
+            if (!tokensEqual(auth.token, options.authToken)) {
+              kill("auth token mismatch");
+              return;
+            }
+            bridgeAuthenticated = true;
+            // The auth frame may carry a server instance marker (field-checked
+            // inside the parser is NOT done for extra fields — the auth frame
+            // allows only kind/v/token, so instance identity is implicit in a
+            // fresh TCP/UDS connection after a server restart).
+            serverInstanceId = `srv-${Date.now().toString(36)}`;
+            try {
+              socket.write(encodeGatewayInternalFrame({ kind: "bridge_ready" }));
+            } catch {
+              kill("bridge_ready write failed");
+              return;
+            }
+            for (const listener of authListeners) {
+              try {
+                listener({ serverInstanceId });
+              } catch {
+                // Listener faults must not break the transport.
+              }
+            }
+            return;
           }
-          continue;
-        }
-        try {
-          const frame = parseGatewayInternalInboundFrame(raw);
-          frameHandler?.(frame);
-        } catch (error) {
-          console.error(`[gateway-internal] inbound frame rejected: ${error instanceof Error ? error.message : String(error)}`);
-          destroySocket(socket);
-          return;
-        }
+          try {
+            const frame = parseGatewayInternalInboundFrame(raw);
+            await frameHandler?.(frame);
+          } catch (error) {
+            kill(`inbound frame rejected: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        });
       }
     });
     socket.on("error", () => {

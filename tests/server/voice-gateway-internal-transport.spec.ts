@@ -97,7 +97,9 @@ async function startServer(): Promise<Fixture> {
   const endpoint = resolveGatewayInternalEndpoint({ socketDir, name: `gw-test-${Math.floor(Math.random() * 0xffffff).toString(16)}` });
   const server = createVoiceGatewayInternalServer({ endpoint, authToken: TOKEN });
   const inbound: GatewayInternalInboundFrame[] = [];
-  server.onFrame((frame) => inbound.push(frame));
+  server.onFrame((frame) => {
+    inbound.push(frame);
+  });
   await server.start();
   const endpointPath = endpoint.kind === "uds" ? endpoint.path : `\\\\.\\pipe\\${endpoint.name}`;
   return {
