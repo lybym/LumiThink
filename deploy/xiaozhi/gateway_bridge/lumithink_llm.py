@@ -357,6 +357,7 @@ class LLMProvider:
         # vendor session in flight — the same natural pacing the direct LLM
         # chain gets from token-level streaming.
         self._pace_min_interval_s = float(config.get("sentence_pace_min_interval_s", 0) or 0)
+        self._pace_audio_s_per_char = float(config.get("sentence_pace_audio_s_per_char", 0.32) or 0.32)
         self._client = _BridgeClient(endpoint, token)
         self._client.attach_provider(self)
         self._control = _ControlWorker()
@@ -428,7 +429,7 @@ class LLMProvider:
                 if kind == "tts_sentence":
                     text = frame.get("text")
                     if isinstance(text, str) and text:
-                        if not self._pace_before_enqueue(state):
+                        if not self._pace_before_enqueue(state, text):
                             # Aborted while pacing: stop admitting; the
                             # server's own abort path owns the device stop.
                             break
@@ -457,18 +458,34 @@ class LLMProvider:
     # TTS queue feeding (the pinned server owns the Opus/device protocol)
     # ------------------------------------------------------------------
 
-    def _pace_before_enqueue(self, state):
-        """Bounded sentence-admission pacing (E2E-08, issue #58).
+    def _pace_before_enqueue(self, state, text):
+        """Audio-completion backpressure (E2E-08, issue #58).
 
         Returns True when admission may proceed, False when the turn was
-        aborted/closed while waiting. Blocks the consuming thread at most
-        min_interval seconds per sentence — upstream chat() already consumes
-        this sync generator inline, and the model stream keeps buffering in
-        the bridge client while the consumer paces. Device barge-in ends the
-        wait immediately (abort clears current_turn / marks the state closed).
+        aborted/closed while waiting. Fixed-interval pacing proved
+        insufficient live (each sentence's audio plays longer than the
+        interval, so vendor sessions still overlapped → volcano 55000000).
+        THIS pacing waits until the REAL Opus frames of the PREVIOUS sentence
+        have actually been delivered to the device (lumi_on_audio_frame
+        accounting): estimated frames = ceil(chars * seconds_per_char /
+        frame_duration), with a generous cap so a stalled vendor session
+        cannot deadlock the turn. config `sentence_pace_audio_s_per_char`
+        (default 0.32) tunes the speaking-rate estimate; a floor interval
+        `sentence_pace_min_interval_s` still applies between admissions.
         """
-        if self._pace_min_interval_s <= 0:
-            return True
+        prev_text = getattr(state, "last_enqueued_text", None)
+        if prev_text:
+            s_per_char = float(getattr(self, "_pace_audio_s_per_char", 0.32))
+            frame_s = 0.06
+            needed = max(1, int((len(prev_text) * s_per_char) / frame_s) + 2)
+            base = getattr(state, "pace_base_frames", 0)
+            deadline = time.time() + min(needed * frame_s * 3 + 15.0, 180.0)
+            while (state.audio_frames - base) < needed:
+                if state.closed or state.current_turn is None:
+                    return False
+                if time.time() > deadline:
+                    break
+                time.sleep(0.1)
         now = time.time()
         last = getattr(state, "last_enqueue_ts", None)
         wait_until = (last + self._pace_min_interval_s) if last else now
@@ -477,6 +494,8 @@ class LLMProvider:
                 return False
             time.sleep(0.1)
         state.last_enqueue_ts = time.time()
+        state.pace_base_frames = state.audio_frames
+        state.last_enqueued_text = text
         return True
 
     def _enqueue_sentence(self, state, text):
