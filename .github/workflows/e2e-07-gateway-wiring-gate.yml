@@ -274,9 +274,20 @@ jobs:
           set -euo pipefail
           python3 deploy/xiaozhi/tts_stub.py --port 8097 > tts-stub.log 2>&1 &
           echo $! > tts-stub.pid
-          sleep 1
-          curl -s -o /dev/null -X POST -H 'content-type: application/json' \
-            -d '{"input":"ready"}' http://127.0.0.1:8097/tts
+          # Readiness poll (a cold runner's python start can exceed 1s).
+          ready=""
+          for _ in $(seq 1 30); do
+            if curl -s -o /dev/null -X POST -H 'content-type: application/json' \
+              -d '{"input":"ready"}' http://127.0.0.1:8097/tts; then
+              ready="1"
+              break
+            fi
+            if ! kill -0 "$(cat tts-stub.pid)" 2>/dev/null; then
+              echo "::error::tts stub exited during startup"; cat tts-stub.log; exit 1
+            fi
+            sleep 1
+          done
+          [ -n "${ready}" ] || { echo "::error::tts stub never became ready"; cat tts-stub.log; exit 1; }
           echo "tts stub ready"
 
       - name: Start the LumiThink gateway host (REAL UDS transport + REAL DSH worker)
