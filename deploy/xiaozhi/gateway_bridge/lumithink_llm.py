@@ -226,7 +226,8 @@ class _BridgeClient:
                 return
             try:
                 frame = self._recv_frame_on(sock, timeout_s=3600.0)
-            except (BridgeTransportError, OSError, json.JSONDecodeError, struct.error):
+            except (BridgeTransportError, OSError, json.JSONDecodeError, struct.error) as exc:
+                logger.bind(tag=TAG).warning(f"[lumi-bridge] gateway reader stopped: {exc.__class__.__name__} (in-flight turns fail closed; the next turn reconnects)")
                 self.close()
                 self._fail_all_waiters()
                 return
@@ -343,7 +344,7 @@ class LLMProvider:
         self._control = _ControlWorker()
         self._conns = {}  # session_id -> _ConnState
         self._conns_lock = threading.Lock()
-        logger.bind(tag=TAG).info("lumithink bridge LLM initialized (protected internal transport)")
+        logger.bind(tag=TAG).info("lumithink bridge LLM initialized (protected internal transport, no TCP option)")
 
     # ------------------------------------------------------------------
     # Upstream LLM provider interface (core/providers/llm/base.py)
@@ -531,7 +532,22 @@ class LLMProvider:
     def _announce_connection(self, conn_id, device_id, headers, welcome, session_id):
         try:
             self._client.ensure_connected()
-            audio_params = welcome.get("audio_params") or None
+            # Upstream's hello audio_params uses the v2.5.2 wire field name
+            # `frame_duration`; the gateway contract expects
+            # `frameDurationMs` — map it here (the bridge owns upstream
+            # shape knowledge; the gateway stays strict, fail-closed).
+            upstream_params = welcome.get("audio_params") or None
+            audio_params = None
+            if isinstance(upstream_params, dict) and upstream_params.get("format") == "opus":
+                try:
+                    audio_params = {
+                        "format": "opus",
+                        "sampleRate": int(upstream_params.get("sample_rate")),
+                        "channels": int(upstream_params.get("channels")),
+                        "frameDurationMs": int(upstream_params.get("frame_duration")),
+                    }
+                except (TypeError, ValueError):
+                    audio_params = None
             self._client.send({
                 "kind": "device_hello",
                 "connId": conn_id,
@@ -547,9 +563,7 @@ class LLMProvider:
                     "xiaozhiSessionId": session_id,
                 })
         except (BridgeTransportError, OSError):
-            # The gateway is down: the device stays connected at the server
-            # edge but the FIRST model call fails closed (no fallback).
-            pass
+            logger.bind(tag=TAG).warning("[lumi-bridge] gateway transport unavailable at hello (model calls will fail closed until it recovers)")
 
     def _abort_state(self, session_id):
         state = self._conns.get(session_id)

@@ -103,7 +103,11 @@ async def hello_phase(ws, timeout):
 
 
 class TurnCollector:
-    """Content-free turn accounting: counts only, never stores text."""
+    """Content-free turn accounting: counts only, never stores text —
+    EXCEPT the first sentence text which is compared against the expected
+    deterministic DSH output (issue #57 full-loop proof: the response must
+    come from the gateway bridge, never from the server's system-error
+    path or any built-in LLM; the value is never printed)."""
 
     def __init__(self):
         self.stt_echo = 0
@@ -112,6 +116,7 @@ class TurnCollector:
         self.sentence_starts = 0
         self.audio_frames = 0
         self.saw_stop_after_audio = False
+        self.first_sentence_text = None
 
     def summary(self):
         return (
@@ -142,6 +147,8 @@ async def collect_until_stop(ws, collector, timeout, stop_on_first_stop=True):
             collector.tts_start += 1
         elif kind == "tts" and state == "sentence_start":
             collector.sentence_starts += 1
+            if collector.first_sentence_text is None and isinstance(message.get("text"), str):
+                collector.first_sentence_text = message["text"]
         elif kind == "tts" and state == "stop":
             collector.tts_stop += 1
             if collector.audio_frames > 0 or collector.sentence_starts > 0:
@@ -173,6 +180,15 @@ async def probe_full_loop(args):
         if collector.audio_frames < 1:
             raise AssertionError(
                 f"no REAL downlink Opus frames (the frameCount/digest placeholder is not resolved): {collector.summary()}"
+            )
+        # THE DSH PROOF: the first sentence must be the deterministic
+        # gateway-bridge output. The pinned server's own LLM-failure path
+        # (get_system_error_response) would TTS a DIFFERENT sentence — this
+        # assertion is what turns "frames arrived" into "the DSH answered".
+        if collector.first_sentence_text != args.expect_text:
+            raise AssertionError(
+                "the first sentence is NOT the deterministic DSH output "
+                "(a server-side error path or another responder answered the turn)"
             )
         print(f"full-loop OK (DSH answered, real Opus delivered): {collector.summary()}")
 
@@ -270,6 +286,12 @@ def main():
         "--text",
         default="我们来玩个游戏好不好",
         help="simulated utterance (a clearly synthetic child-safe sample)",
+    )
+    parser.add_argument(
+        "--expect-text",
+        default="好呀，我们一起看看这道题。",
+        help="the deterministic first sentence the gateway bridge must return "
+        "(must match scripts/xiaozhi/gateway-host.ts; never printed)",
     )
     parser.add_argument("--expect-full-loop", action="store_true", default=True)
     parser.add_argument("--expect-duplicate-refusal", action="store_true")
