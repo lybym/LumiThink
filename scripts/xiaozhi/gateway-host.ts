@@ -34,7 +34,7 @@
  *   LUMITHINK_GATEWAY_HOME          scratch dir for the DSH home (optional)
  */
 
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -169,14 +169,36 @@ async function main(): Promise<void> {
             return;
           }
           const sessionKeys = wired.stack.mappingSnapshot().map((entry) => entry.sessionKey);
-          const aliveFn = (agentPort as { isWorkerAlive?: (k: string) => boolean }).isWorkerAlive;
+          const aliveFn = (agentPort as { hasLiveWorker?: (k: string) => boolean }).hasLiveWorker;
           for (const sessionKey of sessionKeys) {
             const described = wired.stack.stack.orchestrator.describeTurn(sessionKey, pendingTurn);
             const alive = typeof aliveFn === "function" ? aliveFn.call(agentPort, sessionKey) : undefined;
             console.log(
-              `[gateway-host] watchdog turn=${pendingTurn} session=${sessionKey} state=${described?.state ?? "<unknown>"} epoch=${String(described?.epoch ?? "<none>")} workerAlive=${String(alive)}`,
+              `[gateway-host] watchdog turn=${pendingTurn} session=${sessionKey} state=${described?.state ?? "<unknown>"} epoch=${String(described?.epoch ?? "<none>")} workerLive=${String(alive)}`,
             );
             console.log(`[gateway-host] watchdog stderrTail session=${sessionKey}:\n${agentPort.stderrTailSnapshot(sessionKey)}`);
+          }
+          // The locked runtime's own footprint under DSH_HOME (names +
+          // sizes only — never file content, which could carry the
+          // session store's transcript) plus error-shaped log lines.
+          try {
+            const walk = (dir: string, depth: number): void => {
+              if (depth > 3) {
+                return;
+              }
+              for (const entry of readdirSync(dir, { withFileTypes: true })) {
+                const full = join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  console.log(`[gateway-host] dshHome dir ${full.slice(dshHome.length) || "/"}`);
+                  walk(full, depth + 1);
+                } else {
+                  console.log(`[gateway-host] dshHome file ${full.slice(dshHome.length)} bytes=${statSync(full).size}`);
+                }
+              }
+            };
+            walk(dshHome, 0);
+          } catch {
+            console.log("[gateway-host] dshHome walk failed");
           }
         }, 30_000);
       }
