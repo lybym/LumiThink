@@ -260,7 +260,6 @@ test("barge-in trials: interrupt → stop effective → zero stale delivery → 
         `trial ${trial}: the abort fenced (trusted epoch bump)`,
       );
       fixture.wired.stack.stack.pumpRuntime(sessionKey, 20);
-      const turnStateDebug = fixture.wired.stack.stack.orchestrator.describeTurn(sessionKey, turnId);
       assert.ok(
         await waitFor(() =>
           fixture.outFrames.some(
@@ -270,7 +269,7 @@ test("barge-in trials: interrupt → stop effective → zero stale delivery → 
               entry.frame.reason === "interrupted",
           ),
         ),
-        `trial ${trial}: the device-stop directive (tts_end interrupted) arrived — DEBUG turnState=${JSON.stringify(turnStateDebug)} currentEpoch=${String(fixture.wired.stack.stack.orchestrator.currentEpoch(sessionKey))} frames=${fixture.outFrames.map((entry) => entry.kind).join(",")} settled=${JSON.stringify(fixture.settledTurns)}`,
+        `trial ${trial}: the device-stop directive (tts_end interrupted) arrived`,
       );
       interruptedLatencies.push(Date.now() - abortSentAt);
 
