@@ -439,6 +439,21 @@ async def drain_pre_detect(ws, args, result):
     result.continuation_audio_frames = stale
 
 
+async def drain_after_idle_burst(ws, args):
+    """Quiesce after the no-playback abort burst: consume whatever the
+    server still emits (a stop is RECORDED-possible, never asserted) so no
+    burst-era frame can be misattributed to the recovery turn."""
+    deadline = time.monotonic() + args.timeout
+    while time.monotonic() < deadline:
+        try:
+            raw = await recv_msg(ws, max(0.05, deadline - time.monotonic()))
+        except (asyncio.TimeoutError, websockets.ConnectionClosed):
+            return
+        # Counted only; frames/sentences/stops of the idle burst are all
+        # pre-recovery noise (privacy: nothing is printed).
+        _ = raw
+
+
 async def run_recovery_turn(ws, args, result):
     """Post-fault recovery: a fresh detect must reach audio and stop again."""
     recovery_sent = time.monotonic()
@@ -543,6 +558,7 @@ async def trial_cancel_flood(args, device_id, index):
         # any stop is emitted is RECORDED, never asserted (E2E-09 discipline).
         for _ in range(args.flood_count):
             await send_abort(ws)
+        await drain_after_idle_burst(ws, args)
         await run_recovery_turn(ws, args, result)
     result.ok = True
     return result
