@@ -616,9 +616,12 @@ jobs:
           set -u
           # Kill EVERY wired-server process by command line — pid files can
           # go stale across the earlier restart step; the probe's
-          # server_restart trial REQUIRES the connection to actually drop.
+          # server_restart trial REQUIRES the connection to actually drop
+          # MID-TURN (a ~3.5s playback window after the first frame), so the
+          # graceful TERM window stays SHORT (2s) and KILL guarantees the
+          # drop lands before the turn completes.
           pkill -TERM -f "xiaozhi-esp32-server/venv/bin/python app.py" 2>/dev/null || true
-          for _ in $(seq 1 10); do
+          for _ in $(seq 1 2); do
             pgrep -f "xiaozhi-esp32-server/venv/bin/python app.py" >/dev/null 2>&1 || break
             sleep 1
           done
