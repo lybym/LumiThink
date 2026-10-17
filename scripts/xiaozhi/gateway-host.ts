@@ -169,6 +169,10 @@ async function main(): Promise<void> {
             return;
           }
           const sessionKeys = wired.stack.mappingSnapshot().map((entry) => entry.sessionKey);
+          const gate = wired.stack.stack.gate.metricsSnapshot();
+          console.log(
+            `[gateway-host] watchdog gate metrics deltasFenced=${gate.deltasFenced} ttsAdmissions=${gate.ttsAdmissions} ttsBlocked=${gate.ttsBlockedSentences} deliveryFailures=${gate.sentenceDeliveryFailures} firstSafeText=${gate.firstSafeText.count}`,
+          );
           const aliveFn = (agentPort as { hasLiveWorker?: (k: string) => boolean }).hasLiveWorker;
           for (const sessionKey of sessionKeys) {
             const described = wired.stack.stack.orchestrator.describeTurn(sessionKey, pendingTurn);
