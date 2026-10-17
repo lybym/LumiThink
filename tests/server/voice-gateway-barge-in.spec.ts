@@ -237,9 +237,21 @@ test("barge-in trials: interrupt → stop effective → zero stale delivery → 
       const epochBeforeAbort = fixture.wired.stack.stack.orchestrator.currentEpoch(sessionKey) ?? 0;
 
       // 1. The turn starts and its first sentence reaches the bridge.
+      // ALL waits are scoped to frames appended AFTER this prompt: on the
+      // REAL IPC transport the prompt's routing is asynchronous, and an
+      // unscoped `.some()` would instantly match the PREVIOUS trial's
+      // turn_started/sentence frames (stale match — the trial-2 CI
+      // failure this guard fixes).
+      const promptIndex = fixture.outFrames.length;
       await driver.send({ kind: "turn_prompt", connId: "conn-bi-main", xiaozhiSessionId: SESSION_ID, text: PROMPT_TEXT });
-      assert.ok(await waitFor(() => fixture.outFrames.some((entry) => entry.frame.kind === "turn_started")), `trial ${trial}: the turn was minted`);
-      const turnId = [...fixture.outFrames].reverse().find((entry) => entry.frame.kind === "turn_started")?.frame.turnId as string;
+      assert.ok(
+        await waitFor(() => fixture.outFrames.slice(promptIndex).some((entry) => entry.frame.kind === "turn_started")),
+        `trial ${trial}: the turn was minted`,
+      );
+      const turnId = fixture.outFrames
+        .slice(promptIndex)
+        .reverse()
+        .find((entry) => entry.frame.kind === "turn_started")?.frame.turnId as string;
       assert.ok(typeof turnId === "string" && turnId.length > 0, `trial ${trial}: the turn id is observable`);
       // The synthetic runtime dispatches ONE stream event per pump unit:
       // start + first chunk = the first admitted sentence, with the stream
@@ -247,7 +259,9 @@ test("barge-in trials: interrupt → stop effective → zero stale delivery → 
       // shape the barge-in needs.
       fixture.wired.stack.stack.pumpRuntime(sessionKey, 2);
       assert.ok(
-        await waitFor(() => fixture.outFrames.some((entry) => entry.frame.kind === "tts_sentence" && entry.frame.turnId === turnId)),
+        await waitFor(() =>
+          fixture.outFrames.slice(promptIndex).some((entry) => entry.frame.kind === "tts_sentence" && entry.frame.turnId === turnId),
+        ),
         `trial ${trial}: the first sentence crossed before the interruption`,
       );
 
@@ -274,7 +288,7 @@ test("barge-in trials: interrupt → stop effective → zero stale delivery → 
               entry.frame.reason === "interrupted",
           ),
         ),
-        `trial ${trial}: the device-stop directive (tts_end interrupted) arrived — DIAG turn=${JSON.stringify(fixture.wired.stack.stack.orchestrator.describeTurn(sessionKey, turnId))} epoch=${String(fixture.wired.stack.stack.orchestrator.currentEpoch(sessionKey))} frames=${JSON.stringify(fixture.outFrames.map((entry) => ({ k: entry.kind, t: entry.frame.turnId, e: entry.frame.epoch, r: entry.frame.reason })))} settled=${JSON.stringify(fixture.settledTurns)} audit=${JSON.stringify(fixture.wired.stack.adapter.auditSnapshot().filter((entry) => entry.action.includes("abort") || entry.action.includes("cancel") || entry.action.includes("rejected")))} gate=${JSON.stringify(fixture.wired.stack.stack.gate.metricsSnapshot())}`,
+        `trial ${trial}: the device-stop directive (tts_end interrupted) arrived — DIAG turn=${JSON.stringify(fixture.wired.stack.stack.orchestrator.describeTurn(sessionKey, turnId))} epoch=${String(fixture.wired.stack.stack.orchestrator.currentEpoch(sessionKey))} frames=${JSON.stringify(fixture.outFrames.map((entry) => ({ k: entry.kind, t: entry.frame.turnId, e: entry.frame.epoch, r: entry.frame.reason })))} settled=${JSON.stringify(fixture.settledTurns)}`,
       );
       interruptedLatencies.push(Date.now() - abortSentAt);
 
@@ -309,11 +323,15 @@ test("barge-in trials: interrupt → stop effective → zero stale delivery → 
       // turn.prompt + turn.stream both succeeded) — pumping before it on
       // the REAL IPC transport races the still-in-flight dispatch and
       // feeds an attempt that does not exist yet (no deltas would ever
-      // follow).
+      // follow). The wait is scoped to frames appended after the recovery
+      // prompt (same stale-match guard as above).
+      const recoveryIndex = fixture.outFrames.length;
       await driver.send({ kind: "turn_prompt", connId: "conn-bi-main", xiaozhiSessionId: SESSION_ID, text: RECOVERY_TEXT });
       assert.ok(await waitFor(() => fixture.wired.adapterMetrics().asrFinalsAccepted >= 2 * trial), `trial ${trial}: the recovery prompt was accepted`);
       assert.ok(
-        await waitFor(() => fixture.outFrames.some((entry) => entry.frame.kind === "turn_started" && (entry.frame.epoch as number) > epochBeforeAbort)),
+        await waitFor(() =>
+          fixture.outFrames.slice(recoveryIndex).some((entry) => entry.frame.kind === "turn_started" && (entry.frame.epoch as number) > epochBeforeAbort),
+        ),
         `trial ${trial}: the recovery turn was dispatched`,
       );
       fixture.wired.stack.stack.pumpRuntime(sessionKey, 20);
@@ -420,9 +438,13 @@ test("a LATE abort (after several delivered sentences) still fences zero stale d
     await driver.send({ kind: "session_issued", connId: "conn-bi-late", xiaozhiSessionId: SESSION_ID });
     const sessionKey = sessionKeyOf(fixture);
 
+    const latePromptIndex = fixture.outFrames.length;
     await driver.send({ kind: "turn_prompt", connId: "conn-bi-late", xiaozhiSessionId: SESSION_ID, text: PROMPT_TEXT });
-    assert.ok(await waitFor(() => fixture.outFrames.some((entry) => entry.frame.kind === "turn_started")));
-    const turnId = [...fixture.outFrames].reverse().find((entry) => entry.frame.kind === "turn_started")?.frame.turnId as string;
+    assert.ok(await waitFor(() => fixture.outFrames.slice(latePromptIndex).some((entry) => entry.frame.kind === "turn_started")));
+    const turnId = fixture.outFrames
+      .slice(latePromptIndex)
+      .reverse()
+      .find((entry) => entry.frame.kind === "turn_started")?.frame.turnId as string;
     const epochBeforeAbort = fixture.wired.stack.stack.orchestrator.currentEpoch(sessionKey) ?? 0;
     // Let the stream run several pump batches before the interrupt lands
     // (the network-jitter proxy: the barge-in arrives deep mid-playback).
