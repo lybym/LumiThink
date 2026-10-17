@@ -367,12 +367,15 @@ class LLMProvider:
         """
         prompt = self._extract_last_user_text(dialogue)
         if not prompt or len(prompt) > _MAX_PROMPT_CHARS:
+            logger.bind(tag=TAG).warning("[lumi-bridge] turn rejected locally: prompt is empty or exceeds the transient cap")
             raise BridgeTransportError("prompt is empty or exceeds the transient cap")
         state = self._conns.get(session_id)
         if state is None or state.closed:
             # Fail closed: a prompt without a registered (hello-authorized)
             # device mapping can never be authorized.
+            logger.bind(tag=TAG).warning(f"[lumi-bridge] turn rejected locally: no registered mapping for the session (registered={len(self._conns)})")
             raise BridgeTransportError("no gateway-registered device mapping for this session")
+        logger.bind(tag=TAG).warning("[lumi-bridge] turn_prompt submitting (content-free accounting follows)")
 
         waiter = queue.Queue()
         self._client.register_waiter(state.conn_id, waiter)
@@ -493,6 +496,7 @@ class LLMProvider:
         state = _ConnState(conn, conn_id)
         with self._conns_lock:
             self._conns[getattr(conn, "session_id", None)] = state
+        logger.bind(tag=TAG).warning("[lumi-bridge] device connection registered (announcing to the gateway)")
         headers = getattr(conn, "headers", {}) or {}
         welcome = getattr(conn, "welcome_msg", {}) or {}
         device_id = str(headers.get("device-id") or getattr(conn, "device_id") or "")

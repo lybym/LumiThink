@@ -120,6 +120,10 @@ async function main(): Promise<void> {
     agentPort,
     onAgentFault: (listener) => agentPort.onFault(listener),
     transport: "ipc",
+    // Content-free lifecycle diagnostics (CI evidence; no content).
+    onBridgeFrame: (frame) => {
+      console.log(`[gateway-host] frame -> bridge kind=${frame.kind}`);
+    },
   });
 
   await wired.start();
