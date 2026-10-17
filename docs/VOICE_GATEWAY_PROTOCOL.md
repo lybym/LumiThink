@@ -1,6 +1,6 @@
 # Voice Gateway Adapter：小智 v2.5.2 协议兼容矩阵与合同（R1-V3）
 
-> 版本：1.4 ｜ 2026-10-15（1.4 修订 2026-10-17）｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30)，1.1 修订 Issue [#51](https://github.com/lybym/LumiThink/issues/51)，1.2 修订 Issue [#55](https://github.com/lybym/LumiThink/issues/55)，1.3 修订 Issue [#56](https://github.com/lybym/LumiThink/issues/56)，1.4 修订 Issue [#57](https://github.com/lybym/LumiThink/issues/57) ｜ **合同 + 合成验证 + 服务端接线联测；固件/服务端兼容与私有 OTA 均【未实机验证】；真实 ASR/TTS 供应商行为未实机验证；真实设备验收未开始**
+> 版本：1.4 ｜ 2026-10-15（1.4 修订 2026-10-17）｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30)，1.1 修订 Issue [#51](https://github.com/lybym/LumiThink/issues/51)，1.2 修订 Issue [#55](https://github.com/lybym/LumiThink/issues/55)，1.3 修订 Issue [#56](https://github.com/lybym/LumiThink/issues/56)，1.4 修订 Issue [#57](https://github.com/lybym/LumiThink/issues/57)，1.4 增补 Issue [#59](https://github.com/lybym/LumiThink/issues/59)（打断实测面 §9——测量与验收合同，不改 Adapter 合同） ｜ **合同 + 合成验证 + 服务端接线联测；固件/服务端兼容与私有 OTA 均【未实机验证】；真实 ASR/TTS 供应商行为未实机验证；真实设备验收未开始**
 > [VOICE_RUNTIME](./VOICE_RUNTIME.md) · [ADR-002](./adr/0002-voice-runtime-bridge.md) · [ADR-007](./adr/0007-asr-transient-text-channel.md) · [ADR-0009](./adr/0009-real-asr-provider-transient-channel.md) · [ADR-0010](./adr/0010-real-tts-provider-dual-stream.md) · [ADR-0011](./adr/0011-xiaozhi-gateway-wiring.md) · [硬件选型](./VOICE_HARDWARE.md) · [Roadmap R1-V3](./ROADMAP.md)
 
 ## 1. 固定评估基线（版本/契约钉死）
@@ -220,3 +220,21 @@ v1.4 把本合同的 Adapter 从"纯合成可重放"接入**真实服务端消�
 | 服务端 AEC / 二进制协议 v2/v3 / 断网实机时延 | **未验证** |
 
 本 Issue 不创建 Tag/Release；Mock 与合成数据验证不标注为真实设备验收。
+
+## 9. 打断实测面（1.4 增补，issue #59 / E2E-09）
+
+本节不改 §2 的 Adapter 合同——它把 §2.4 的"播放停止/打断"从**单次负例证明**（§5 `consecutive_abort` 合成族、E2E-07 单发 abort fence）升级为**多轮客观测量 + 实机验收合同**。载体：`deploy/xiaozhi/probe_e2e09.py`（协议模拟设备测量仪器）、`tests/server/voice-gateway-barge-in.spec.ts`（接线栈回归）、[runbook §12](../deploy/xiaozhi/runbook.md)（物理面）。
+
+### 9.1 测量合同（自动化面）
+
+- **每轮打断试验的可观测序列**（v2.5.2 线协议，内容无关）：`listen detect` → 真实 Opus 下行 → 线协议 `abort`（§1 术语即 client_abort）→ `tts stop` → **stop 后零音频/零 sentence_start**（迟到帧结构性为 0）→ 恢复 `listen detect` → `stt` 回显 + 真实 Opus 下行 + `tts stop`（completed）。恢复轮必达音频是对上游 [xinnan-tech issue #743](https://github.com/xinnan-tech/xiaozhi-esp32-server/issues/743)（"打断后收不到后续语音二进制"）的**服务端半边**复核；设备半边（扬声器实际恢复发声）归 runbook §12.4。
+- **变体**：同连接连续抢话（连续两轮打断后恢复——每轮恰好一次 stop，无重复 epoch 提升）、延迟打断（若干音频帧后才发出 abort——网络抖动代理）、空闲 abort（无播放打断——误打断的协议代理；服务端是否回 stop **只记录不判定**）。
+- **指标（候选基线，非 SLA）**：`abort_to_stop_ms`（abort 发出 → tts stop 到达）、`recovery_first_audio_ms`（恢复 detect → 恢复轮首个音频帧）；P50/P95/P99 只**采集打印**不作门禁。**硬门禁**是结构不变量：每轮必达 stop、零迟到帧、恢复轮必达音频、失败按枚举类别（`no_stop_after_abort` / `late_frames_after_stop` / `recovery_no_audio` / `recovery_timeout` / `connection_lost` / `no_playback_start`）。
+- **接线栈零漏出回归**（Node 套件）：打断轮结算 **CANCELLED**；abort 之后传输上不出现旧 turn 的句子、不出现旧 epoch 的任何句子帧（§2.2 "晚到的旧轮 delta/TTS 在双层栅栏拒绝"的接线面回归）；无播放 abort 保持枚举化良性（无 epoch 提升）；恢复轮在提升后的 epoch 上完成。旧轮记忆写入为 0 由 CANCELLED 结算在 R1-V1 Orchestrator 合同下结构性成立（`tests/domain/voice/race.spec.ts` 既有证明）。
+- **agent 运行时口径**：synthetic 与 real 档（真实锁定版 DSH worker）各跑一组打断测量——打断/恢复路径依赖的 Bridge cancel 语义在 real 档接线环内执行。
+
+### 9.2 实机验收合同（物理面，归 runbook §12）
+
+- 真实固件 AEC 的**效果**（回声抑制对照录音/转写）与**打断可靠性**（≥100 次播报中打断试验：成功率/误打断率/P50/P95/P99/失败类别/可复现步骤）只能在真机上产生，CI 与本文档**不代领、不标 PASS**；门限在试验前冻结（runbook §12.3），Mock/探针毫秒数永不充当实机门限。
+- 服务端 AEC 链路的代码事实（@ pinned commit）：hello `features.aec=true` → `conn.client_aec` → 播放中 VAD 出人声自动 abort；**普通 WebSocket 下行无服务端回声对消（参考缓存仅 MQTT 网关分支）——回声对消只能来自设备侧**。设备 hello 的 `features.aec`/`audio_params` 实际取值随 runbook §12.2 实录。
+- 未达冻结门限时按 runbook §12.8：阻止 Release 或用户显式决定按键中断降级；不虚构全双工能力。

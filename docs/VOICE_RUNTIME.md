@@ -139,6 +139,8 @@ Bridge IPC 不可公网直连；强制 peer 权限、schema 校验、限速和�
 
 必须分别统计**本地播放停止**、**取消命令 ACK**、**内部 Agent idle**、**下一轮首段安全播报**。以上不是现有项目达到的指标。
 
+**客观测量落点（E2E-09，issue #59）**：上表候选值现在有了接线环内的客观测量面——`deploy/xiaozhi/probe_e2e09.py`（协议模拟设备，synthetic + real 档：abort→stop、恢复首音的 P50/P95/P99 采集打印，结构不变量门禁）与 `tests/server/voice-gateway-barge-in.spec.ts`（Adapter 锚点 `ttsStopEffectiveMs` 完整性回归）；这些数值仍是**候选基线，非 SLA**，实机门限必须在试验前冻结（[runbook §12.3](../deploy/xiaozhi/runbook.md)）。
+
 ## 10. 失败门槛与可替换性
 
 任一安全用例中出现跨轮播报、过期记忆写入、未授权 Agent 工具、真实儿童数据被无授权外发，即 **BLOCK**，不得进入真实语音环境。若 Bridge 在当前固定版本不能提供安全的 live+cancel，则保留 R0 文本 SDK 路线，复议后续上游官方 API、ACP 或语音协议，不强行 Fork Agent Loop。

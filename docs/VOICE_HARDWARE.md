@@ -1,6 +1,6 @@
 # 语音硬件和私有化接入选型
 
-> 更新：2026-10-13 ｜ 状态：**目标硬件与语音平台已选；板级适配/实机验收未完成**  
+> 更新：2026-10-17（§2.3 增补 issue #59） ｜ 状态：**目标硬件与语音平台已选；板级适配/实机验收未完成**  
 > [总体架构](./ARCHITECTURE.md) · [实时语音设计](./VOICE_RUNTIME.md)
 
 ## 1. 当前确定选择
@@ -39,7 +39,14 @@
 
 - **自动化面已由 CI 证明**（`e2e-07-gateway-wiring-gate.yml`，E2E-08 起）：真实锁定版 DSH worker 子进程在接线环内应答 10 连轮全链路（`LUMITHINK_GATEWAY_AGENT=real` 换档，#57 review P1-1 清零）；有效 token 但无监护人绑定的设备在服务端边缘被拒（DoD 3 自动化面）；服务端重启续接；网关宿主启动器 scoped 静态类型检查（P1-2 清零）。执行与复现命令见 [runbook §11](../deploy/xiaozhi/runbook.md)。
 - **物理面待实机**（runbook §11.2–§11.4 的记录表与实验协议）：盒内固件版本串/来源 SHA/ESP-IDF/AEC 配置/Opus 帧时长实记、构建期 `OTA_URL` 覆盖 + 烧录 + 激活、重启自动重连、近场唤醒→收音→ASR→真实 DSH→Safety→真实 TTS→播放闭环、成人测试语音 10 轮逐轮记录、冷启动/再配网/断网恢复留证。**未执行前不得标注任何实机 PASS**；不创建 Tag/Release。
-- 不引入 XVF3800/四麦阵列/新板级移植；现有固件 AEC 的效果验收与打断可靠性归 E2E-09（issue DoD 4）。
+- 不引入 XVF3800/四麦阵列/新板级移植；现有固件 AEC 的效果验收与打断可靠性归 E2E-09（issue DoD 4）——E2E-09 状态见 §2.3。
+
+### 2.3 E2E-09 现有固件 AEC 打断实测状态（issue #59——自动化面闭环，物理项待实机）
+
+- **自动化面已由 CI 证明**（`e2e-07-gateway-wiring-gate.yml`，E2E-09 起）：接线环多轮打断测量（`deploy/xiaozhi/probe_e2e09.py`：打断→停播→**零迟到帧**→恢复轮必达真实音频——上游 [xinnan-tech issue #743](https://github.com/xinnan-tech/xiaozhi-esp32-server/issues/743) 的服务端半边复核；连续抢话/延迟打断/无播放空闲 abort 变体；synthetic 与 real 档各一组）；Node 回归套件 `tests/server/voice-gateway-barge-in.spec.ts` 证明可信 epoch 零漏出（打断轮 CANCELLED 结算、旧轮 0 句 0 旧 epoch 帧过传输、恢复轮新 epoch 完成）与无播放 abort 的枚举化良性语义。打断时延 P50/P95/P99 为**客观服务端测量、候选基线**（非 SLA、非实机数值）。执行与复现命令见 [runbook §12.1/§12.7](../deploy/xiaozhi/runbook.md)。
+- **服务端 AEC 代码事实（@ pinned commit，2026-10-17 逐字核验）**：hello `features.aec=true` → `conn.client_aec`（`core/handle/helloHandle.py`）→ 播放中（非 manual 模式）VAD 出人声即自动 `handleAbortMessage`（`core/handle/receiveAudioHandle.py`）；**WebSocket 直连路径的下行参考缓存仅用于 MQTT 网关分支，普通 WS 下行无服务端回声对消——回声对消只能来自设备侧 `CONFIG_USE_DEVICE_AEC`**（其效果验收归本节物理面）。
+- **物理面待实机**（[runbook §12](../deploy/xiaozhi/runbook.md) 的记录表/冻结门限/≥100 轮矩阵/对照证据）：固件 binary/commit/配置与 AEC 启用链路实录（含扬声器参考信号是否存在）、成人测试语音 ≥100 次播报中打断试验（成功率/误打断率/P50/P95/P99/失败类别）、AEC 回声抑制对照录音/转写、三时间点（人声触发→设备停播→服务端取消 ACK→whenIdle 停稳）实测、未达门限时按 runbook §12.8 走"阻止 Release 或显式按键降级"决定。**未执行前不得标注任何实机 PASS**；不创建 Tag/Release。
+- 不采购 XVF3800、不做远场阵列/板级改造（issue 非目标）；本 Issue 预期在实机验收完成前保持 OPEN（沿用 #58 先例）。
 
 ## 3. 语音平台部署原则
 

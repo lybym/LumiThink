@@ -92,8 +92,9 @@ jobs:
             deploy/xiaozhi/gateway_bridge/lumithink_llm.py \
             deploy/xiaozhi/gateway_bridge/install_bridge.py \
             deploy/xiaozhi/tts_stub.py \
-            deploy/xiaozhi/probe_e2e07.py
-          echo "py_compile OK (module, installer, stub, probe)"
+            deploy/xiaozhi/probe_e2e07.py \
+            deploy/xiaozhi/probe_e2e09.py
+          echo "py_compile OK (module, installer, stub, probes)"
 
       - name: gateway-bridge tier template — bridge LLM only, loopback, token by env name
         shell: bash
@@ -432,6 +433,30 @@ jobs:
             --turn-timeout 90 \
             --expect-abort-fence
 
+      - name: Barge-in measurement — interrupt→stop→recovery trials (issue 59, synthetic agent)
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source e2e07.env; set +a
+          # E2E-09 (issue #59): multi-trial barge-in measurement over the
+          # wired loop — per trial: prompt → downlink audio → wire `abort` →
+          # MEASURE abort→tts-stop → ZERO late frames after the stop → the
+          # recovery turn must reach REAL audio again (the server-side half
+          # of the upstream "no audio after interruption" report, issue
+          # #743). Variants: consecutive barge-ins on one connection
+          # (连续抢话), a DELAYED abort (network-jitter proxy), and a
+          # playback-less idle abort (false-interrupt protocol proxy —
+          # recorded, never asserted). Latencies are candidate baselines
+          # printed for evidence; the HARD gates are the structural
+          # invariants. Real-device AEC acceptance stays physical (runbook
+          # §12) — this step never claims it.
+          "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" deploy/xiaozhi/probe_e2e09.py \
+            --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+            --device-id aa:bb:cc:dd:ee:08 --client-id e2e09-bargein \
+            --auth-key "${XIAOZHI_AUTH_KEY}" \
+            --trials 6 --turn-timeout 90 \
+            --expect-barge-in-measurement
+
       - name: Server restart → reconnect → same trusted session continues
         shell: bash
         run: |
@@ -536,6 +561,22 @@ jobs:
           done
           grep -q "real agent workers .*live" gateway-host-real.log \
             || { echo "::error::no live real DSH worker observed at settlement"; exit 1; }
+
+      - name: Barge-in measurement with the REAL DSH worker (issue 59)
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source e2e07.env; set +a
+          # The same barge-in measurement instrument, now with the REAL
+          # locked-version DSH worker answering every turn (interrupt,
+          # stop, recovery) — the cancel path the physical acceptance will
+          # depend on is exercised in the wired loop at this HEAD too.
+          "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" deploy/xiaozhi/probe_e2e09.py \
+            --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+            --device-id aa:bb:cc:dd:ee:08 --client-id e2e09-bargein-real \
+            --auth-key "${XIAOZHI_AUTH_KEY}" \
+            --trials 2 --variants consecutive,delayed --turn-timeout 90 \
+            --expect-barge-in-measurement
 
       - name: Real-agent evidence — host log stays content-free
         shell: bash
