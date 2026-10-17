@@ -352,11 +352,15 @@ export function createVoiceBridge(options: VoiceBridgeOptions): VoiceBridgeServi
   }
 
   /**
-   * Marker used as the `messageId` of a FAILED settlement: the attempt ended
-   * without any durable assistant message, so no message id exists (E2E-03,
-   * issue #53 DoD 2: 模型失败必须把轮次带到终态，而不是永久 RUNNING).
+   * Marker used as the `messageId` of a settlement whose attempt ended
+   * WITHOUT any durable assistant message, so no message id exists: the
+   * FAILED settlement (E2E-03, issue #53 DoD 2: 模型失败必须把轮次带到终态，
+   * 而不是永久 RUNNING) and — since E2E-09 (issue #59) — the CANCELLED
+   * settlement (a barge-in cancels the attempt before any durable
+   * settlement). The value-free class travels only into the bridge audit,
+   * never into the event payload.
    */
-  const FAILED_SETTLEMENT_MESSAGE_MARKER = "durable-settlement-absent";
+  const DURABLE_SETTLEMENT_ABSENT_MARKER = "durable-settlement-absent";
 
   /**
    * Settle the active turn FAILED when its attempt ended without a durable
@@ -386,7 +390,7 @@ export function createVoiceBridge(options: VoiceBridgeOptions): VoiceBridgeServi
         sessionKey: state.sessionKey,
         turnId: active.turnId,
         epoch: active.epoch,
-        messageId: FAILED_SETTLEMENT_MESSAGE_MARKER,
+        messageId: DURABLE_SETTLEMENT_ABSENT_MARKER,
         finalState: "FAILED",
       },
     });
@@ -604,6 +608,27 @@ export function createVoiceBridge(options: VoiceBridgeOptions): VoiceBridgeServi
         epoch: parsed.epoch,
         resultCode: "ok",
         count: null,
+      });
+      // E2E-09 (issue #59): a CANCELLED settlement owes the observers the
+      // same turn.settled event COMPLETED/FAILED settlements emit. The
+      // payload schema always allowed finalState "CANCELLED", but nothing
+      // ever emitted it — so a mid-stream barge-in (the common real
+      // interruption shape: sentences are delivered at stream-gate
+      // ADMISSION while the Adapter holds no playback binding yet) never
+      // produced the downstream tts_end(interrupted) nor the whenIdle
+      // evidence line; the bridge-side stream then only ended at the turn
+      // timeout. The messageId is the same value-free durable-absent
+      // reference (the attempt was cancelled before any durable settlement).
+      emit({
+        kind: "event",
+        name: "turn.settled",
+        payload: {
+          sessionKey: parsed.sessionKey,
+          turnId: parsed.turnId,
+          epoch: parsed.epoch,
+          messageId: DURABLE_SETTLEMENT_ABSENT_MARKER,
+          finalState: "CANCELLED",
+        },
       });
       emit({
         kind: "event",

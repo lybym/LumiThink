@@ -1,8 +1,8 @@
-# 小智私有服务端部署 Runbook（E2E-04，issue #54）
+# 小智私有服务端部署 Runbook（E2E-04，issue #54；E2E-08 实机 §11（issue #58）；E2E-09 打断/AEC §12（issue #59））
 
-> 状态：随 E2E-04 交付 ｜ 日期：2026-10-17 ｜ 对应 [Issue #54](https://github.com/lybym/LumiThink/issues/54) · [VOICE_GATEWAY_PROTOCOL §1](../../docs/VOICE_GATEWAY_PROTOCOL.md) · [VOICE_HARDWARE §2/§3](../../docs/VOICE_HARDWARE.md) · [R1-08 Runbook](../runbook.md)
+> 状态：随 E2E-04 交付 ｜ 日期：2026-10-17 ｜ 对应 [Issue #54](https://github.com/lybym/LumiThink/issues/54) · [Issue #58](https://github.com/lybym/LumiThink/issues/58) · [Issue #59](https://github.com/lybym/LumiThink/issues/59) · [VOICE_GATEWAY_PROTOCOL §1](../../docs/VOICE_GATEWAY_PROTOCOL.md) · [VOICE_HARDWARE §2/§3](../../docs/VOICE_HARDWARE.md) · [R1-08 Runbook](../runbook.md)
 >
-> 本文把 [xinnan-tech/xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server) 钉死版本部署到与 LumiThink 同一台 Linux 主机，建立可复现的单机启动/健康/鉴权/配置基础。**验收口径：私有服务端已验证，真实设备仍待 #E2E-08** —— 本 runbook 与 CI 不宣称实机语音可用。
+> 本文把 [xinnan-tech/xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server) 钉死版本部署到与 LumiThink 同一台 Linux 主机，建立可复现的单机启动/健康/鉴权/配置基础。**验收口径：私有服务端已验证；真实设备接入面待 #E2E-08（§11）；现有固件 AEC 效果与打断可靠性待 #E2E-09（§12）** —— 本 runbook 与 CI 不宣称实机语音可用，不代领任何实机 PASS。
 
 ## 1. 版本钉死与拓扑（单一事实源 `deploy/xiaozhi/version.env`）
 
@@ -347,4 +347,126 @@ done
 | 1. 实机 10 轮真实 LLM 语音回答 | real 档接线环 **10 连轮**（协议模拟设备；§11.5 可复现） | §11.4 实机 10 轮逐轮记录——**未执行前不标 PASS** |
 | 2. 冷启动/重连/再配网/断网恢复客观留证 | 服务端重启续接 + 租约/会话语义（既有 CI） | §11.3 步 4 + §11.4 故障恢复记录 |
 | 3. 监护人绑定有效；未绑定/盗用无法接入；无凭据暴露 | 未绑定负例探针（新）+ 鉴权映射套件 + 凭证非 MAC 派生专测 | 实机复核随 §11.4 |
-| 4. 不引入 XVF3800/四麦/新板级；AEC/打断归 E2E-09 | 本 PR 零硬件面改动（文档记录） | AEC 效果实测归 E2E-09 |
+| 4. 不引入 XVF3800/四麦/新板级；AEC/打断归 E2E-09 | 本 PR 零硬件面改动（文档记录） | AEC 效果实测与打断可靠性归 E2E-09（§12） |
+
+## 12. E2E-09 现有固件 AEC 打断实测（issue #59）：打断/AEC 验收 runbook
+
+> 口径先行：本节是**运营者执行脚本 + 记录合同**（沿用 §11 的 #58 先例）。可自动化面（接线环多轮打断测量、可信 epoch 零漏出回归、协议模拟设备的打断→停播→恢复实测）已由 CI 证明（§12.1）；**真实设备项（DoD 1/2 的物理面、DoD 3 全部）必须由本节实机执行留证，CI 与文档不代领、不标 PASS**。不采购 XVF3800（issue 非目标）；不创建 Tag/Release；Mock/合成验证不标注为真实设备验收；**真实儿童语音不进任何调试环**（成人测试语音，或无个人数据的对照录音）。
+
+### 12.1 已由 CI 证明的自动化面（E2E-09 起，`e2e-07-gateway-wiring-gate.yml`）
+
+- **多轮打断测量仪器**（`deploy/xiaozhi/probe_e2e09.py`，协议模拟设备）：每轮 提示→下行真实 Opus→线协议 `abort`→**实测 abort→tts stop 时延**→stop 后迟到帧必须为 0→**恢复轮必须重新到达真实音频**（上游"打断后收不到后续语音"报告 [xinnan-tech issue #743](https://github.com/xinnan-tech/xiaozhi-esp32-server/issues/743) 的**服务端半边**复核；设备半边归 §12.4）。变体：同连接连续抢话（连续两轮打断后恢复）、延迟打断（若干音频帧后才发出 abort——网络抖动代理）、空闲 abort（无播放打断——误打断的协议代理，服务端是否回 stop **只记录不判定**）。synthetic 与 real 档（真实锁定版 DSH worker 应答打断/恢复）各跑一组。
+- **测量纪律**：探针打印的 P50/P95/P99 是**客观服务端测量、候选基线**——不是 SLA、不是实机数值、不作为门禁；硬门禁是结构不变量（每轮必达 stop、零迟到帧、恢复轮必达音频、失败按类别枚举：`no_stop_after_abort` / `late_frames_after_stop` / `recovery_no_audio` / `recovery_timeout` / `connection_lost` / `no_playback_start`）。
+- **可信 epoch 零漏出回归**（`tests/server/voice-gateway-barge-in.spec.ts`，DoD 2 自动化面）：6 连轮 打断→`tts_end(interrupted)`→旧轮 0 句/0 旧 epoch 帧过传输→被打断轮结算 **CANCELLED**→恢复轮在新 epoch 完成播放；无播放 abort 为枚举化良性事件（无 epoch 提升、连接存活、下一轮正常）；延迟打断同样零漏出。旧轮**记忆写入为 0** 由 CANCELLED 结算在 R1-V1 Orchestrator 合同下结构性成立（fence 拒绝已失效 epoch 的写入，`tests/domain/voice/race.spec.ts` 既有证明）。
+- **三个时间点的自动化对应**：打断触发 = 探针 abort 发出；设备停播（服务端指令面）= `tts stop` 帧到达；服务端取消 ACK = 网关 `tts_end(interrupted)`/fence；whenIdle 停稳 = `turn.settled finalState=CANCELLED`（gateway-host 日志）。**实机的对应时间点必须按 §12.6 以串口+录屏实测**。
+
+### 12.2 设备侧 AEC 链路记录表（实施范围 1：试验开始前逐项核对并冻结）
+
+试验开始前逐项记录（留存于运营者证据目录；串口日志原文不入 Git，仅内容无关事实可入档）：
+
+| 记录项 | 取得方式 | 备注 |
+| --- | --- | --- |
+| 固件版本串/binary 来源 | 串口启动日志 + 固件提供方构建记录 | 预期 `v2.5.2_nulllab-ai-vox-v3`（§10）；binary SHA 实记 |
+| 来源 commit/板级配置 | `78/xiaozhi-esp32` tag `v2.5.2` 树内 `main/boards/nulllab-ai-vox-v3/` | 官方基线 + 官方树内 board（§10） |
+| ESP-IDF 版本 | 构建记录/启动日志 | 与构建方核对 |
+| `CONFIG_USE_DEVICE_AEC` 实际值 | 构建配置（sdkconfig）/板级 config.h | nulllab 默认开（§10）；**开启 ≠ 有效**，效果归 §12.5 |
+| 扬声器参考信号链路 | 板级原理/实测：ES8311 播放侧是否有回采/参考给 AEC | 无参考信号 = AEC 结构性不可用，如实记录并按 §12.8 走降级 |
+| VAD/唤醒/打断策略（固件侧） | 串口日志实测：唤醒词/按键/VAD 何者触发设备 `abort` 上行 | 三种 reason（wake_word_detected/manual/vad_detected）触发路径实记（对照 VOICE_GATEWAY_PROTOCOL §6 清单） |
+| 服务端自动打断链路（代码事实） | pinned commit `core/handle/receiveAudioHandle.py`：hello `features.aec=true` → `conn.client_aec` → 播放中（非 manual 模式）VAD 出人声即自动 `handleAbortMessage` | 设备 hello `features.aec` 实际取值随串口日志记录；**WebSocket 直连路径的下行参考缓存仅用于 MQTT 网关分支，普通 WS 下行无服务端回声对消——回声对消只能来自设备侧** |
+| 音频协议/Opus 帧时长/采样时序 | 设备 hello `audio_params` + 服务端日志 | 上行 16 kHz/下行协商值；帧时长实记 |
+| 串口日志 | 一次完整"播报中插话"全程 | 时间戳与 §12.4 轮次记录对齐 |
+
+### 12.3 验收门限冻结（DoD 4 前提：先冻结，后试验）
+
+第 1 轮实机试验前由运营者填写并冻结下表；**试验中途改表 = 已跑轮次作废重跑**。候选基线来自 [VOICE_RUNTIME §9](../../docs/VOICE_RUNTIME.md)（**候选值，非 SLA**）；冻结值可上调（放宽）或下调（收紧），冻结后的值是唯一验收依据——Mock/探针毫秒数永不充当实机门限：
+
+| 参数 | 冻结值（试验前由运营者填写） |
+| --- | --- |
+| 近场距离 | （建议 0.5 m；远场对照 2–3 m 仅作记录不作门限） |
+| 环境噪声 | （安静：____；轻噪声：____） |
+| 播放音量 | 低/高两档固定音量（设备最大音量 ____% / ____%） |
+| 停播 P95（T0 人声→T1 设备停播） | （候选 ≤ 200 ms） |
+| 服务端取消 ACK P95（T0→T2） | （候选 ≤ 500 ms） |
+| whenIdle 停稳 P95（T0→T3） | （候选 ≤ 1 s） |
+| 恢复 P95（T1→下一轮首音/首句） | （运营者冻结） |
+| 误打断率上限 | （TTS 纯播放轮的打断触发/ASR final 计数阈值；运营者冻结） |
+| 打断成功率下限 | （运营者冻结） |
+
+### 12.4 ≥100 次实测矩阵与逐轮记录（DoD 1；实施范围 2/3/4）
+
+同一版本真实硬件（每轮表头记录固件版本串 + `deploy/xiaozhi/version.env` + 服务端 git SHA）完成**至少 100 次播报中打断试验**，场景矩阵（组合轮可复用计数，总数 ≥100）：
+
+| 场景 | 最少轮数 | 观察重点 |
+| --- | --- | --- |
+| 静音基线（唤醒→对话，无播报冲突） | 10 | 基线可用性 |
+| TTS 单独播放（无人说话） | 20 | **误打断**：AEC 回声残留触发打断/ASR final 的次数 |
+| TTS 播放同时说话（核心场景） | 30 | 有效打断：停播、取消 ACK、恢复 |
+| 近场/远场/侧向（0.5 m / 2–3 m / 侧向） | 15 | 距离与方位对打断与误触发的影响 |
+| 低/高播放音量 | 15 | 音量对 AEC 残留与打断的影响 |
+| 安静/轻噪声 | 10 | 噪声下的表现 |
+| 连续抢话（播报中连续两次以上插话） | 10 | 每次打断恰好一次停播；无卡死 |
+| 打断后播放恢复 | 10 | 新轮次正常出声（设备侧 #743 形状） |
+| 无说话只有播放（误打断对照） | 20 | 与"TTS 单独播放"合并计数亦可 |
+| 网络抖动（限网/弱信号） | 5 | 延迟到达的打断仍生效；无残留播放 |
+| 服务端已取消但设备仍播放（残留观察） | 5 | 拔网/断上行后设备侧残留播报如实记录 |
+
+**逐轮记录表列**（运营者证据目录）：轮次、场景、触发方式（语音/按键/唤醒）、T0 人声开始、T1 设备停播、T2 服务端取消 ACK、T3 whenIdle 停稳、恢复（下一轮首音/回话）、AEC 回声残留（TTS 内容是否被识别/复播：0/1）、ASR 误触发（0/1）、重复触发（0/1）、失败类别、备注。
+
+**失败类别枚举**：`no_stop` / `late_stop` / `echo_false_trigger` / `repeat_trigger` / `recovery_no_audio`（#743 设备侧形状）/ `stuck_state` / `other`。
+
+工具：串口日志时间戳 + 录屏 + 服务端 journald（abort 处理）+ gateway-host `turn.settled` 日志（内容无关）。汇总输出必须给出：成功率、误打断率、停播与恢复时延 P50/P95/P99、失败类别分布、可复现步骤。
+
+### 12.5 AEC 回声抑制对照证据（DoD 3；仅成人或无个人数据）
+
+- **AEC-on 有效对照**：在"TTS 播放同时说话"场景录音/转写，上行转写应包含**说话内容**且**不含（或冻结阈值内极少含）TTS 播放内容**——这是 AEC 真正起作用的证据；
+- **TTS 纯播放对照**：无人说话时上行 ASR final 计数（回声残留/误触发的客观量），对照 §12.3 冻结的误打断率上限；
+- **反模式（明确无效证据）**：无 AEC 对照、仅 VAD 停播、仅"听感还行"——**不得**作为 AEC 成功依据；VAD 停播只证明打断触发，不证明回声抑制；
+- 录音留存与脱敏由运营者负责；入档证据只保留内容无关事实（转写命中/未命中计数、误触发计数、场景参数）。
+
+### 12.6 三个时间点的实机测法（实施范围 3）
+
+| 时间点 | 实机测法 | 服务端对照面 |
+| --- | --- | --- |
+| T0 人声/打断触发 | 串口日志 VAD/唤醒/按键事件时间戳 | （探针面：abort 发出时刻） |
+| T1 设备停播 | 录屏/串口播放停止时刻 | 下发 `tts stop` 时刻（journald）；`abort_to_stop_ms`（协议模拟设备） |
+| T2 服务端取消 ACK | —（设备侧无直接观测，以 T1 后服务端日志为准） | gateway-host 帧 `tts_end(interrupted)` + 可信 epoch fence 日志 |
+| T3 whenIdle 停稳 | —（同上） | gateway-host `turn.settled finalState=CANCELLED` 日志 |
+
+实机测量以串口+录屏为准，服务端日志为对照源；`stop 及恢复行为可实测` 的服务端面已由 §12.1 探针证明。
+
+### 12.7 服务端侧可复现实验脚本（与实机并行的机器面）
+
+```bash
+# 协议模拟设备的 N 轮打断测量（同 CI synthetic 步骤；运营者可加大 --trials，
+# 例如对齐 DoD 1 的 100 次做服务端满量程回归）
+"$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" deploy/xiaozhi/probe_e2e09.py \
+  --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+  --device-id aa:bb:cc:dd:ee:08 --client-id e2e09-operator \
+  --auth-key "$XIAOZHI_AUTH_KEY" --trials 100 --variants consecutive,delayed,idle
+
+# real 档（真实锁定版 DSH worker 应答打断/恢复；§3.7 换档即此命令）：
+LUMITHINK_GATEWAY_AGENT=real node --experimental-strip-types scripts/xiaozhi/gateway-host.ts &
+# …就绪行 GATEWAY-HOST READY agent=real 后，同命令换 --device-id aa:bb:cc:dd:ee:07
+```
+
+### 12.8 降级方案决定流程（DoD 4）
+
+- 若冻结门限（§12.3）未达成：本 Issue **阻止产品 Release**（RELEASE_GATE 口径），**或**由用户**显式决定**以"用户显式按键中断"作为可验收的降级交互；
+- 决定必须以 issue comment 留证：证据链接 + 门限对照表 + 决定人与日期；不得以 Mock/探针毫秒数、合成指标或"主观感觉能打断"替代；
+- 降级模式下 DoD 2 的 epoch 零漏出要求不变（打断旧 Agent 的自动化面已证，实机按键中断同样走 `abort` 线协议）；
+- 不虚构全双工能力：文档与产品语义只声明实测支持过的交互模式。
+
+### 12.9 回退与故障恢复
+
+1. **固件回退**：§11.6 步 1（原厂 bin / 官方基线构建）。
+2. **服务端侧回退**：§8（版本/配置/停用/凭证应急）。
+3. **打断测量的机器面**：探针连接即断、不落盘、无持久状态；网关宿主异常 = §3.7 当轮 fail-closed + 重启；测量轮失败按 §12.1 失败类别记录，不影响其他轮。
+
+### 12.10 DoD 口径对照（如实声明）
+
+| DoD | 自动化面（本 PR 已证） | 物理面（本节执行后留证） |
+| --- | --- | --- |
+| 1. 同一版本真实硬件 ≥100 次播报中打断试验：成功率/误打断率/P50/P95/P99 停播与恢复时延/失败类别/可复现步骤 | 接线环多轮打断测量（`probe_e2e09.py`：synthetic + real 档；P50/P95/P99 停播与恢复、失败类别枚举、连续/延迟/空闲变体；CI 复现 = `e2e-07-gateway-wiring-gate.yml`） | §12.4 实机 ≥100 轮逐轮记录——**未执行前不标 PASS** |
+| 2. 可用交互模式下正确打断旧 Agent；可信 epoch 旧文本/音频/记忆写入为 0；服务端 stop 及恢复行为可实测 | `voice-gateway-barge-in.spec.ts`（CANCELLED 结算、零旧轮句/零旧 epoch 帧、恢复轮完成、无播放 abort 良性、延迟打断零漏出）+ 探针恢复断言（#743 服务端半边） | 实机语音/按键打断逐轮记录（§12.4/§12.6） |
+| 3. AEC 回声抑制在限定场景内有对照录音/转写结果 | —（CI 无真实音频/设备，结构性不代领） | §12.5 对照证据（仅成人或无个人数据） |
+| 4. 未达门限 → 阻止 Release 或显式按键降级，不虚构全双工 | 门限冻结表 + 降级决定流程（§12.3/§12.8） | 运营者实测 + 用户显式决定留证 |
