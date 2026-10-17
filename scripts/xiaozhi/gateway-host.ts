@@ -149,6 +149,24 @@ async function main(): Promise<void> {
     // Content-free lifecycle diagnostics (CI evidence; no content).
     onBridgeFrame: (frame) => {
       console.log(`[gateway-host] frame -> bridge kind=${frame.kind}`);
+      // The SYNTHETIC runtime is pump-driven by contract (deterministic
+      // replay surface): pump only AFTER the dispatch completed —
+      // turn_started is sent once turn.prompt+turn.stream both succeeded,
+      // so the runtime's attempt is active and the deltas land in the
+      // stream gate. Pumping at turn.accepted would re-enter mid-dispatch
+      // and lose every delta (observed: settle COMPLETED, 0 admissions).
+      if (frame.kind === "turn_started" && agentRuntime === "synthetic") {
+        for (const sessionKey of wired.stack.mappingSnapshot().map((entry) => entry.sessionKey)) {
+          wired.stack.stack.pumpRuntime(sessionKey, 50);
+        }
+        if (syntheticPump === null) {
+          syntheticPump = setInterval(() => {
+            for (const sessionKey of wired.stack.mappingSnapshot().map((entry) => entry.sessionKey)) {
+              wired.stack.stack.pumpRuntime(sessionKey, 50);
+            }
+          }, 100);
+        }
+      }
     },
   });
 
@@ -186,21 +204,6 @@ async function main(): Promise<void> {
     const payload = (frame.payload ?? {}) as Record<string, unknown>;
     if (frame.name === "turn.accepted" && typeof payload.turnId === "string") {
       pendingTurn = payload.turnId;
-      // The SYNTHETIC runtime is pump-driven by contract (deterministic
-      // replay surface): the wired host drives it here, the way the tests
-      // do. The REAL DSH worker streams autonomously — never pumped.
-      if (agentRuntime === "synthetic") {
-        for (const sessionKey of wired.stack.mappingSnapshot().map((entry) => entry.sessionKey)) {
-          wired.stack.stack.pumpRuntime(sessionKey, 50);
-        }
-        if (syntheticPump === null) {
-          syntheticPump = setInterval(() => {
-            for (const sessionKey of wired.stack.mappingSnapshot().map((entry) => entry.sessionKey)) {
-              wired.stack.stack.pumpRuntime(sessionKey, 50);
-            }
-          }, 100);
-        }
-      }
       if (watchdog === null) {
         watchdog = setTimeout(() => {
           if (pendingTurn === null) {
