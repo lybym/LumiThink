@@ -548,10 +548,17 @@ class LLMProvider:
                     }
                 except (TypeError, ValueError):
                     audio_params = None
+            # The Adapter contract's Device-Id grammar is the MAC
+            # "separator-stripped and lower-cased by the transport"
+            # (VOICE_GATEWAY_PROTOCOL §2.1) — the wire header carries
+            # `aa:bb:cc:dd:ee:07`; the bridge IS the transport here.
+            normalized_device_id = (
+                device_id.replace(":", "").replace("-", "").replace(".", "").strip().lower()
+            )
             self._client.send({
                 "kind": "device_hello",
                 "connId": conn_id,
-                "deviceId": device_id,
+                "deviceId": normalized_device_id,
                 "clientId": headers.get("client-id") or None,
                 "authorization": headers.get("authorization") or None,
                 "audioParams": audio_params,
