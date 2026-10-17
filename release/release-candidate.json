@@ -1,0 +1,285 @@
+{
+  "schemaVersion": "1.0",
+  "issue": "https://github.com/lybym/LumiThink/issues/62",
+  "candidate": {
+    "version": "1.0.0-rc.1",
+    "assembledAt": "2026-10-17"
+  },
+  "productScope": {
+    "frozen": true,
+    "frozenAt": "2026-10-17",
+    "inScope": [
+      {
+        "id": "hw-esp32s3",
+        "item": "现有普通麦克风 ESP32-S3 整机（nulllab AI-VOX3 机芯盒）"
+      },
+      {
+        "id": "fw-v252-nulllab",
+        "item": "测试固件 v2.5.2_nulllab-ai-vox-v3（官方 v2.5.2 基线 + 官方树内板级，构建期 OTA_URL 覆盖）"
+      },
+      {
+        "id": "aec-barge-in",
+        "item": "现有固件 AEC 与播报中打断（设备侧 CONFIG_USE_DEVICE_AEC + 服务端 abort 线协议）"
+      },
+      {
+        "id": "srv-xiaozhi-private",
+        "item": "私有化小智服务端（钉死 commit，gateway-bridge 档位 + 真实 ASR/TTS 档位）"
+      },
+      {
+        "id": "real-providers",
+        "item": "真实 DSH Runtime / LLM / ASR / TTS Provider（经评审档位；凭据仅运营者侧，默认关）"
+      },
+      {
+        "id": "skills",
+        "item": "专业 Skill（emotion_support / homework_initiation，Evidence 绑定与受控记忆）"
+      },
+      {
+        "id": "parent-web",
+        "item": "家长 Web（鉴权/授权/导出/清理）与语音端权限联动"
+      }
+    ],
+    "excluded": [
+      {
+        "id": "hw-xvf3800",
+        "item": "XVF3800 四麦克风阵列 / 远场阵列 / DSP 板级改版",
+        "reason": "issue 非目标：不采购、不做板级改造；XVF3800 仍是后续路线的目标选型，不影响本候选"
+      },
+      {
+        "id": "child-real-data",
+        "item": "真实儿童个人数据参与联调或验收",
+        "reason": "数据红线：仅成人/合成语料；第三方外发评审 not_performed 闸门未变前结构上不可用"
+      },
+      {
+        "id": "mock-as-real",
+        "item": "以合成/Mock 指标冒充真实模型/真实硬件性能",
+        "reason": "诚实边界：合成指标只是候选基线，实机门限必须先冻结再实测"
+      }
+    ]
+  },
+  "implementationScope": [
+    {
+      "id": "scope-1-freeze",
+      "item": "冻结首版产品范围",
+      "status": "delivered_this_pr",
+      "pointer": "release/release-candidate.json productScope（本表）"
+    },
+    {
+      "id": "scope-2-register-evidence",
+      "item": "逐条登记实际验收证据和可访问的测试记录、版本 SHA、设备配置、性能和安全报告",
+      "status": "delivered_this_pr",
+      "pointer": "release/release-candidate.json evidence（自动化面 CI 持续证明；物理面各行 pending，按 protocol 执行后经评审 PR 记录）"
+    },
+    {
+      "id": "scope-3-gonogo",
+      "item": "独立验收人对技术安全、产品体验、隐私/授权、专业 Skill、运维、回退进行明确 Go/No-Go 判定；未通过的必做项不可降级成文字说明后发版",
+      "status": "pending_human_execution",
+      "pointer": "deploy/xiaozhi/runbook.md §15.5"
+    },
+    {
+      "id": "scope-4-docs-and-automation",
+      "item": "完成 README、Roadmap、发行说明、版本号和 Release Manifest 更新；运行全套 R0/R1/Voice/E2E 自动化并复核 CI 状态",
+      "status": "delivered_this_pr",
+      "pointer": "docs/RELEASE_NOTES.md + package.json 1.0.0-rc.1 + release/release-manifest.json（本 PR 重新生成并评审）；全套自动化 = 本 PR 触发的各门禁 workflow；真实硬件验收归 scope-5"
+    },
+    {
+      "id": "scope-5-demo-flow",
+      "item": "记录真实服务器/设备启动、激活、对话、打断、重连、家长控制和恢复的完整演示流程",
+      "status": "pending_human_execution",
+      "pointer": "deploy/xiaozhi/runbook.md §15.4（重复可执行的演示脚本与记录表）"
+    },
+    {
+      "id": "scope-6-user-release-approval",
+      "item": "最终通过后才提请用户确认创建首个产品 GitHub Release；不在本串行 Issue 流中绕过用户发版偏好",
+      "status": "pending_human_execution",
+      "pointer": "release/release-candidate.json release.requiresExplicitUserApproval（硬常量）+ deploy/xiaozhi/runbook.md §15.6"
+    }
+  ],
+  "acceptanceCriteria": [
+    {
+      "id": "dod-1",
+      "statement": "有可重复完整演示：真实 ESP32-S3 收音→ASR→真实 DSH/LLM→安全/专业/受控记忆→TTS→设备播放→播报中 AEC 打断→继续对话"
+    },
+    {
+      "id": "dod-2",
+      "statement": "家长 Web 鉴权/授权/导出/清理和语音端权限联动完成实测；隐私、安全、外发文档齐全"
+    },
+    {
+      "id": "dod-3",
+      "statement": "稳定性、延迟、误打断、回滚、失败注入均有真实设备/真实服务端证据和明确 Gate 结论，非仅合成 CI"
+    },
+    {
+      "id": "dod-4",
+      "statement": "Release 候选含完整版本清单/说明与已知限制；Go 判定后仍须用户批准才能真正创建 GitHub Release"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "ev-dod1-automated-voice-loop",
+      "covers": ["dod-1"],
+      "surface": "automated",
+      "status": "proven",
+      "gate": ".github/workflows/e2e-07-gateway-wiring-gate.yml",
+      "proof": [
+        "tests/server/voice-gateway-wiring.spec.ts",
+        "tests/server/voice-gateway-barge-in.spec.ts",
+        "deploy/xiaozhi/probe_e2e07.py",
+        "deploy/xiaozhi/probe_e2e09.py",
+        "deploy/xiaozhi/runbook.md"
+      ],
+      "note": "real 档（真实锁定版 DSH worker）接线环 10 连轮全链路（hello→ASR→真实 DSH→Safety→句子→TTS→真实 Opus→stop）+ 多轮打断→停播→零迟到帧→恢复轮必达；协议模拟设备，运行与复现命令见 runbook §11.5/§12.7"
+    },
+    {
+      "id": "ev-dod1-automated-child-scenario",
+      "covers": ["dod-1"],
+      "surface": "automated",
+      "status": "proven",
+      "gate": ".github/workflows/r1-baseline-gate.yml",
+      "proof": [
+        "tests/server/e2e-10-child-scenario.spec.ts",
+        "tests/server/e2e-10-memory-governance.spec.ts"
+      ],
+      "note": "安全/专业/受控记忆在真实组合运行时逐轮版本可追溯（Persona/Skill/Evidence 版本、危机确定性转介、确认→修订→删除全环）"
+    },
+    {
+      "id": "ev-dod1-device-demo",
+      "covers": ["dod-1"],
+      "surface": "human",
+      "status": "pending",
+      "protocol": "deploy/xiaozhi/runbook.md §15.4 完整演示流程（汇编 §11.4 / §12.4 / §13.2 / §14.3 逐轮记录表）",
+      "note": "真实 ESP32-S3 收音→播放→播报中打断→继续对话的实机完整演示；未执行前不标 PASS"
+    },
+    {
+      "id": "ev-dod2-automated-guardian",
+      "covers": ["dod-2"],
+      "surface": "automated",
+      "status": "proven",
+      "gate": ".github/workflows/r1-baseline-gate.yml",
+      "proof": [
+        "tests/server/e2e-10-guardian-governance.spec.ts",
+        "tests/server/guardian-endpoint.spec.ts",
+        "tests/server/data-lifecycle.spec.ts"
+      ],
+      "note": "监护人治理旅程自动化面：登录/告知/撤权拒轮（含重放拒绝）/记录开关/导出/主体级清除对儿童会话实际生效；未授权访问拒绝"
+    },
+    {
+      "id": "ev-dod2-automated-privacy",
+      "covers": ["dod-2"],
+      "surface": "automated",
+      "status": "proven",
+      "gate": ".github/workflows/r1-baseline-gate.yml",
+      "proof": [
+        "tests/domain/boundary.spec.ts",
+        "tests/server/secrets-registry.spec.ts",
+        "docs/PRIVACY_DATA_FLOW.md"
+      ],
+      "note": "领域边界守卫（lib/domain 无 node/react/prisma 依赖、无网络/动态执行）、Secrets 登记与脱敏口径回归"
+    },
+    {
+      "id": "ev-dod2-automated-web-contract",
+      "covers": ["dod-2"],
+      "surface": "automated",
+      "status": "proven",
+      "gate": ".github/workflows/r1-release-gate.yml",
+      "proof": [
+        "tests/release/release-gate.spec.ts",
+        "tests/server/gateway-egress-proxy.spec.ts"
+      ],
+      "note": "Web Mock E2E 真实 HTTP（伪造身份 403、中途取消、幂等重放）+ 全程零出网观测 + gate 产物泄漏扫描"
+    },
+    {
+      "id": "ev-dod2-automated-policy-docs",
+      "covers": ["dod-2"],
+      "surface": "automated",
+      "status": "proven",
+      "gate": ".github/workflows/r1-release-gate.yml",
+      "proof": [
+        "docs/SAFETY_POLICY.md",
+        "docs/EVIDENCE_POLICY.md",
+        "docs/MODEL_GATEWAY.md"
+      ],
+      "note": "安全策略/证据治理/模型外发文档面随 manifest 锁定版本（任何漂移自动 BLOCK）；外发评审 not_performed 闸门保持"
+    },
+    {
+      "id": "ev-dod2-device-guardian",
+      "covers": ["dod-2"],
+      "surface": "human",
+      "status": "pending",
+      "protocol": "deploy/xiaozhi/runbook.md §13.3 监护人端逐项点击清单 + §14.5 S1–S5 安全核验",
+      "note": "家长 Web 鉴权/授权/导出/清理与语音端权限联动的实机逐项实测；未执行前不标 PASS"
+    },
+    {
+      "id": "ev-dod3-automated-fault-injection",
+      "covers": ["dod-3"],
+      "surface": "automated",
+      "status": "proven",
+      "gate": ".github/workflows/e2e-07-gateway-wiring-gate.yml",
+      "proof": [
+        "deploy/xiaozhi/probe_e2e11.py",
+        "tests/server/e2e11-reliability.spec.ts",
+        "tests/server/voice-turn-sqlite-store.spec.ts"
+      ],
+      "note": "wifi_drop/cancel_flood/server_restart 探针硬不变量 + 组合栈模型挂起/取消洪泛/SQLite 洪泛持久化回归；时延为客观服务端测量候选基线（非 SLA、非实机数值）"
+    },
+    {
+      "id": "ev-dod3-automated-rollback-drill",
+      "covers": ["dod-3"],
+      "surface": "automated",
+      "status": "proven",
+      "gate": ".github/workflows/r1-release-gate.yml",
+      "proof": [
+        "docs/RELEASE_GATE.md",
+        "scripts/release-gate/cli.ts"
+      ],
+      "note": "升级回滚合成演练 N→N+1→N（同一加密快照，phaseOutcomes 自含 artifact）+ 部署烟测重启恢复；演练证明单机快照状态面"
+    },
+    {
+      "id": "ev-dod3-device-matrix",
+      "covers": ["dod-3"],
+      "surface": "human",
+      "status": "pending",
+      "protocol": "deploy/xiaozhi/runbook.md §12.3/§12.4（门限冻结 + ≥100 次打断实测）与 §14.2/§14.3/§14.4（F1–F10 故障注入 + ≥100 轮实测 + 时延分解）",
+      "note": "真实设备/真实服务端稳定性、延迟、误打断、回滚、失败注入实测与明确 Gate 结论；未执行前不标 PASS"
+    },
+    {
+      "id": "ev-dod4-automated-candidate",
+      "covers": ["dod-4"],
+      "surface": "automated",
+      "status": "proven",
+      "gate": ".github/workflows/r1-release-gate.yml",
+      "proof": [
+        "release/release-manifest.json",
+        "release/release-candidate.json",
+        "docs/RELEASE_NOTES.md",
+        "scripts/release-gate/acceptance.ts",
+        "tests/release/release-candidate.spec.ts"
+      ],
+      "note": "版本 1.0.0-rc.1（package.json ↔ release manifest app.version ↔ 本注册表三方一致，CI 强制）+ 发行说明与已知限制 + 本注册表 invariant 由 CI 持续强制"
+    },
+    {
+      "id": "ev-dod4-human-approval",
+      "covers": ["dod-4"],
+      "surface": "human",
+      "status": "pending",
+      "protocol": "deploy/xiaozhi/runbook.md §15.5（独立验收人 Go/No-Go）+ §15.6（用户显式发版批准）",
+      "note": "Go 判定与用户发版批准均为人工决定；registry 的 structural invariants 保证未走完前 release.state 不可能为 created"
+    }
+  ],
+  "goNoGo": {
+    "decision": "pending",
+    "dimensions": [
+      "technical_safety",
+      "product_experience",
+      "privacy_authorization",
+      "professional_skills",
+      "operations",
+      "rollback"
+    ],
+    "record": null
+  },
+  "release": {
+    "requiresExplicitUserApproval": true,
+    "userApproval": null,
+    "state": "not_created",
+    "record": null
+  }
+}
