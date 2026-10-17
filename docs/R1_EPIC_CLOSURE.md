@@ -59,7 +59,7 @@ R1-V 先导（#28/#29/#30 → PR #47/#48/#49）按 Epic #11 定义**不计入 R1
 - `pnpm build` → 本地受同一 piped-stdio spawn 沙箱边界阻断（Next.js worker spawn `EPERM`），属环境边界而非代码失败；build + 干净环境 boot 由 CI `r1-baseline-gate`（ubuntu）在 main 持续证明，并在本 PR 的 CI 于 PR HEAD 再次执行。
 - `pnpm install --frozen-lockfile` 的 postinstall（prisma generate）受同一 spawn 边界阻断，但 `node_modules/.prisma/client` 已生成且与冻结 lockfile 一致，依赖面完整。
 
-**本 PR HEAD**：全套 r1 门禁（含 build/boot/评测/Web Mock E2E/演练/泄漏扫描/manifest 漂移）在本 PR CI 于新 HEAD 重跑为准。
+**本 PR HEAD（docs-only，收口 PR #75）**：本仓库全部六个门禁 workflow 的触发路径过滤均不含 `docs/**`，docs-only PR 按设计不触发任何门禁检查（先例：docs-only PR [#10](https://github.com/lybym/LumiThink/pull/10) 同样零检查）。收口 PR 的代码内容与 main `05eff7d` 完全一致，因此上列 main 门禁绿记录 + 本地复验即为本收口的验证面；后续任何代码路径变更由对应 PR 的门禁在该新 HEAD 重跑。
 
 ## 4. 诚实边界（收口不代领的面）
 
