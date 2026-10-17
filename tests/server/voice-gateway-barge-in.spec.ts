@@ -274,7 +274,7 @@ test("barge-in trials: interrupt → stop effective → zero stale delivery → 
               entry.frame.reason === "interrupted",
           ),
         ),
-        `trial ${trial}: the device-stop directive (tts_end interrupted) arrived`,
+        `trial ${trial}: the device-stop directive (tts_end interrupted) arrived — DIAG turn=${JSON.stringify(fixture.wired.stack.stack.orchestrator.describeTurn(sessionKey, turnId))} epoch=${String(fixture.wired.stack.stack.orchestrator.currentEpoch(sessionKey))} frames=${JSON.stringify(fixture.outFrames.map((entry) => ({ k: entry.kind, t: entry.frame.turnId, e: entry.frame.epoch, r: entry.frame.reason })))} settled=${JSON.stringify(fixture.settledTurns)} audit=${JSON.stringify(fixture.wired.stack.adapter.auditSnapshot().filter((entry) => entry.action.includes("abort") || entry.action.includes("cancel") || entry.action.includes("rejected")))} gate=${JSON.stringify(fixture.wired.stack.stack.gate.metricsSnapshot())}`,
       );
       interruptedLatencies.push(Date.now() - abortSentAt);
 
