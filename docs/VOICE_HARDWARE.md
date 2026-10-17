@@ -1,6 +1,6 @@
 # 语音硬件和私有化接入选型
 
-> 更新：2026-10-17（§2.4 增补 issue #61） ｜ 状态：**目标硬件与语音平台已选；板级适配/实机验收未完成**  
+> 更新：2026-10-17（§2.5 增补 issue #62） ｜ 状态：**目标硬件与语音平台已选；首版产品发布候选 1.0.0-rc.1 已组装；板级适配/实机验收未完成**  
 > [总体架构](./ARCHITECTURE.md) · [实时语音设计](./VOICE_RUNTIME.md)
 
 ## 1. 当前确定选择
@@ -52,6 +52,11 @@
 
 - **自动化面已由 CI 证明**（`e2e-07-gateway-wiring-gate.yml` + `r1-baseline-gate.yml`，E2E-11 起）：接线环可靠性回归探针 `deploy/xiaozhi/probe_e2e11.py`（真实 agent 运行时档：长稳轮次逐轮时延分解 `stt_echo_ms`/`first_sentence_ms`/`first_audio_ms`/`turn_total_ms` 候选基线 + `wifi_drop` 播放中硬断→重连→恢复轮必达 + `cancel_flood` abort 洪泛→停→零迟到帧→恢复轮必达 + `server_restart` 运营者重启命令播放中注入→连接必断→重连→恢复轮必达）；组合栈回归 `tests/server/e2e11-reliability.spec.ts`（模型挂起→超时清扫 TIMED_OUT→设备恰一次 stop→迟到流完全良性无复活；取消洪泛恰一次 fence/轮、零旧帧泄漏；真实 SQLite 栅栏存储洪泛下持久化/恢复一致性——epoch 单调、不复活、post-fence 写入拒绝）。执行与复现命令见 [runbook §14.1](../deploy/xiaozhi/runbook.md)。
 - **物理面待实机**（[runbook §14](../deploy/xiaozhi/runbook.md) 的故障注入矩阵 F1–F10/≥100 轮记录表/门限冻结/安全核验 S1–S5/重建-回滚-控制面留证）：真实设备 Wi-Fi 断开重连、WS 重绑、服务进程重启、DSH/ASR/TTS/LLM 不可用、取消洪泛、重复设备会话、OTA 失败/回退（若已配置）的实机注入与恢复实测；≥100 轮成人/合成对话（成功率/失败类别/P50/P95/恢复时间/费用）；唤醒→ASR→首安全短句→TTS 首音→播报的实机时延分解与停止响应；激活凭据轮换/安全 WSS-IPC/外发白名单/清理策略 fail-closed 核验；空环境重建、健康检查、受控回滚与生产控制面记录。**未执行前不得标注任何实机 PASS**；不创建 Tag/Release；本 Issue 预期在实机执行前保持 OPEN（沿用 #58/#59/#60 先例）。
+
+### 2.5 E2E-12 首版产品验收门禁状态（issue #62——候选已组装，物理/人工项待执行）
+
+- **自动化面**：发布候选 **1.0.0-rc.1** 已组装（package.json ↔ [release manifest](../release/release-manifest.json) ↔ [验收注册表](../release/release-candidate.json) 三方一致，CI 强制）；冻结首版产品范围（纳入现有 ESP32-S3 整机 + `v2.5.2_nulllab-ai-vox-v3` + 现有固件 AEC/打断 + 私有化小智 + 真实 DSH/LLM/ASR/TTS + 双 Skill + 家长 Web；排除 XVF3800/四麦改版与真实儿童数据联调）；逐条 DoD 证据登记（automated 行 gate/proof 必须真实存在，human 行 pending 不得代领 PASS）与发布纪律 invariant（Go 需六维全 go + 全 human 行 recorded；`release.state=created` 需 Go + 用户显式批准）由 `scripts/release-gate/acceptance.ts` + `tests/release/release-candidate.spec.ts` fail-closed 强制；发行说明与已知限制见 [docs/RELEASE_NOTES.md](./RELEASE_NOTES.md)。
+- **物理/人工面待执行**（[runbook §15](../deploy/xiaozhi/runbook.md)）：完整演示流程（§15.4，汇编 §11.4/§12.4/§13.2/§14.3 记录表）、独立验收人六维 Go/No-Go（§15.5）、用户显式发版批准（§15.6）。**未执行前不得标注任何实机 PASS、不创建 Tag/Release；本 Issue 预期保持 OPEN（沿用 #58–#61 先例）。**
 
 ## 3. 语音平台部署原则
 

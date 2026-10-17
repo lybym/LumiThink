@@ -73,3 +73,12 @@
 - 真实主机运维面（公网扫描、ACME/HSTS、离机备份介质、异地容灾演练、内核级 systemd 沙箱效果）；
 - 人工审批的实际执行（CI 只能要求 approve 存在，不能代替人判断 `pendingHumanReview` 清单）；
 - artifact 存储配额类基础设施失败（不是业务失败，但按外层规则不得据此放行）。
+
+## 8. 首版产品验收门禁（E2E-12，issue #62——随 1.0.0-rc.1 候选交付）
+
+本文件 §1–§7 定义 R1 的自动化发布门禁与四道手工门禁；首版产品验收在其上叠加**产品级 Go/No-Go 层**（[Issue #62](https://github.com/lybym/LumiThink/issues/62)），只增不改 §1–§7 的任何断言：
+
+- **候选注册表** [`release/release-candidate.json`](../release/release-candidate.json)：冻结首版产品范围、逐条登记 DoD 证据（`automated` = CI 门禁证明；`human` = 实机/人工，pending 时不得代领 PASS）。其 invariant 由 `scripts/release-gate/acceptance.ts` + `tests/release/release-candidate.spec.ts` fail-closed 强制（`r1-baseline-gate.yml` 的 `pnpm test`）：pending 决定不得有 recorded human 行；Go 需六维 verdict 全 go、无 blockedItems 且全部 human 行 recorded（**未通过的必做项不可降级成文字说明后发版**）；`release.state=created` 需 Go + 用户显式批准 + release record；`requiresExplicitUserApproval` 为硬常量。
+- **版本 1.0.0-rc.1**：package.json ↔ manifest `app.version` ↔ 注册表三方一致；manifest 随候选 PR 再生成并评审（§2 的显式确认动作），漂移照常 BLOCK。
+- **发行说明与已知限制**：[RELEASE_NOTES](./RELEASE_NOTES.md)；**实机执行与判定流程**：[deploy/xiaozhi runbook §15](../deploy/xiaozhi/runbook.md)（演示脚本、六维 Go/No-Go 记录、用户发版批准与回退）。
+- 口径不变：未走完"实机留证 + Go + 用户批准"前不创建任何 Tag/Release；本节不改变发布判定仍以**全套门禁同时绿**为准的规则。

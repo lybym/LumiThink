@@ -1,4 +1,4 @@
-# 小智私有服务端部署 Runbook（E2E-04，issue #54；E2E-08 实机 §11（issue #58）；E2E-09 打断/AEC §12（issue #59）；E2E-10 儿童场景 §13（issue #60）；E2E-11 可靠性回归 §14（issue #61））
+# 小智私有服务端部署 Runbook（E2E-04，issue #54；E2E-08 实机 §11（issue #58）；E2E-09 打断/AEC §12（issue #59）；E2E-10 儿童场景 §13（issue #60）；E2E-11 可靠性回归 §14（issue #61）；E2E-12 首版产品验收 §15（issue #62））
 
 > 状态：随 E2E-04 交付 ｜ 日期：2026-10-17 ｜ 对应 [Issue #54](https://github.com/lybym/LumiThink/issues/54) · [Issue #58](https://github.com/lybym/LumiThink/issues/58) · [Issue #59](https://github.com/lybym/LumiThink/issues/59) · [VOICE_GATEWAY_PROTOCOL §1](../../docs/VOICE_GATEWAY_PROTOCOL.md) · [VOICE_HARDWARE §2/§3](../../docs/VOICE_HARDWARE.md) · [R1-08 Runbook](../runbook.md)
 >
@@ -601,3 +601,67 @@ LUMITHINK_GATEWAY_AGENT=real node --experimental-strip-types scripts/xiaozhi/gat
 
 - **完成判定**：§14.2–§14.6 留证齐备 + 自动化面 CI 绿 → 依 #58/#59/#60 先例在 issue comment 留证，由运营者/用户决定 issue 关闭或保持 OPEN 待实机执行；**本 PR 交付后 issue 预期保持 OPEN（物理项未执行）**。
 - **回退**：本 PR 不改任何部署配置/数据面；探针与 spec 均为增量证据面，revert 即完全回滚。验收失败按 RELEASE_GATE 口径阻止发版。
+
+## 15. E2E-12 首版产品验收门禁（issue #62）：Release 候选组装与 Go/No-Go runbook
+
+> 口径先行：本节是**验收执行脚本 + 判定记录合同**（沿用 §11–§14 模式），是首版产品验收的最终汇总层。可自动化面（候选注册表 invariant、版本/manifest 漂移门禁、全套 R0/R1/Voice/E2E 门禁）已由 CI 证明（§15.1）；**物理/人工面（完整实机演示、独立验收人 Go/No-Go、用户发版批准）必须由本节执行留证，CI 与文档不代领、不标 PASS**。本候选不创建 Tag/Release；最终发版须用户显式批准（§15.6）。真实儿童语音不进任何调试环（成人/合成语料）。
+
+### 15.1 已由 CI 证明的自动化面（本 PR 起）
+
+- **候选注册表 + 校验器 + 失败注入自测**（`release/release-candidate.json` + `scripts/release-gate/acceptance.ts` + `tests/release/release-candidate.spec.ts`，随 `r1-baseline-gate.yml` 的 `pnpm test` 运行）：fail-closed 解析（未知键/未知枚举/未知 DoD id 一律拒绝）；每条 DoD 至少一条 evidence 行；automated 行的 gate workflow 与 proof 路径必须**真实存在**；human 行 pending 时不得携带 evidenceRef；decision pending 时全部 human 行必须 pending（结构性禁止代领 PASS）；Go 判定需六维 verdict 全 go、blockedItems 为空且全部 human 行 recorded；`release.state=created` 需同时存在 Go 决定、用户显式批准记录与 release record；`release.requiresExplicitUserApproval` 为硬常量；版本三方一致（package.json ↔ release manifest `app.version` ↔ 注册表）；注册表自身过泄漏扫描。
+- **版本基线**：package.json → **1.0.0-rc.1**；`release/release-manifest.json` 随本 PR 重新生成（`app.version` 同步，评审 diff 即 RELEASE_GATE §2 的显式确认动作）；漂移门禁照常 fail-closed。
+- **发行说明与已知限制**：[docs/RELEASE_NOTES.md](../../docs/RELEASE_NOTES.md)（本 PR 交付，注册表 evidence 行引用其存在）。
+- 既有全套门禁（§11.1/§12.1/§13.1/§14.1 + RELEASE_GATE 三个 job）是自动化证据的基座——本节不重复其断言，只在注册表 `evidence[]` 逐条引用（gate + proof 指针）。
+
+### 15.2 首版产品范围冻结（实施范围 1）
+
+- 冻结表以 `release/release-candidate.json` 的 `productScope` 为**单一事实源**（inScope/excluded 的 id 列表被 spec 钉住，任何范围变更 = 注册表 + spec 同步修订 = 独立评审 PR）。
+- 纳入：现有普通麦克风 ESP32-S3 整机（nulllab AI-VOX3 机芯盒）、测试固件 `v2.5.2_nulllab-ai-vox-v3`、现有固件 AEC 与播报中打断、私有化小智服务端（钉死 commit，gateway-bridge + 真实 ASR/TTS 档位）、真实 DSH/LLM/ASR/TTS Provider（经评审档位，默认关）、双专业 Skill（Evidence 绑定 + 受控记忆）、家长 Web 与语音端权限联动。
+- 排除：XVF3800/四麦克风阵列/远场阵列/DSP 板级改版（issue 非目标）；真实儿童个人数据参与联调或验收（数据红线）；以合成/Mock 指标冒充实机性能（诚实边界）。
+
+### 15.3 验收证据登记（实施范围 2）
+
+- 登记面 = 注册表 `evidence[]`：**automated 行**（gate workflow + proof 路径，CI 持续证明，status=proven）与 **human 行**（protocol 指向 §11–§15 各记录表与实验协议，status=pending）。
+- 实机执行后：把对应 human 行 status 改为 `recorded` 并填 `evidenceRef`（issue comment URL 或证据记录链接），随后按 §15.5 判定——全部是代码变更 = 评审 PR + CI 全量回归，不存在绕过注册表的登记通道。
+- 逐条 DoD ↔ 证据对照见注册表 `acceptanceCriteria` + `evidence[].covers`；DoD 口径汇总见 §15.7。
+
+### 15.4 完整演示流程（实施范围 5；DoD 1 物理面；未执行前不标 PASS）
+
+- **前置**：§3.7 real 档（真实 LLM 经回环 Model Gateway）+ §11 设备绑定完成 + §13.5 告知/授权与外发评审生效；成人/合成测试语料。
+- **演示脚本**（每步记录时间/结果/证据；失败如实记录，不重录掩盖）：
+
+| # | 步骤 | 预期 | 记录 |
+| --- | --- | --- | --- |
+| 1 | 真实服务器启动：`systemctl start xiaozhi-server` + 网关宿主 real 档 | `GATEWAY-HOST READY agent=real`；LumiThink `/api/health` 与 manifest `app.version` 一致 | 时间/版本/就绪行 |
+| 2 | 设备上电 → OTA 激活 → hello | 返回 `firmware`+`websocket`（无 xiaozhi.me 链路）；hello 协商成功 | §11.2/§11.3 记录 |
+| 3 | 成人语音 3–5 轮对话 | 唤醒→收音→ASR→真实 DSH→安全短句→TTS→播放闭环 | §11.4 逐轮表 |
+| 4 | 播报中 AEC 打断（人声/按键）→ 停播 → 继续对话 | 停播、零残留、恢复轮正常 | §12.4/§12.6 三个时间点 |
+| 5 | 现场故障注入一轮（F1/F2/F3 任选） | 自动重连/续接，恢复轮完整 | §14.2 对应行 |
+| 6 | 家长控制联动：撤权 → 设备说话；主体级清除 → 旧会话续接 | 拒轮/旧会话映射关闭 | §13.3 #3/#9 |
+| 7 | 收尾：控制面抽查 | systemd 单元、审计字段（脱敏）正常 | §14.6 抽查记录 |
+
+- **证据留存**：串口日志/录屏/服务端内容无关日志由运营者留存；入档仅内容无关事实（同 §7 脱敏口径）。
+
+### 15.5 独立验收人 Go/No-Go（实施范围 3；DoD 3 判定面）
+
+- **判定人**：独立于本串行实现的验收人（用户或其指定者）；**判定输入** = §15.3 全部 evidence（automated + recorded human）+ RELEASE_GATE 四道手工门禁 + §13.4 专业边界测试卡人工审阅结果。
+- **判定记录**（注册表 `goNoGo.record`）：六个维度（technical_safety / product_experience / privacy_authorization / professional_skills / operations / rollback）逐维 verdict + `decidedBy`/`decidedAt` + `evidenceUrls`。
+- **不可降级纪律**：未通过的必做项不可降级成文字说明后发版——registry invariant（decision=go ⟺ 六维全 go 且 blockedItems 为空且全部 human 行 recorded）由 CI fail-closed 强制；任一维度 no-go → decision=no-go 或保持 pending，修复后重新判定，不得以"其他维度都好"放行。
+
+### 15.6 发版确认与回退（实施范围 6；DoD 4）
+
+- Go 后**提请用户确认**：由用户显式批准（`release.userApproval`：approvedBy/approvedAt/approvalRef 留证，如 issue comment）后才创建首个产品 GitHub Release/Tag；"用户批准 ⟹ decision=go"、"created ⟹ 批准 + release record"由注册表 invariant 强制，**不在本串行 Issue 流中绕过用户发版偏好**。
+- 发布执行按 RELEASE_GATE Gate 3（同一 commit SHA 部署 + `healthcheck.sh` + manifest 版本核对）；在此之前不创建任何 Tag/Release。
+- **回退**：deploy/runbook §8 + RELEASE_GATE Gate 4（回退前确认目标版本能读当前快照）；固件回退 §11.6。
+
+### 15.7 DoD 口径对照（如实声明）
+
+| DoD | 自动化面（本 PR 已证） | 物理/人工面（本节执行后留证） |
+| --- | --- | --- |
+| 1. 可重复完整演示：真实 ESP32-S3 收音→ASR→真实 DSH/LLM→安全/专业/受控记忆→TTS→设备播放→播报中 AEC 打断→继续对话 | real 档接线环 10 连轮 + 打断/恢复探针 + 儿童场景/受控记忆套件（注册表 ev-dod1-automated-*） | §15.4 完整演示——**未执行前不标 PASS** |
+| 2. 家长 Web 鉴权/授权/导出/清理与语音端权限联动实测；隐私、安全、外发文档齐全 | 监护人治理旅程 + 数据生命周期 + Web Mock E2E（伪造 403/零出网）+ 边界守卫 + manifest 锁定的策略文档（ev-dod2-automated-*） | §13.3 逐项点击 + §14.5 S1–S5 |
+| 3. 稳定性、延迟、误打断、回滚、失败注入均有真实设备/真实服务端证据和明确 Gate 结论，非仅合成 CI | 故障注入探针/组合栈套件 + 升级回滚演练 artifact + 部署烟测（ev-dod3-automated-*）；时延为客观候选基线（非 SLA） | §12.3/§12.4 + §14.2/§14.3/§14.4 冻结门限实测 |
+| 4. Release 候选含完整版本清单/说明与已知限制；Go 判定后仍须用户批准才能真正创建 GitHub Release | 1.0.0-rc.1 三方版本一致 + manifest 再生成评审 + RELEASE_NOTES + 注册表 invariant（ev-dod4-automated-candidate） | §15.5 Go/No-Go + §15.6 用户批准 |
+
+- **完成判定**：§15.4–§15.6 留证齐备 + 全套门禁绿 + Go + 用户批准 → 创建 Release；**本 PR 交付后 issue 预期保持 OPEN（物理/人工项未执行）**（沿用 #58–#61 先例）。
+- **回退**：本 PR 不改任何部署配置/数据面；新增文件（注册表/校验器/自测/发行说明）revert 即完全回滚；manifest 版本回退 = 随 revert 再生成。

@@ -1,7 +1,7 @@
 # LumiThink — 发光的思考
 
 > **循证、儿童优先、隐私优先的个人 AI 陪伴与学习支持平台**  
-> 当前状态：**LumiThink 2.0 研发 / R1 文字端与语音服务端接线已交付，儿童专业场景端到端验收面已建立（E2E-10）；真实设备与真实 LLM 实机验收按 runbook §11/§12/§13 由运营者执行**（2026-10-17）
+> 当前状态：**LumiThink 2.0 研发 / 首版产品发布候选 1.0.0-rc.1 已组装（E2E-12）：自动化面由全套门禁 CI 证明；物理/人工面（实机演示、Go/No-Go、发版批准）按 [runbook §11–§15](deploy/xiaozhi/runbook.md) 由运营者/独立验收人执行**（2026-10-17）
 
 LumiThink 目标不是无限陪聊或代写作业，而是帮助儿童理解困难、管理日常情绪、探索阅读与知识，并逐渐获得更多独立能力。初期只有一名儿童用户；正式接入真实数据前，必须通过儿童安全、隐私与技术权限门禁。
 
@@ -42,7 +42,7 @@ Next.js Web / 触屏 → 同一 LumiThink API / Domain Services
 
 - **已完成的 R0 技术证据**：`poc/dsh-child` 的隔离最小权限 Profile，固定 DSH `dsh-v0.2.0-rc.2`，合成多轮 SDK 事件流、关闭、安全和隐私回归；R0-02 记录 35/35 PASS、0 SKIP（Windows/Linux CI）。这**不等于**真实儿童或实时语音生产验收。
 - **R1 文字端（核心面已交付）**：统一请求接口（R1-01）、Cordis 管线与三层安全 Gate（R1-03/R1-15）、儿童 Persona（R1-04）、最小儿童 Web 端（R1-05）、监护人鉴权与隐私告知（R1-06）、评测 Harness（R1-07）、部署加固与加密快照（R1-08）、数据生命周期（R1-09）、双专业 Skill（R1-11/12）、Evidence/Skill Registry（R1-13）、受控记忆（R1-14）；**儿童专业场景端到端验收面已建立（E2E-10，issue #60）**：双 Skill 多轮专业场景（逐轮 Persona/Skill/Evidence 版本可追溯）、受控记忆确认→跨会话引用→修订→删除全环与禁止自动沉淀、监护人治理旅程（撤权/记录开关/导出/清除对儿童会话实际生效）与专业边界自动化卡由 CI 证明；**真实 LLM + 真实设备多轮样例、监护人端逐项点击与测试卡人工审阅按 [runbook §13](deploy/xiaozhi/runbook.md) 由运营者执行留证，未执行前 issue 保持 OPEN**。
-- **R1-V 语音运行时先导（进行中）**：R1-V1 Turn Fencing 已交付（issue #28）；R1-V2 Cordis Bridge 真取消与实时 Delta 合成 POC 已交付（issue #29）：独立最小权限 Profile、私有本地 IPC 合同、live Delta→儿童 Output Gate→TTS 准入、进程内真取消/whenIdle、Worker 隔离恢复与 100 次竞态证据；R1-V3 小智 Gateway Adapter 合同与故障注入已交付（issue #30）；E2E-01 ASR 瞬态文本通道已交付（issue #51，[ADR-007](docs/adr/0007-asr-transient-text-channel.md)）：授权 final 转写经 Input Safety Gate 与私有 IPC 以瞬态明文到达受信 Agent（合成验证），去重指纹改用进程内 HMAC，裸 FNV-1a 不再承担隐私角色；E2E-02 真实 DSH Agent Runtime 已交付（issue #52）：真实锁定版本 Cordis 进程（专属 `lumi-dsh-runtime-bridge` Profile、每会话独立 worker）驱动 Bridge，真取消/实时流/有界 whenIdle/崩溃隔离在 Linux CI 以零 SKIP JUnit 门禁验证；E2E-03 真实 LLM Provider 路由已交付（issue #53，[ADR-008](docs/adr/0008-real-provider-egress-topology.md)）；E2E-04 小智私有服务端部署已交付（issue #54：钉死 commit、gateway-minimal 档位、部署冒烟 CI）；E2E-05 真实 ASR Provider 已交付（issue #55，[ADR-0009](docs/adr/0009-real-asr-provider-transient-channel.md)）：`gateway-asr-real` 档位在钉死小智扩展点接入百炼 Paraformer 实时流式 ASR（16 kHz 上行、转写不落盘三闸、fail-closed 激活记录、重复 final 窗口化去重与五族流式故障回归、内容无关证据合同）；E2E-06 真实 TTS Provider 已交付（issue #56，[ADR-0010](docs/adr/0010-real-tts-provider-dual-stream.md)）；E2E-07 小智服务端 Voice Gateway 接线已交付（issue #57，[ADR-0011](docs/adr/0011-xiaozhi-gateway-wiring.md)：LLM 扩展点桥 + 受保护内部传输 + 设备鉴权映射 + 真实 Opus 下行全链路）；E2E-08 ESP32-S3 私有化设备接入已交付（issue #58：real 档 10 连轮接线环 CI 证明 + 未绑定设备负例）；E2E-09 现有固件 AEC 打断实测自动化面已交付（issue #59：接线环多轮打断→停播→零迟到帧→恢复测量探针 + 可信 epoch 零漏出回归）；**实机（真实固件/真实音频上行/实机打断与 AEC 效果）仍未执行**，按 [runbook §11/§12](deploy/xiaozhi/runbook.md) 由运营者留证。
+- **R1-V 语音运行时先导（进行中）**：R1-V1 Turn Fencing 已交付（issue #28）；R1-V2 Cordis Bridge 真取消与实时 Delta 合成 POC 已交付（issue #29）：独立最小权限 Profile、私有本地 IPC 合同、live Delta→儿童 Output Gate→TTS 准入、进程内真取消/whenIdle、Worker 隔离恢复与 100 次竞态证据；R1-V3 小智 Gateway Adapter 合同与故障注入已交付（issue #30）；E2E-01 ASR 瞬态文本通道已交付（issue #51，[ADR-007](docs/adr/0007-asr-transient-text-channel.md)）：授权 final 转写经 Input Safety Gate 与私有 IPC 以瞬态明文到达受信 Agent（合成验证），去重指纹改用进程内 HMAC，裸 FNV-1a 不再承担隐私角色；E2E-02 真实 DSH Agent Runtime 已交付（issue #52）：真实锁定版本 Cordis 进程（专属 `lumi-dsh-runtime-bridge` Profile、每会话独立 worker）驱动 Bridge，真取消/实时流/有界 whenIdle/崩溃隔离在 Linux CI 以零 SKIP JUnit 门禁验证；E2E-03 真实 LLM Provider 路由已交付（issue #53，[ADR-008](docs/adr/0008-real-provider-egress-topology.md)）；E2E-04 小智私有服务端部署已交付（issue #54：钉死 commit、gateway-minimal 档位、部署冒烟 CI）；E2E-05 真实 ASR Provider 已交付（issue #55，[ADR-0009](docs/adr/0009-real-asr-provider-transient-channel.md)）：`gateway-asr-real` 档位在钉死小智扩展点接入百炼 Paraformer 实时流式 ASR（16 kHz 上行、转写不落盘三闸、fail-closed 激活记录、重复 final 窗口化去重与五族流式故障回归、内容无关证据合同）；E2E-06 真实 TTS Provider 已交付（issue #56，[ADR-0010](docs/adr/0010-real-tts-provider-dual-stream.md)）；E2E-07 小智服务端 Voice Gateway 接线已交付（issue #57，[ADR-0011](docs/adr/0011-xiaozhi-gateway-wiring.md)：LLM 扩展点桥 + 受保护内部传输 + 设备鉴权映射 + 真实 Opus 下行全链路）；E2E-08 ESP32-S3 私有化设备接入已交付（issue #58：real 档 10 连轮接线环 CI 证明 + 未绑定设备负例）；E2E-09 现有固件 AEC 打断实测自动化面已交付（issue #59：接线环多轮打断→停播→零迟到帧→恢复测量探针 + 可信 epoch 零漏出回归）；**实机（真实固件/真实音频上行/实机打断与 AEC 效果）仍未执行**，按 [runbook §11/§12](deploy/xiaozhi/runbook.md) 由运营者留证。**首版产品验收门禁（E2E-12，issue #62）已组装发布候选 1.0.0-rc.1**：冻结首版产品范围、逐条登记验收证据（自动化面 CI 证明 / 物理面按 [runbook §15](deploy/xiaozhi/runbook.md) 执行留证）、发行说明与已知限制见 [RELEASE_NOTES](docs/RELEASE_NOTES.md)；独立验收人 Go/No-Go 与用户显式发版批准完成前不创建 Tag/Release。
 - **R5 实机语音（计划）**：XVF3800 + ESP32-S3 小智板级固件、自建服务端、Bridge 与 DSH 完整闭环、断网/多次打断/延迟验收。
 - **后续**：Evidence/Skills 扩展、Web 交互场景与可审计的持续改进。
 
@@ -54,6 +54,8 @@ Next.js Web / 触屏 → 同一 LumiThink API / Domain Services
 | --- | --- |
 | [PRD](docs/PRD.md) | LumiThink 2.0 用户场景、安全约束、功能需求 |
 | [Roadmap](docs/ROADMAP.md) | R0–R6 阶段与独立 R1-V 语音先导 |
+| [发行说明](docs/RELEASE_NOTES.md) | 首版发布候选 1.0.0-rc.1 的范围、验收状态、已知限制与发布纪律 |
+| [发布门禁](docs/RELEASE_GATE.md) | 自动化发布门禁、manifest 漂移门禁与手工 staging→审批→发布→回退 |
 | [系统架构](docs/ARCHITECTURE.md) | 当前所选硬件、服务端、Agent、数据边界 |
 | [语音硬件选型](docs/VOICE_HARDWARE.md) | XVF3800 + ESP32-S3、小智固件/服务端与实机门禁 |
 | [Voice Runtime / 打断设计](docs/VOICE_RUNTIME.md) | `turn_id`/`epoch`、Cordis Bridge、实时安全流、取消/恢复/验收 |
