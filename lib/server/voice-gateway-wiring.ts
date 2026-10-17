@@ -338,9 +338,13 @@ export function createWiredVoiceGateway(options: WiredVoiceGatewayOptions): Wire
   async function routeFrame(frame: GatewayInternalInboundFrame): Promise<void> {
     switch (frame.kind) {
       case "device_hello": {
+        // The HMAC token was signed over the RAW wire header value (the
+        // pinned commit's AuthManager signs `client_id|device_id|ts` with
+        // the RAW header strings) — verify against deviceIdWire; the
+        // guardian binding maps the NORMALIZED deviceId.
         const auth = verifyDeviceAuthorization({
           authorization: frame.authorization,
-          deviceId: frame.deviceId,
+          deviceId: frame.deviceIdWire ?? frame.deviceId,
           clientId: frame.clientId,
           authKey: options.deviceAuthKey,
           expireSeconds,

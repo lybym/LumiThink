@@ -566,6 +566,7 @@ class LLMProvider:
                 "kind": "device_hello",
                 "connId": conn_id,
                 "deviceId": normalized_device_id,
+                "deviceIdWire": device_id,
                 "clientId": headers.get("client-id") or None,
                 "authorization": headers.get("authorization") or None,
                 "audioParams": audio_params,

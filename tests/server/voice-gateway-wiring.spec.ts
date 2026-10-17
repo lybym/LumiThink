@@ -179,6 +179,9 @@ async function helloDevice(driver: BridgeDriver, fixture: Fixture, refs: {
     kind: "device_hello",
     connId: refs.connId,
     deviceId: refs.deviceId,
+    // The test signs the token over the normalized id, so no separate
+    // wire value is needed (production: the raw MAC header).
+    deviceIdWire: null,
     clientId: "client-probe",
     authorization: refs.authorization === undefined ? mintDeviceToken(AUTH_KEY, "client-probe", refs.deviceId, Math.floor(Date.now() / 1000)) : refs.authorization,
     audioParams: { format: "opus", sampleRate: 16000, channels: 1, frameDurationMs: 60 },

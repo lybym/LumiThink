@@ -101,6 +101,14 @@ export type GatewayInternalInboundFrame =
       readonly kind: "device_hello";
       readonly connId: string;
       readonly deviceId: string;
+      /**
+       * The RAW wire header Device-Id (e.g. `aa:bb:cc:dd:ee:07`) — the
+       * upstream AuthManager token is signed over the RAW header value,
+       * so the gateway's HMAC re-computation must use it verbatim. The
+       * normalized `deviceId` (transport contract: separator-stripped,
+       * lower-cased) is what maps onto the guardian binding.
+       */
+      readonly deviceIdWire: string | null;
       /** Real handshake headers (Client-Id may be empty upstream). */
       readonly clientId: string | null;
       /** Real `Authorization` header value (`Bearer sig.ts`), verbatim. */
@@ -253,11 +261,12 @@ export function parseGatewayInternalInboundFrame(raw: unknown): GatewayInternalI
   const kind = record.kind;
   switch (kind) {
     case "device_hello": {
-      rejectUnknownFields(record, ["kind", "connId", "deviceId", "clientId", "authorization", "audioParams"]);
+      rejectUnknownFields(record, ["kind", "connId", "deviceId", "deviceIdWire", "clientId", "authorization", "audioParams"]);
       return {
         kind: "device_hello",
         connId: str(record, "connId", GATEWAY_INTERNAL_CONN_ID_PATTERN),
         deviceId: str(record, "deviceId", XIAOZHI_DEVICE_ID_PATTERN),
+        deviceIdWire: optionalStr(record, "deviceIdWire", 128),
         clientId: optionalStr(record, "clientId", 128),
         authorization: optionalStr(record, "authorization", 512),
         audioParams: parseAudioParams(record.audioParams),
