@@ -151,6 +151,46 @@ async function main(): Promise<void> {
     );
   });
 
+  // Watchdog: if a turn stays unsettled for 30s, dump the worker's
+  // content-free diagnostics (alive flag + bounded stderr tail — the
+  // snapshot API never carries prompt/model text).
+  let pendingTurn: string | null = null;
+  let watchdog: NodeJS.Timeout | null = null;
+  wired.stack.stack.client.onEvent((frame) => {
+    if (frame.kind !== "event") {
+      return;
+    }
+    const payload = (frame.payload ?? {}) as Record<string, unknown>;
+    if (frame.name === "turn.accepted" && typeof payload.turnId === "string") {
+      pendingTurn = payload.turnId;
+      if (watchdog === null) {
+        watchdog = setTimeout(() => {
+          if (pendingTurn === null) {
+            return;
+          }
+          const sessionKeys = wired.stack.mappingSnapshot().map((entry) => entry.sessionKey);
+          const aliveFn = (agentPort as { isWorkerAlive?: (k: string) => boolean }).isWorkerAlive;
+          for (const sessionKey of sessionKeys) {
+            const described = wired.stack.stack.orchestrator.describeTurn(sessionKey, pendingTurn);
+            const alive = typeof aliveFn === "function" ? aliveFn.call(agentPort, sessionKey) : undefined;
+            console.log(
+              `[gateway-host] watchdog turn=${pendingTurn} session=${sessionKey} state=${described?.state ?? "<unknown>"} epoch=${String(described?.epoch ?? "<none>")} workerAlive=${String(alive)}`,
+            );
+            console.log(`[gateway-host] watchdog stderrTail session=${sessionKey}:\n${agentPort.stderrTailSnapshot(sessionKey)}`);
+          }
+        }, 30_000);
+      }
+      return;
+    }
+    if (frame.name === "turn.settled") {
+      pendingTurn = null;
+      if (watchdog !== null) {
+        clearTimeout(watchdog);
+        watchdog = null;
+      }
+    }
+  });
+
   await wired.start();
 
   console.log(`GATEWAY-HOST READY endpoint=${wired.endpoint.path}`);
