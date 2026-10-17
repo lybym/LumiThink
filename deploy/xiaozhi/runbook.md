@@ -185,12 +185,14 @@ python3 deploy/xiaozhi/gateway_bridge/install_bridge.py \
 python3 deploy/xiaozhi/gateway_bridge/install_bridge.py \
   --target /opt/xiaozhi-esp32-server --verify-only
 
-# 3. 启动 LumiThink 网关宿主（真实受保护 UDS 传输 + 真实锁定版 DSH worker）：
+# 3. 启动 LumiThink 网关宿主（真实受保护 UDS 传输 + 真实 Bridge IPC；
+#    agent 运行时由 LUMITHINK_GATEWAY_AGENT 选择：synthetic（缺省，CI 证据）
+#    / real（运营者 opt-in：真实锁定版 DSH worker 子进程，poc/dsh-child））：
 #    env：LUMITHINK_GATEWAY_SOCKET（UDS 绝对路径）、LUMITHINK_GATEWAY_BRIDGE_TOKEN
 #    （与第 1/2 步同一值）、LUMITHINK_GATEWAY_AUTH_KEY（= XIAOZHI_AUTH_KEY，
 #    网关侧逐字复算设备 token）、LUMITHINK_GATEWAY_BINDINGS（监护人绑定 JSON：
 #    [{deviceId, actorId, conversationId, activationDigest}]）、
-#    LUMITHINK_GATEWAY_HOME（DSH home 目录）。就绪行：GATEWAY-HOST READY。
+#    LUMITHINK_GATEWAY_HOME（real 档的 DSH home 目录）。就绪行：GATEWAY-HOST READY。
 # 4. 服务端进程 env 需带 LUMITHINK_GATEWAY_BRIDGE_TOKEN（provider 按 env 名读取）。
 # 5. 联测探针（协议模拟设备；零内容输出）：
 #    python3 deploy/xiaozhi/probe_e2e07.py --url ws://127.0.0.1:8000/xiaozhi/v1/ \

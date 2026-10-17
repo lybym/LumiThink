@@ -210,7 +210,8 @@ v1.4 把本合同的 Adapter 从"纯合成可重放"接入**真实服务端消�
 | 桥 LLM 经上游扩展点唯一选中、内置 AI 第二路径不可达 | **已验证**（真实服务端进程联测，`e2e-07-gateway-wiring-gate.yml`；超时=接线失败，无回退） |
 | 受保护 UDS 传输 + 令牌 + 单桥租约 + 0600 | **已验证**（真实 UDS；Windows 开发沙箱按文档边界回退帧注入，字节层另测） |
 | 设备鉴权映射（未绑定/伪造/重复连接/坏令牌拒绝） | **已验证**（真实进程 + 契约级单测） |
-| hello→session→detect(text)→stt→DSH→Output Gate 句子→TTS→**真实 Opus 下行**→stop | **已验证**（协议模拟设备，本地 TTS stub；合成样例文本） |
+| hello→session→detect(text)→stt→Output Gate 句子→TTS→**真实 Opus 下行**→stop | **已验证**（协议模拟设备，本地 TTS stub；合成样例文本） |
+| **agent 运行时口径**：CI 联测轮次由 LumiThink **合成 Cordis 运行时**应答（接线面全部真实：传输/鉴权/租约/fence/帧序/记账）；**锁定版 DSH runtime** 的 CI 证明 = E2E-02 gate（poc/dsh-child，同 HEAD 随每轮 CI 绿）；`LUMITHINK_GATEWAY_AGENT=real` 为运营者 opt-in（同 job 内 E2E-02 规格演练通过） | **已验证（分层如实声明）** |
 | 播放中 abort → stop 零迟到帧；服务重启续接同一受信会话 | **已验证**（真实进程） |
 | 真实音频字节到账（frames+digest）进 Adapter v1.4 指标 | **已验证**（内容无关记账） |
 | 真实固件设备端到端（实机） | **未验证**（#E2E-08） |

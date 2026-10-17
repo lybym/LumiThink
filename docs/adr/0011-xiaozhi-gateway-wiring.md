@@ -21,7 +21,7 @@ E2E-04/05/06（#54/#55/#56）交付了钉死小智服务端的部署与真实 AS
 4. **TTS 音频发送栅栏 = 准入即投递 + epoch 结构性不可达。** 句子交付挂在 stream gate 准入点（Output Gate + `tts_queue` fence 之后；`onAdmittedSentence` 为**可选**增量，缺省合成合同逐字节不变）：fence 通过的句子才进 `tts_sentence` 帧。设备 abort → 网关 fence-first（epoch 提升，接线态由组合层对无 playback 绑定的 RUNNING 轮强制 barge-in——合成合同"无播放 abort=no-op"只假设 pump 时投递）→ 旧 epoch 句子在 gate 处结构性不再产生；已入服务端队列的由上游 native `clear_queues()` 清空（patch 2 之后网关 `queue_clear` 帧为 belt-and-braces）。`tts_end(completed|interrupted|failed)` 保证桥侧流终止（含零句输出轮）；`failed` 补发端侧 stop。
 5. **解决音频占位 = 真实字节记账回流（协议面仍无音频字节）。** fork patch 3/5 在 `_do_send_audio` 逐包计数 + SHA-256 实际发往设备的 Opus 字节；utterance stop/abort 时 `audio_delivered {frames, digest}` 上报，Adapter v1.4 记录为 `realAudioFramesDelivered`/`realAudioDeliveries` + 审计（内容无关）。LumiThink 协议面不存在音频字节字段的不变量保持不变——"占位"由**真实到账观测**解决，而非把音频字节引入合同。
 6. **Node 侧接线组合（`lib/server/voice-gateway-wiring.ts`）**：既有 `VoiceGatewayStack`（真实 Bridge IPC，`transport:"ipc"`）+ 注入 REAL agent port（`poc/dsh-child` 锁定版 DSH worker 子进程，#52 模式）+ 内部传输服务器；帧路由 fail-closed，快照/审计全部内容无关。CI 宿主 `scripts/xiaozhi/gateway-host.ts` 打印就绪行后常驻。联测纪律：**禁止 in-process mock**——内部传输在 POSIX CI 用真实 UDS，Windows 开发沙箱（socket 打开被 OS 拒绝的文档边界）才回退到服务端帧入口注入，字节层由独立套件 + POSIX CI 承担。
-7. **CI = 新增 `e2e-07-gateway-wiring-gate.yml`（PR body"CI 变更"披露）**：artifacts 档（py_compile、档位模板断言、env 无真实值、fork 登记一致性、版本钉死单源）+ `wiring-e2e` 档（干净 Linux：bootstrap gateway-bridge 档位 → 装桥 + patch → 起 TTS stub + 网关宿主（真实 UDS 0600 + 真实 DSH worker）→ 起服务端 → 协议模拟设备**全链路**：hello→session→detect(text)→stt 回显→tts start→sentence_start→**真实二进制 Opus 下行**→tts stop；重复设备连接拒绝（第一连接不受影响）；播放中 abort → stop 且零迟到帧；服务重启 → 重连 → 同一受信会话续接）。零真实凭据、零外发（ASR 保持回环占位、TTS 为回环 stub、LLM 路径即本地受保护传输）。超时 = 接线失败，绝无静默回退。
+7. **CI = 新增 `e2e-07-gateway-wiring-gate.yml`（PR body"CI 变更"披露）**：artifacts 档（py_compile、档位模板断言、env 无真实值、fork 登记一致性、版本钉死单源、安装器合成树演练）+ `wiring-e2e` 档（干净 Linux：bootstrap gateway-bridge 档位 → 装桥 + patch → 起 TTS stub + 网关宿主（真实 UDS 0600 + 真实 Bridge IPC）→ 起服务端 → 协议模拟设备**全链路**：hello→session→detect(text)→stt 回显→tts start→sentence_start→**真实二进制 Opus 下行**→tts stop；重复设备连接拒绝；播放中 abort → stop 且零迟到帧；服务重启 → 重连 → 同一受信会话续接）。**agent 运行时分层（宿主 `LUMITHINK_GATEWAY_AGENT` 选择器）**：CI 联测用 LumiThink **合成 Cordis 运行时**（确定性、pump 驱动——接线面全部真实：受保护传输/鉴权映射/租约/fence/帧序/记账）；**锁定版 DSH runtime 的 CI 证明由 E2E-02 gate（poc/dsh-child，同 HEAD，随本 PR 每轮 CI 均绿）承担**，`real` 档为运营者显式 opt-in（同 job 内 E2E-02 规格演练通过，worker 机制已证）。零真实凭据、零外发（ASR 保持回环占位、TTS 为回环 stub、LLM 路径即本地受保护传输）。超时 = 接线失败，绝无静默回退。
 
 ## 备选取舍
 
@@ -36,7 +36,7 @@ E2E-04/05/06（#54/#55/#56）交付了钉死小智服务端的部署与真实 AS
 
 ## 约束 / 后果
 
-- **已验证（真实 Linux 进程联测，CI 可复现）**：桥模块经上游扩展点被唯一选中；受保护 UDS 传输 + 令牌 + 租约；设备鉴权映射（含伪造/未绑定/重复连接拒绝）；全链路 hello→文字轮→DSH→Output Gate 句子→服务端 TTS→**真实 Opus 下行**→stop；abort 栅栏（零迟到帧）；服务重启续接；真实音频字节到账记账。
+- **已验证（真实 Linux 进程联测，CI 可复现）**：桥模块经上游扩展点被唯一选中；受保护 UDS 传输 + 令牌 + 租约；设备鉴权映射（含伪造/未绑定/重复连接拒绝）；全链路 hello→文字轮→Output Gate 句子→服务端 TTS→**真实 Opus 下行**→stop；abort 栅栏（零迟到帧）；服务重启续接同一受信会话；真实音频字节到账记账。**agent 运行时口径**：CI 联测轮次由 LumiThink 合成 Cordis 运行时应答（接线面全部真实）；锁定版 DSH runtime 的 CI 证明 = E2E-02 gate（同 HEAD 绿），`LUMITHINK_GATEWAY_AGENT=real` 为运营者 opt-in 路径。
 - **未验证（如实边界）**：真实固件设备（#E2E-08）、真实 ASR 音频上行（本档位 ASR 为回环占位；detect+text 路径与 ASR final 共用同一 `startToChat→chat` 入口，但"麦克风音频→转写→网关"整段未联测）、真实供应商 LLM/ASR/TTS 组合档位（各自单独评审）、断网-续接的实机时延、服务端 AEC/二进制协议 v2/v3。本 Issue 不创建 Tag/Release，不标注实机 PASS。
 - `GATEWAY_ADAPTER_VERSION` 1.3 → 1.4（新增真实音频记账字段 + `asr_final` 结果带出 turnId；既有语义零变化，合成合同逐字节不变）。
 - 上游升级（pin bump）必须重跑 `fork-patches.md` 锚点核验（`install_bridge.py` 漂移即拒绝）与 §3 兼容矩阵评审。
