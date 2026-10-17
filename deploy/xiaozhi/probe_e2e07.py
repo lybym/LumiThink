@@ -181,13 +181,15 @@ async def probe_full_loop(args):
             raise AssertionError(
                 f"no REAL downlink Opus frames (the frameCount/digest placeholder is not resolved): {collector.summary()}"
             )
-        # THE DSH PROOF: the first sentence must be the deterministic
-        # gateway-bridge output. The pinned server's own LLM-failure path
-        # (get_system_error_response) would TTS a DIFFERENT sentence — this
-        # assertion is what turns "frames arrived" into "the DSH answered".
-        if collector.first_sentence_text != args.expect_text:
+        # THE DSH PROOF: the first sentence must be PART of the
+        # deterministic gateway-bridge output (the pinned server's TTS
+        # engine re-segments bridge sentences, so equality is wrong; the
+        # server's own LLM-failure path synthesizes a DIFFERENT sentence
+        # that is NOT a substring). This turns "frames arrived" into "the
+        # DSH answered". The text is never printed.
+        if not collector.first_sentence_text or collector.first_sentence_text not in args.expect_text:
             raise AssertionError(
-                "the first sentence is NOT the deterministic DSH output "
+                "the first sentence is NOT part of the deterministic DSH output "
                 "(a server-side error path or another responder answered the turn)"
             )
         print(f"full-loop OK (DSH answered, real Opus delivered): {collector.summary()}")
@@ -289,9 +291,10 @@ def main():
     )
     parser.add_argument(
         "--expect-text",
-        default="好呀，我们一起看看这道题。",
-        help="the deterministic first sentence the gateway bridge must return "
-        "(must match scripts/xiaozhi/gateway-host.ts; never printed)",
+        default="好呀，我们一起看看这道题。先找已知条件，再一步一步算。",
+        help="the joined deterministic gateway-bridge output the turn must "
+        "carry (the server TTS may re-segment; must match "
+        "scripts/xiaozhi/gateway-host.ts; never printed)",
     )
     parser.add_argument("--expect-full-loop", action="store_true", default=True)
     parser.add_argument("--expect-duplicate-refusal", action="store_true")
