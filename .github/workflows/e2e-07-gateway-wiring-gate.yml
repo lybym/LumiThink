@@ -233,6 +233,17 @@ jobs:
             tests/server/voice-gateway-wiring.spec.ts \
             tests/domain/voice/bridge/stream-gate-sink.spec.ts
 
+      - name: Worker bisection — the real DSH worker e2e must pass in THIS job too
+        working-directory: poc/dsh-child
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bisects the wiring e2e: if this passes but the wired loop below
+          # stalls, the delta is the gateway host; if this fails, the job
+          # environment cannot spawn the locked worker at all.
+          pnpm run test:e2e02:run
+          pnpm run test:e2e02:gate
+
       - name: Generate e2e secrets (never committed, never echoed)
         shell: bash
         run: |
