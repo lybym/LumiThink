@@ -346,6 +346,17 @@ class LLMProvider:
             raise ValueError(f"lumithink LLM: env {token_env} must carry the internal transport token")
         self._endpoint = endpoint
         self._turn_timeout_s = float(config.get("turn_timeout_s", 60))
+        # E2E-08 (issue #58) sentence admission pacing: minimum wall-clock
+        # interval between two enqueued sentences of one turn. 0 (default) =
+        # unpaced (CI semantics unchanged). The pinned server opens ONE
+        # vendor TTS session per text item (enable_ws_reuse must stay False),
+        # so an unpaced burst opens overlapping vendor sessions and trips the
+        # vendor concurrency guard (observed live: volcano 55000000 on the
+        # SECOND session ~11s into a turn whose 17 admitted sentences arrived
+        # within ~11s). Pacing admissions to speaking rate keeps at most one
+        # vendor session in flight — the same natural pacing the direct LLM
+        # chain gets from token-level streaming.
+        self._pace_min_interval_s = float(config.get("sentence_pace_min_interval_s", 0) or 0)
         self._client = _BridgeClient(endpoint, token)
         self._client.attach_provider(self)
         self._control = _ControlWorker()
@@ -417,6 +428,10 @@ class LLMProvider:
                 if kind == "tts_sentence":
                     text = frame.get("text")
                     if isinstance(text, str) and text:
+                        if not self._pace_before_enqueue(state):
+                            # Aborted while pacing: stop admitting; the
+                            # server's own abort path owns the device stop.
+                            break
                         self._enqueue_sentence(state, text)
                         yield text
                     continue
@@ -441,6 +456,28 @@ class LLMProvider:
     # ------------------------------------------------------------------
     # TTS queue feeding (the pinned server owns the Opus/device protocol)
     # ------------------------------------------------------------------
+
+    def _pace_before_enqueue(self, state):
+        """Bounded sentence-admission pacing (E2E-08, issue #58).
+
+        Returns True when admission may proceed, False when the turn was
+        aborted/closed while waiting. Blocks the consuming thread at most
+        min_interval seconds per sentence — upstream chat() already consumes
+        this sync generator inline, and the model stream keeps buffering in
+        the bridge client while the consumer paces. Device barge-in ends the
+        wait immediately (abort clears current_turn / marks the state closed).
+        """
+        if self._pace_min_interval_s <= 0:
+            return True
+        now = time.time()
+        last = getattr(state, "last_enqueue_ts", None)
+        wait_until = (last + self._pace_min_interval_s) if last else now
+        while time.time() < wait_until:
+            if state.closed or state.current_turn is None:
+                return False
+            time.sleep(0.1)
+        state.last_enqueue_ts = time.time()
+        return True
 
     def _enqueue_sentence(self, state, text):
         conn = state.conn
