@@ -107,7 +107,7 @@
 
 - [ ] **R1-V1：Turn Orchestrator + Fencing**。创建独立 `turn_id`、单调 `epoch`、终态不可逆状态机；合成 100 次 ASR 迟到/重复取消/记忆提交竞态无串轮、旧 TTS 和过期写入 0。
 - [ ] **R1-V2：自定义 Cordis Runtime Bridge**。单一 Bridge 独占 Voice Session 生命周期；内部 `agent.cancel()`、`agent.whenIdle()`、`agent/assistant-stream`，实现 `prompt/cancel/stream/close` 和 Unix Domain Socket 受限控制面；支持安全短句增量 TTS、异常 Worker 回收与最小权限验证。
-- [ ] **R1-V3：跨组件接口合同**。与小智 `client_abort`/TTS 队列/Stop 协议的接口契约、版本管理和合成故障注入。实机最后验收留在 R5。**进度（E2E MVP，父 Epic #50）**：合同与合成验证（#30/#51/#55/#56，Adapter v1.3）、服务端部署与真实 ASR/TTS 档位（#54/#55/#56）、**服务端接线联测（#57，ADR-0011：LLM 扩展点桥 + 受保护内部传输 + 设备鉴权映射 + 真实 Opus 下行全链路）已交付**；实机（真实固件/真实音频上行/实机打断时延）留 R5/#E2E-08。
+- [ ] **R1-V3：跨组件接口合同**。与小智 `client_abort`/TTS 队列/Stop 协议的接口契约、版本管理和合成故障注入。实机最后验收留在 R5。**进度（E2E MVP，父 Epic #50）**：合同与合成验证（#30/#51/#55/#56，Adapter v1.3）、服务端部署与真实 ASR/TTS 档位（#54/#55/#56）、**服务端接线联测（#57，ADR-0011：LLM 扩展点桥 + 受保护内部传输 + 设备鉴权映射 + 真实 Opus 下行全链路）已交付**；**#58（E2E-08）已清零 #57 review P1-1/P1-2（real 档 10 连轮接线环 CI 证明 + 未绑定设备负例 + 启动器 scoped typecheck + 注入面回归守卫）**；实机（真实固件/真实音频上行/实机打断时延）留 R5/#E2E-08 实机执行（[runbook §11](../deploy/xiaozhi/runbook.md)）。
 - **No-Go**：无法保证旧轮次禁止输出/写入、取消/流式接口绕过儿童安全 Gate，或 Bridge 引入默认危险插件/额外未授权外发时，禁止真实儿童语音上线。
 - **R0 维持不变**：`poc/dsh-child` 继续用 SDK 合成 Mock，35/35 PASS 零 SKIP 基线是独立回归，不因 Voice Bridge 设计选择而重构。
 

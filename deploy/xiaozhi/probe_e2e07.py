@@ -22,6 +22,14 @@ Modes (mutually exclusive):
                                  sentence/audio follows it (late-audio /
                                  stop-后音频帧 fence, server-side
                                  client_abort + gateway epoch fence).
+  --expect-unbound-refusal       a VALID-token device with NO guardian
+                                 binding (E2E-08, issue #58 DoD 3): the
+                                 server answers hello, then the gateway
+                                 refuses the unbound device (device_unbound)
+                                 and orders the bridge to close the device
+                                 WebSocket — no child session without a
+                                 guardian binding, no possession by MAC
+                                 alone.
 
 PRIVACY: sentence texts are counted, never printed; audio bytes are only
 counted. Output is content-free.
@@ -277,6 +285,28 @@ async def probe_abort_fence(args):
         print(f"abort-fence OK (stop effective, zero late frames): {collector.summary()}")
 
 
+async def probe_unbound_refusal(args):
+    token = generate_token(args.auth_key, args.client_id, args.device_id)
+    async with await connect(args, args.device_id, args.client_id, token) as ws:
+        # The pinned server's own AuthManager accepts the valid token (the
+        # refusal is NOT server auth): the gateway's guardian binding is the
+        # edge that must close this device.
+        await hello_phase(ws, args.timeout)
+        closed = False
+        try:
+            while True:
+                raw = await recv_msg(ws, args.timeout)
+                if isinstance(raw, str) and json.loads(raw).get("type") == "tts":
+                    continue  # playback state frames are not a refusal
+        except websockets.ConnectionClosed:
+            closed = True
+        except asyncio.TimeoutError:
+            closed = False
+        if not closed:
+            raise AssertionError("unbound device connection was not closed by the server edge (guardian binding gap)")
+        print("unbound-refusal OK (no guardian binding, no child session)")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
@@ -302,6 +332,7 @@ def main():
     parser.add_argument("--expect-full-loop", action="store_true", default=True)
     parser.add_argument("--expect-duplicate-refusal", action="store_true")
     parser.add_argument("--expect-abort-fence", action="store_true")
+    parser.add_argument("--expect-unbound-refusal", action="store_true")
     args = parser.parse_args()
 
     secret = args.auth_key or os.environ.get("XIAOZHI_AUTH_KEY")
@@ -314,6 +345,9 @@ def main():
         return 0
     if args.expect_abort_fence:
         asyncio.run(probe_abort_fence(args))
+        return 0
+    if args.expect_unbound_refusal:
+        asyncio.run(probe_unbound_refusal(args))
         return 0
     asyncio.run(probe_full_loop(args))
     return 0

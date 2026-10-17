@@ -33,6 +33,12 @@ import { join } from "node:path";
 import { createWiredVoiceGateway, verifyDeviceAuthorization, type WiredVoiceGateway } from "../../lib/server/voice-gateway-wiring.ts";
 import type { GatewayInternalInboundFrame, GatewayInternalOutboundFrame } from "../../lib/server/voice-gateway-internal-transport.ts";
 import type { MockGenerationScript } from "../../lib/domain/voice/bridge/mock-cordis.ts";
+import type {
+  BridgeAgentHandle,
+  BridgeAgentPort,
+  BridgeDurableEvent,
+  BridgeStreamEvent,
+} from "../../lib/domain/voice/bridge/agent-port.ts";
 
 const SOCKETS_AVAILABLE = process.platform !== "win32";
 
@@ -65,7 +71,13 @@ interface Fixture {
   readonly cleanup: () => void;
 }
 
-async function createWired(script?: (sessionKey: string, turnId: string) => MockGenerationScript): Promise<Fixture> {
+async function createWired(
+  script?: (sessionKey: string, turnId: string) => MockGenerationScript,
+  inject?: {
+    readonly agentPort: BridgeAgentPort;
+    readonly onAgentFault?: (listener: (info: { readonly sessionKey: string; readonly code: "worker_crashed" }) => void) => void;
+  },
+): Promise<Fixture> {
   const socketDir = mkdtempSync(join(tmpdir(), "lumithink-wiring-"));
   const outFrames: { kind: string; frame: Record<string, unknown> }[] = [];
   let turnSeq = 0;
@@ -78,6 +90,8 @@ async function createWired(script?: (sessionKey: string, turnId: string) => Mock
     socketDir,
     endpointName: `wiring-${Math.floor(Math.random() * 0xffffff).toString(16)}`,
     scriptFor: script ?? scriptFor,
+    ...(inject !== undefined ? { agentPort: inject.agentPort } : {}),
+    ...(inject?.onAgentFault !== undefined ? { onAgentFault: inject.onAgentFault } : {}),
     transport: BRIDGE_TRANSPORT,
     turnIdFactory: () => {
       turnSeq += 1;
@@ -245,6 +259,131 @@ test("authorized device: hello → turn → fence-stamped sentences → tts_end 
         assert.equal(entry.kind, "tts_sentence", "response text appears only in authorized tts_sentence frames");
       }
     }
+    await driver.destroy();
+  } finally {
+    await fixture.wired.stop();
+    fixture.cleanup();
+  }
+});
+
+test("an injected agentPort takes the Bridge's upstream seat (the wiring never silently serves the synthetic runtime)", async () => {
+  // E2E-08 (issue #58) — regression for the #57 review P1-1 clearance: the
+  // stack composition used to DROP a spread-in `agentPort` (TypeScript's
+  // excess-property checks do not apply to spreads), so a `real` host would
+  // have silently answered with the SYNTHETIC runtime. The stub records the
+  // createAgent calls and drives the Bridge contract directly: if the
+  // injection path ever regresses, this test fails (synthetic texts, zero
+  // createAgent calls) instead of a fake "real" CI pass.
+  const created: string[] = [];
+  const prompts: { readonly turnId: string; readonly promptText?: string }[] = [];
+  let attemptSeq = 0;
+  const port: BridgeAgentPort = {
+    createAgent(sessionKey) {
+      created.push(sessionKey);
+      const streamListeners: ((event: BridgeStreamEvent) => void)[] = [];
+      const durableListeners: ((event: BridgeDurableEvent) => void)[] = [];
+      const handle: BridgeAgentHandle = {
+        sessionKey,
+        runPrompt(input) {
+          prompts.push({ turnId: input.turnId, ...(input.promptText !== undefined ? { promptText: input.promptText } : {}) });
+          attemptSeq += 1;
+          const attemptId = `att_stub_${attemptSeq.toString().padStart(4, "0")}`;
+          const stepId = "step_0001";
+          // Real-port timing: a worker's first stream frame crosses a process
+          // boundary and lands AFTER the composition's dispatch chain
+          // (turn.prompt → turn.stream subscription) completed. A synchronous
+          // microtask emission would settle the attempt BEFORE the stream
+          // subscription command — chunks dropped, dispatch judged failed —
+          // a stub artifact, not wiring behavior.
+          setTimeout(() => {
+            for (const listener of [...streamListeners]) {
+              listener({ kind: "start", attemptId, stepId });
+              listener({ kind: "chunk", attemptId, stepId, index: 0, channel: "text", textDelta: "这是注入端口的第一句。" });
+              listener({ kind: "chunk", attemptId, stepId, index: 1, channel: "text", textDelta: "这是注入端口的第二句。" });
+              listener({ kind: "end", attemptId, stepId });
+            }
+            for (const listener of [...durableListeners]) {
+              listener({ event: "assistant/message", attemptId, messageId: `msg_stub_${attemptSeq}`, messageRef: "stub-ref" });
+            }
+          }, 5);
+          return { ok: true, attemptId };
+        },
+        cancel() {
+          return { ok: false, code: "no_running_attempt" };
+        },
+        async whenIdle() {
+          return { ok: true, attemptId: null };
+        },
+        async dispose() {
+          return { ok: true };
+        },
+        onStream(listener) {
+          streamListeners.push(listener);
+          return { ok: true };
+        },
+        onDurable(listener) {
+          durableListeners.push(listener);
+          return { ok: true };
+        },
+        isRunning() {
+          return false;
+        },
+      };
+      return { ok: true, handle };
+    },
+    resumeAgent(sessionKey) {
+      return port.createAgent(sessionKey);
+    },
+  };
+  let agentFaultListener: ((info: { readonly sessionKey: string; readonly code: "worker_crashed" }) => void) | null = null;
+  const fixture = await createWired(scriptFor, {
+    agentPort: port,
+    onAgentFault: (listener) => {
+      agentFaultListener = listener;
+    },
+  });
+  try {
+    const stackEvents: { readonly name: string; readonly payload: Record<string, unknown> }[] = [];
+    fixture.wired.stack.stack.client.onEvent((frame) => {
+      if (frame.kind === "event") {
+        stackEvents.push({ name: frame.name, payload: (frame.payload ?? {}) as Record<string, unknown> });
+      }
+    });
+    const driver = await connectBridge(fixture);
+    await helloDevice(driver, fixture, { connId: "conn-inject-1", deviceId: DEVICE_ID });
+    await driver.send({ kind: "session_issued", connId: "conn-inject-1", xiaozhiSessionId: SESSION_ID });
+    await driver.send({ kind: "turn_prompt", connId: "conn-inject-1", xiaozhiSessionId: SESSION_ID, text: "我们来玩个游戏好不好" });
+
+    assert.ok(await waitFor(() => fixture.outFrames.some((entry) => entry.frame.kind === "tts_end")), "the turn ended");
+    // THE seat assertion: the Bridge created its agent through the INJECTED
+    // port (exactly once, at the session open) and the delivered sentences
+    // are the stub's — the synthetic scriptFor text must never appear.
+    assert.equal(created.length, 1, "the Bridge created its agent through the injected port");
+    const sentences = fixture.outFrames.filter((entry) => entry.frame.kind === "tts_sentence");
+    assert.deepEqual(
+      sentences.map((entry) => entry.frame.text),
+      ["这是注入端口的第一句。", "这是注入端口的第二句。"],
+      "the stub's sentences were served — the injected port holds the upstream seat",
+    );
+    assert.ok(
+      !fixture.outFrames.some((entry) => entry.kind === "tts_sentence" && entry.frame.text === "我们一起看看这道题。"),
+      "the synthetic runtime never served the turn",
+    );
+    // Issue #51 contract across the injection: the transient transcript
+    // reached the agent exactly once, non-empty (no digest-only prompt).
+    assert.equal(prompts.length, 1);
+    assert.equal(prompts[0]?.promptText, "我们来玩个游戏好不好");
+    assert.ok(prompts[0]?.turnId);
+    // The injected port's fault channel reaches the Bridge quarantine.
+    assert.ok(agentFaultListener !== null, "the fault listener was registered through the wiring");
+    (agentFaultListener as (info: { readonly sessionKey: string; readonly code: "worker_crashed" }) => void)({
+      sessionKey: created[0] as string,
+      code: "worker_crashed",
+    });
+    assert.ok(
+      await waitFor(() => stackEvents.some((event) => event.name === "runtime.error" && event.payload.code === "worker_crashed")),
+      "the injected port's fault channel is wired to the Bridge quarantine",
+    );
     await driver.destroy();
   } finally {
     await fixture.wired.stop();

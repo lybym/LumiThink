@@ -40,6 +40,7 @@ import {
 import { createGatewayDeviceBindingRegistry, type GatewayDeviceBindingRegistry } from "../domain/voice/adapter/binding.ts";
 import type { GatewayDeviceDirective } from "../domain/voice/adapter/protocol.ts";
 import type { MockGenerationScript } from "../domain/voice/bridge/mock-cordis.ts";
+import type { BridgeAgentPort } from "../domain/voice/bridge/agent-port.ts";
 import type { BridgeCordisProfile } from "../domain/voice/bridge/profile.ts";
 
 // ---------------------------------------------------------------------------
@@ -56,6 +57,22 @@ export interface VoiceGatewayStackOptions {
   readonly transport?: "ipc" | "in_process";
   readonly clock?: () => number;
   readonly turnIdFactory?: () => string;
+  /**
+   * E2E-02 (issue #52) / E2E-08 (issue #58): an injected agent port (the
+   * REAL locked-version DSH Cordis adapter from `poc/dsh-child`) replaces
+   * the synthetic mock runtime as the Bridge's upstream. Declared and
+   * FORWARDED here: the options object flows to `createVoiceBridgeStack`
+   * verbatim — an injected port must take the Bridge's upstream seat, never
+   * be silently dropped in favor of the synthetic runtime (the E2E-08
+   * review clearance of the #57 review P1-1 wiring-loop gap).
+   */
+  readonly agentPort?: BridgeAgentPort;
+  /**
+   * Fault signal of an injected agent port (wired to the Bridge's worker
+   * quarantine). Forwarded with `agentPort`; omitted keeps the synthetic
+   * default (the mock runtime's fault channel is pre-wired).
+   */
+  readonly onAgentFault?: (listener: (info: { readonly sessionKey: string; readonly code: "worker_crashed" }) => void) => void;
   /** Synthetic frames per admitted TTS sentence (POC stand-in). */
   readonly framesPerSentence?: number;
   /** Device-directive sink override (defaults to the injected mock sink). */
@@ -121,6 +138,10 @@ export function createVoiceGatewayStack(options: VoiceGatewayStackOptions): Voic
     ...(options.transport !== undefined ? { transport: options.transport } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
     ...(options.turnIdFactory !== undefined ? { turnIdFactory: options.turnIdFactory } : {}),
+    // E2E-08 (issue #58): forward the injected agent port AND its fault
+    // channel — an omitted field keeps the synthetic contract unchanged.
+    ...(options.agentPort !== undefined ? { agentPort: options.agentPort } : {}),
+    ...(options.onAgentFault !== undefined ? { onAgentFault: options.onAgentFault } : {}),
     ...(options.onAdmittedSentence !== undefined ? { onAdmittedSentence: options.onAdmittedSentence } : {}),
   });
 

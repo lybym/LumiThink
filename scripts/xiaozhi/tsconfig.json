@@ -1,0 +1,4 @@
+{
+  "extends": "../../poc/dsh-child/tsconfig.json",
+  "include": ["gateway-host.ts"]
+}
