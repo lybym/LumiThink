@@ -534,7 +534,8 @@ test("mid-turn disconnect then reconnect: the resumed delivery of the same turn 
 
 test("the adapter version bump is observable for the E2E-06 TTS metrics semantics", () => {
   // A cheap contract pin: TTS metrics are v1.3 adapter behavior (dedup
-  // semantics originated in v1.2 and are unchanged); a future reader
-  // comparing evidence across versions sees which semantics produced it.
-  assert.equal(GATEWAY_ADAPTER_VERSION, "1.3");
+  // semantics originated in v1.2; v1.4 added the wired real-audio
+  // accounting without changing either); a future reader comparing
+  // evidence across versions sees which semantics produced it.
+  assert.equal(GATEWAY_ADAPTER_VERSION, "1.4");
 });

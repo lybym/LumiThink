@@ -61,6 +61,18 @@ export interface VoiceGatewayStackOptions {
   /** Device-directive sink override (defaults to the injected mock sink). */
   readonly directiveSink?: (directive: GatewayDeviceDirective) => void;
   /**
+   * E2E-07 (issue #57): optional delivery sink for Output-Gate-admitted
+   * sentences (the wired xiaozhi bridge transport consumes them as the TTS
+   * input). Omitted keeps the synthetic contract.
+   */
+  readonly onAdmittedSentence?: (entry: {
+    readonly sessionKey: string;
+    readonly turnId: string;
+    readonly epoch: number;
+    readonly itemId: string;
+    readonly text: string;
+  }) => void;
+  /**
    * FIXED transcript-dedup HMAC key (exactly 64 hex chars) for deterministic
    * test REPLAYS only. Production MUST omit it: the key is then per-process
    * random (`randomBytes(32)`), never logged or persisted, and discarded
@@ -84,7 +96,7 @@ export interface VoiceGatewayStack {
     readonly activationDigest: string;
   }): { readonly ok: true; readonly created: boolean } | { readonly ok: false; readonly code: string };
   /** Ingest one raw device event on one connection (fail-closed). */
-  handleDeviceEvent(connectionId: string, raw: unknown): Promise<{ readonly ok: boolean; readonly kind?: string; readonly code?: string; readonly sessionKey?: string | null }>;
+  handleDeviceEvent(connectionId: string, raw: unknown): Promise<{ readonly ok: boolean; readonly kind?: string; readonly code?: string; readonly sessionKey?: string | null; readonly turnId?: string }>;
   /** Drain + fence + send current-epoch TTS for one session (deterministic). */
   pumpPlayback(sessionKey: string): { readonly ok: true; readonly sent: number; readonly staleRejected: number; readonly droppedStale: number } | { readonly ok: false; readonly code: string };
   /** Timeout sweep for one mapped session. */
@@ -109,6 +121,7 @@ export function createVoiceGatewayStack(options: VoiceGatewayStackOptions): Voic
     ...(options.transport !== undefined ? { transport: options.transport } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
     ...(options.turnIdFactory !== undefined ? { turnIdFactory: options.turnIdFactory } : {}),
+    ...(options.onAdmittedSentence !== undefined ? { onAdmittedSentence: options.onAdmittedSentence } : {}),
   });
 
   const binding = createGatewayDeviceBindingRegistry({ clock });
@@ -256,7 +269,12 @@ export function createVoiceGatewayStack(options: VoiceGatewayStackOptions): Voic
     async handleDeviceEvent(connectionId, raw) {
       const outcome = await adapter.handleDeviceEvent(connectionId, raw);
       if (outcome.ok) {
-        return { ok: true, kind: outcome.kind, sessionKey: outcome.sessionKey };
+        return {
+          ok: true,
+          kind: outcome.kind,
+          sessionKey: outcome.sessionKey,
+          ...(outcome.turnId !== undefined ? { turnId: outcome.turnId } : {}),
+        };
       }
       return { ok: false, code: outcome.code };
     },

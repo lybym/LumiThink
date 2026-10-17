@@ -1,0 +1,443 @@
+name: E2E-07 gateway wiring gate
+
+# E2E-07 (issue #57): the xiaozhi-esp32-server ↔ LumiThink Voice Gateway
+# WIRING must be provable on a clean Linux runner without claiming
+# real-device readiness (#E2E-08 owns device acceptance; no tag/release).
+# Two jobs:
+#   1. artifacts — syntax + template integrity of the new bridge surface:
+#      py_compile (module/installer/stub/probe), the gateway-bridge tier
+#      template assertions (bridge LLM is the ONLY selected LLM, loopback
+#      only, token via env name not value), env template carries no real
+#      secrets, fork-patch registry present and machine-mirror consistent.
+#   2. wiring-e2e — REAL end-to-end on localhost: bootstrap the pinned
+#      server (gateway-bridge tier) → install the bridge module + the five
+#      registered fork patches (verbatim-anchored, drift-refusing) → start
+#      the LumiThink gateway host (REAL protected UDS transport + REAL
+#      local-socket Bridge IPC + REAL locked-version DSH worker process
+#      over the deterministic synthetic model) + local TTS stub → drive the
+#      protocol-simulated device:
+#        - full loop: hello → session → detect(text) → stt echo → tts
+#          start → sentence_start → REAL binary Opus downlink → tts stop
+#          (the ONLY selected LLM is the gateway bridge — the built-in AI
+#          second path is structurally unreachable; a timeout is a wiring
+#          failure, never a silent fallback);
+#        - duplicate device connection refused (lease enforcement at the
+#          server edge), first connection unaffected;
+#        - mid-playback abort → tts stop with ZERO late frames;
+#        - server restart → reconnect → same trusted session continues.
+# No real credentials, no external egress (gateway-bridge tier: ASR stays
+# the loopback placeholder, TTS a loopback stub, the LLM path is the local
+# protected transport; real-device acceptance stays with #E2E-08).
+on:
+  pull_request:
+    paths:
+      - 'deploy/xiaozhi/**'
+      - 'lib/server/voice-gateway-wiring.ts'
+      - 'lib/server/voice-gateway-internal-transport.ts'
+      - 'lib/server/voice-gateway-composition.ts'
+      - 'lib/domain/voice/bridge/stream-gate.ts'
+      - 'scripts/xiaozhi/**'
+      - 'tests/server/voice-gateway-*.spec.ts'
+      - 'tests/domain/voice/bridge/stream-gate-sink.spec.ts'
+      - '.github/workflows/e2e-07-gateway-wiring-gate.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/xiaozhi/**'
+      - 'lib/server/voice-gateway-wiring.ts'
+      - 'lib/server/voice-gateway-internal-transport.ts'
+      - 'lib/server/voice-gateway-composition.ts'
+      - 'lib/domain/voice/bridge/stream-gate.ts'
+      - 'scripts/xiaozhi/**'
+      - 'tests/server/voice-gateway-*.spec.ts'
+      - 'tests/domain/voice/bridge/stream-gate-sink.spec.ts'
+      - '.github/workflows/e2e-07-gateway-wiring-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-07-gateway-wiring-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.10'
+
+jobs:
+  artifacts:
+    name: Bridge artifacts (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python surface compiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            deploy/xiaozhi/gateway_bridge/lumithink_llm.py \
+            deploy/xiaozhi/gateway_bridge/install_bridge.py \
+            deploy/xiaozhi/tts_stub.py \
+            deploy/xiaozhi/probe_e2e07.py
+          echo "py_compile OK (module, installer, stub, probe)"
+
+      - name: gateway-bridge tier template — bridge LLM only, loopback, token by env name
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          python3 - <<'PY'
+          import re, yaml
+          cfg = yaml.safe_load(open("deploy/xiaozhi/config/gateway-bridge.yaml", encoding="utf-8"))
+          server = cfg["server"]
+          assert server["ip"] == "127.0.0.1", server["ip"]
+          assert server["auth"]["enabled"] is True
+          assert server["auth"]["allowed_devices"] == []
+          sm = cfg["selected_module"]
+          assert set(sm.keys()) == {"VAD", "ASR", "LLM", "TTS", "VLLM", "Memory", "Intent"}, sm
+          # THE E2E-07 tier difference: the ONLY selected LLM is the
+          # LumiThink gateway bridge (built-in AI second path unreachable).
+          assert sm["LLM"] == "LumithinkBridgeLLM", sm
+          assert cfg["LLM"]["LumithinkBridgeLLM"]["type"] == "lumithink"
+          # The token enters by ENV NAME only — never a literal value.
+          assert cfg["LLM"]["LumithinkBridgeLLM"]["auth_token_env"] == "LUMITHINK_GATEWAY_BRIDGE_TOKEN"
+          assert "${LUMITHINK_GATEWAY_SOCKET}" == cfg["LLM"]["LumithinkBridgeLLM"]["gateway_socket"]
+          assert sm["VLLM"] == "" and sm["Memory"] == "nomem" and sm["Intent"] == "nointent"
+          # Everything else stays the reviewed gateway-minimal surface.
+          assert sm["VAD"] == "SileroVAD" and sm["ASR"] == "FunASRServer" and sm["TTS"] == "CustomTTS"
+          assert cfg["ASR"]["FunASRServer"]["host"] == "127.0.0.1"
+          assert cfg["TTS"]["CustomTTS"]["url"] == "${XIAOZHI_TTS_STUB_URL}"
+          assert cfg["read_config_from_api"] is False
+          assert cfg["log"]["log_level"] == "WARNING", cfg["log"]
+          assert cfg["delete_audio"] is True
+          # No concrete external host on active lines (loopback or ${VAR} only).
+          for raw_line in open("deploy/xiaozhi/config/gateway-bridge.yaml", encoding="utf-8"):
+              line = raw_line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              for match in re.finditer(r"https?://([^/\s\"']+)", line):
+                  host = match.group(1)
+                  assert re.match(r"^(\$\{[A-Z_][A-Z0-9_]*\}|127\.0\.0\.1|localhost)(:\d+)?$", host), line
+          print("gateway-bridge template OK (bridge LLM only, loopback, token by env name)")
+          PY
+
+      - name: Env template carries no real secrets; fork-patch registry consistent
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Documented shapes only (same contract as
+          # tests/deploy/xiaozhi-gateway-bridge.spec.ts): generation
+          # placeholders, the example domain, the UDS path shape, and
+          # loopback URLs (the CI TTS stub is loopback by construction).
+          if grep -E '^[A-Z_]+=.' deploy/xiaozhi/env/gateway-bridge.example \
+             | grep -vE '(<generate|xiaozhi\.example\.com|/run/lumithink/|http://(127\.0\.0\.1|localhost))'; then
+            echo "::error::env template must not carry real values"
+            exit 1
+          fi
+          python3 - <<'PY'
+          # The machine mirror must carry exactly the five registered patches.
+          import re
+          installer = open("deploy/xiaozhi/gateway_bridge/install_bridge.py", encoding="utf-8").read()
+          doc = open("deploy/xiaozhi/fork-patches.md", encoding="utf-8").read()
+          numbers = re.findall(r'"number": "(\d/5)"', installer)
+          assert numbers == ["1/5", "2/5", "3/5", "4/5", "5/5"], numbers
+          for i in range(1, 6):
+              assert f"{i}/5" in doc, f"fork-patches.md missing patch {i}/5"
+          assert "27399a2fb64b5910196f438a256ce0a9f868481f" in doc, "registry must name the pinned commit"
+          print("fork-patch registry consistent (5 patches, pinned commit named)")
+          PY
+
+      - name: Installer drill — synthetic pinned tree (install, idempotent re-install, verify-only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Regression for the wiring-e2e failure class (two registered
+          # patches share sendAudioHandle.py — sibling markers are
+          # expected, never a failure; anchor uniqueness is the drift
+          # guard). A synthetic tree with the exact anchors proves:
+          # install applies all 5, a re-install is idempotent, verify-only
+          # passes, and a duplicated anchor (pin drift) refuses a fresh
+          # install.
+          work="$(mktemp -d)"
+          tree="$work/main/xiaozhi-server"
+          mkdir -p "$tree/core/handle" "$tree/core/providers/llm"
+          printf 'async def handleHelloMessage(conn, msg_json):\n    await conn.websocket.send(json.dumps(conn.welcome_msg))\n' > "$tree/core/handle/helloHandle.py"
+          printf 'async def handleAbortMessage(conn):\n    conn.clearSpeakStatus()\n' > "$tree/core/handle/abortHandle.py"
+          printf 'async def _do_send_audio(conn, opus_packet, flow_control):\n    flow_control["packet_count"] = packet_index + 1\n    flow_control["sequence"] = sequence + 1\n\nasync def send_tts_message(conn, state, text=None):\n    # 发送消息到客户端\n    await conn.websocket.send(json.dumps(message))\n' > "$tree/core/handle/sendAudioHandle.py"
+          printf '    async def _save_and_close(self, ws):\n        """保存记忆并关闭连接"""\n        pass\n' > "$tree/core/connection.py"
+          python3 deploy/xiaozhi/gateway_bridge/install_bridge.py --target "$work" | grep -q "applied patch 4/5"
+          python3 deploy/xiaozhi/gateway_bridge/install_bridge.py --target "$work" | grep -q "already applied"
+          python3 deploy/xiaozhi/gateway_bridge/install_bridge.py --target "$work" --verify-only | grep -q "install complete"
+          printf '    await conn.websocket.send(json.dumps(conn.welcome_msg))\n' >> "$tree/core/handle/helloHandle.py"
+          if python3 deploy/xiaozhi/gateway_bridge/install_bridge.py --target "$(mktemp -d)" 2>/dev/null; then
+            echo "::error::a corrupted tree must refuse to patch"; exit 1
+          fi
+          echo "installer drill OK (5/5, idempotent, verify-only, drift-refusing)"
+
+      - name: Pinned version markers stay single-sourced
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="$(grep -oP '(?<=^XIAOZHI_SERVER_COMMIT=)[0-9a-f]{40}$' deploy/xiaozhi/version.env)"
+          grep -q "main@${commit}" lib/domain/voice/adapter/protocol.ts
+          echo "version pin single-sourced: ${commit:0:12}"
+
+  wiring-e2e:
+    name: xiaozhi↔LumiThink wiring e2e (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install exact pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.7
+
+      - name: Install exact Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: System deps (ffmpeg + libopus — upstream runtime requirements)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg libopus0
+          ffmpeg -version | head -1
+
+      - name: Frozen-lockfile installs (root + isolated poc runtime)
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm --dir poc/dsh-child install --frozen-lockfile
+
+      - name: Node-side wiring regression (real UDS transport + real Bridge IPC)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types --test-isolation=none --test \
+            tests/server/voice-gateway-internal-transport.spec.ts \
+            tests/server/voice-gateway-wiring.spec.ts \
+            tests/domain/voice/bridge/stream-gate-sink.spec.ts
+
+      - name: Worker bisection — the real DSH worker e2e must pass in THIS job too
+        working-directory: poc/dsh-child
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bisects the wiring e2e: if this passes but the wired loop below
+          # stalls, the delta is the gateway host; if this fails, the job
+          # environment cannot spawn the locked worker at all.
+          pnpm run test:e2e02:run
+          pnpm run test:e2e02:gate
+
+      - name: Generate e2e secrets (never committed, never echoed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_DIR="$RUNNER_TEMP/lumithink-gw"
+          mkdir -p "$RUN_DIR"
+          AUTH_KEY="$(openssl rand -hex 32)"
+          {
+            echo "XIAOZHI_AUTH_KEY=${AUTH_KEY}"
+            # The gateway host re-verifies the device token scheme with the
+            # SAME deployment key under its own env name.
+            echo "LUMITHINK_GATEWAY_AUTH_KEY=${AUTH_KEY}"
+            echo "XIAOZHI_DEVICE_WS_URL=ws://127.0.0.1:8000/xiaozhi/v1/"
+            echo "XIAOZHI_PUBLIC_DOMAIN=127.0.0.1"
+            echo "LUMITHINK_GATEWAY_SOCKET=$RUN_DIR/voice-gateway.sock"
+            echo "LUMITHINK_GATEWAY_BRIDGE_TOKEN=$(openssl rand -hex 24)"
+            echo "XIAOZHI_TTS_STUB_URL=http://127.0.0.1:8097/tts"
+          } > e2e07.env
+          chmod 600 e2e07.env
+
+      - name: Prepare gateway host bindings + scratch home
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source e2e07.env; set +a
+          RUN_DIR="$(dirname "$LUMITHINK_GATEWAY_SOCKET")"
+          # Two guardian-issued synthetic bindings (activation digests are
+          # content-free test values, never real credentials). The deviceIds
+          # MUST equal the probes' --device-id in the Adapter grammar
+          # (separator-stripped, lower-cased MAC); each probe uses its OWN
+          # device so per-device server-side state never crosses probes.
+          printf '%s\n' \
+            '[' \
+            '  {"deviceId": "aabbccddee07", "actorId": "act_parent0001", "conversationId": "conv_child0001", "activationDigest": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"},' \
+            '  {"deviceId": "aabbccddee08", "actorId": "act_parent0001", "conversationId": "conv_child0001", "activationDigest": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"}' \
+            ']' > "$RUN_DIR/bindings.json"
+          echo "LUMITHINK_GATEWAY_BINDINGS=$RUN_DIR/bindings.json" >> e2e07.env
+          echo "LUMITHINK_GATEWAY_HOME=$RUN_DIR/dsh-home" >> e2e07.env
+
+      - name: Start the local TTS stub (loopback only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 deploy/xiaozhi/tts_stub.py --port 8097 > tts-stub.log 2>&1 &
+          echo $! > tts-stub.pid
+          # Readiness poll (a cold runner's python start can exceed 1s).
+          ready=""
+          for _ in $(seq 1 30); do
+            if curl -s -o /dev/null -X POST -H 'content-type: application/json' \
+              -d '{"input":"ready"}' http://127.0.0.1:8097/tts; then
+              ready="1"
+              break
+            fi
+            if ! kill -0 "$(cat tts-stub.pid)" 2>/dev/null; then
+              echo "::error::tts stub exited during startup"; cat tts-stub.log; exit 1
+            fi
+            sleep 1
+          done
+          [ -n "${ready}" ] || { echo "::error::tts stub never became ready"; cat tts-stub.log; exit 1; }
+          echo "tts stub ready"
+
+      - name: Start the LumiThink gateway host (REAL UDS transport + REAL DSH worker)
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source e2e07.env; set +a
+          node --experimental-strip-types scripts/xiaozhi/gateway-host.ts > gateway-host.log 2>&1 &
+          echo $! > gateway-host.pid
+          for _ in $(seq 1 30); do
+            if grep -q "GATEWAY-HOST READY" gateway-host.log 2>/dev/null; then
+              break
+            fi
+            if ! kill -0 "$(cat gateway-host.pid)" 2>/dev/null; then
+              echo "::error::gateway host exited during boot"; cat gateway-host.log; exit 1
+            fi
+            sleep 1
+          done
+          grep -q "GATEWAY-HOST READY" gateway-host.log || { echo "::error::gateway host never became ready"; cat gateway-host.log; exit 1; }
+          test -S "$LUMITHINK_GATEWAY_SOCKET" || { echo "::error::protected UDS endpoint missing"; exit 1; }
+          stat -c '%a' "$LUMITHINK_GATEWAY_SOCKET" | grep -qx '600' || { echo "::error::protected UDS endpoint is not 0600"; exit 1; }
+          echo "gateway host ready (UDS 0600)"
+
+      - name: Bootstrap the pinned server (gateway-bridge tier) + bridge module install
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source e2e07.env; set +a
+          bash deploy/xiaozhi/bootstrap.sh \
+            --target "$RUNNER_TEMP/xiaozhi-esp32-server" \
+            --env-file "$(pwd)/e2e07.env" \
+            --template config/gateway-bridge.yaml
+          python3 deploy/xiaozhi/gateway_bridge/install_bridge.py \
+            --target "$RUNNER_TEMP/xiaozhi-esp32-server"
+          python3 deploy/xiaozhi/gateway_bridge/install_bridge.py \
+            --target "$RUNNER_TEMP/xiaozhi-esp32-server" --verify-only
+
+      - name: Boot the wired server and prove the full loop
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source e2e07.env; set +a
+          cd "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server"
+          # The internal transport token reaches the server process via env
+          # (the provider reads LUMITHINK_GATEWAY_BRIDGE_TOKEN by name).
+          "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" app.py > wired-server.log 2>&1 &
+          echo $! > wired-server.pid
+          for _ in $(seq 1 45); do
+            # Readiness: a TCP connect to the device WS port (the OTA HTTP
+            # port opens even earlier; the WS face is what the probe needs).
+            if (exec 3<>/dev/tcp/127.0.0.1/8000) 2>/dev/null; then
+              exec 3>&- 3<&- || true
+              break
+            fi
+            if ! kill -0 "$(cat wired-server.pid)" 2>/dev/null; then
+              echo "::error::wired server exited during boot"; tail -40 wired-server.log; exit 1
+            fi
+            sleep 1
+          done
+          cd "$GITHUB_WORKSPACE"
+          # FULL LOOP: hello → session → detect(text) → stt → DSH → TTS →
+          # REAL Opus downlink → stop. The ONLY selected LLM is the gateway
+          # bridge; a timeout is a wiring failure, never a fallback.
+          "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" deploy/xiaozhi/probe_e2e07.py \
+            --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+            --device-id aa:bb:cc:dd:ee:07 --client-id e2e07-probe \
+            --auth-key "${XIAOZHI_AUTH_KEY}" \
+            --turn-timeout 90
+
+      - name: Negative — duplicate device connection refused at the server edge
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source e2e07.env; set +a
+          "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" deploy/xiaozhi/probe_e2e07.py \
+            --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+            --device-id aa:bb:cc:dd:ee:07 --client-id e2e07-dup \
+            --auth-key "${XIAOZHI_AUTH_KEY}" \
+            --expect-duplicate-refusal
+
+      - name: Mid-playback abort fences with zero late frames
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source e2e07.env; set +a
+          "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" deploy/xiaozhi/probe_e2e07.py \
+            --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+            --device-id aa:bb:cc:dd:ee:08 --client-id e2e07-abort \
+            --auth-key "${XIAOZHI_AUTH_KEY}" \
+            --turn-timeout 90 \
+            --expect-abort-fence
+
+      - name: Server restart → reconnect → same trusted session continues
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a; source e2e07.env; set +a
+          kill -TERM "$(cat wired-server.pid)" 2>/dev/null || true
+          for _ in $(seq 1 20); do
+            kill -0 "$(cat wired-server.pid)" 2>/dev/null || break
+            sleep 1
+          done
+          cd "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server"
+          "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" app.py > wired-server2.log 2>&1 &
+          echo $! > wired-server.pid
+          for _ in $(seq 1 45); do
+            if "$RUNNER_TEMP/xiaozhi-esp32-server/venv/bin/python" "$GITHUB_WORKSPACE/deploy/xiaozhi/probe_e2e07.py" \
+              --url ws://127.0.0.1:8000/xiaozhi/v1/ \
+              --device-id aa:bb:cc:dd:ee:07 --client-id e2e07-restart \
+              --auth-key "${XIAOZHI_AUTH_KEY}" > /tmp/e2e07-restart.log 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          cat /tmp/e2e07-restart.log
+          grep -q "full-loop OK" /tmp/e2e07-restart.log || {
+            echo "::error::the wired loop did not recover after the server restart"; exit 1; }
+
+      - name: Wiring evidence — gateway-host log is content-free
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The synthetic sample sentence must never appear in the host log
+          # (the transcript exists only in the transient frame path).
+          if grep -q "我们来玩个游戏好不好" gateway-host.log; then
+            echo "::error::transcript residue in the gateway host log"
+            exit 1
+          fi
+          echo "gateway-host log content-free OK"
+
+      - name: Failure evidence (small tails only)
+        if: failure()
+        shell: bash
+        run: |
+          tail -40 gateway-host.log 2>/dev/null || true
+          tail -40 "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server/wired-server.log" 2>/dev/null || true
+          tail -40 "$RUNNER_TEMP/xiaozhi-esp32-server/main/xiaozhi-server/wired-server2.log" 2>/dev/null || true
+          tail -20 tts-stub.log 2>/dev/null || true

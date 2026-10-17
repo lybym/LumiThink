@@ -1,7 +1,7 @@
 # Voice Gateway Adapter：小智 v2.5.2 协议兼容矩阵与合同（R1-V3）
 
-> 版本：1.3 ｜ 2026-10-15（1.3 修订 2026-10-17）｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30)，1.1 修订 Issue [#51](https://github.com/lybym/LumiThink/issues/51)，1.2 修订 Issue [#55](https://github.com/lybym/LumiThink/issues/55)，1.3 修订 Issue [#56](https://github.com/lybym/LumiThink/issues/56) ｜ **合同 + 合成验证；固件/服务端兼容与私有 OTA 均【未实机验证】；真实 ASR/TTS 供应商行为未实机验证**
-> [VOICE_RUNTIME](./VOICE_RUNTIME.md) · [ADR-002](./adr/0002-voice-runtime-bridge.md) · [ADR-007](./adr/0007-asr-transient-text-channel.md) · [ADR-0009](./adr/0009-real-asr-provider-transient-channel.md) · [ADR-0010](./adr/0010-real-tts-provider-dual-stream.md) · [硬件选型](./VOICE_HARDWARE.md) · [Roadmap R1-V3](./ROADMAP.md)
+> 版本：1.4 ｜ 2026-10-15（1.4 修订 2026-10-17）｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30)，1.1 修订 Issue [#51](https://github.com/lybym/LumiThink/issues/51)，1.2 修订 Issue [#55](https://github.com/lybym/LumiThink/issues/55)，1.3 修订 Issue [#56](https://github.com/lybym/LumiThink/issues/56)，1.4 修订 Issue [#57](https://github.com/lybym/LumiThink/issues/57) ｜ **合同 + 合成验证 + 服务端接线联测；固件/服务端兼容与私有 OTA 均【未实机验证】；真实 ASR/TTS 供应商行为未实机验证；真实设备验收未开始**
+> [VOICE_RUNTIME](./VOICE_RUNTIME.md) · [ADR-002](./adr/0002-voice-runtime-bridge.md) · [ADR-007](./adr/0007-asr-transient-text-channel.md) · [ADR-0009](./adr/0009-real-asr-provider-transient-channel.md) · [ADR-0010](./adr/0010-real-tts-provider-dual-stream.md) · [ADR-0011](./adr/0011-xiaozhi-gateway-wiring.md) · [硬件选型](./VOICE_HARDWARE.md) · [Roadmap R1-V3](./ROADMAP.md)
 
 ## 1. 固定评估基线（版本/契约钉死）
 
@@ -168,8 +168,55 @@ node --experimental-strip-types --test-isolation=none --test \
 - [ ] 第三方 ASR/TTS/LLM 供应商安全与保留评估、告知同意流程（[VOICE_HARDWARE §3](./VOICE_HARDWARE.md)）——E2E-05 交付了首供应商（百炼 Paraformer 实时）的配置面与评审锚点/激活门禁；E2E-06 交付了首 TTS 供应商（百炼 CosyVoice 双流，[ADR-0010](./adr/0010-real-tts-provider-dual-stream.md)）的配置面与评审锚点/激活门禁；**监护人告知同意流程、真实数据评审与供应商侧保留核实仍未完成**。
 - [ ] 私有 OTA 激活/升级/回滚演练；断网-重连-重激活全链路。
 - [ ] 真实无线环境下断线重连、重复连接、session_id 轮换行为复核（对照 §5 合成结论）。
+- [x] Voice Gateway ↔ 服务端接线（LLM 扩展点桥 + 受保护内部传输 + 设备鉴权映射 + 真实 Opus 下行全链路）——**E2E-07（issue #57）已交付**（[ADR-0011](./adr/0011-xiaozhi-gateway-wiring.md)，见 §8）：真实 Linux 服务端 + 真实网关/DSH 进程的协议模拟设备全链路、鉴权/重复连接/打断/重启负例与真实音频到账记账（`e2e-07-gateway-wiring-gate.yml`）。**口径：服务端接线已验证；真实固件设备/真实音频上行/真实供应商组合仍待 #E2E-08**。
 - [ ] Adapter 组合层真实 IPC 传输冒烟（POSIX-only，沿用 `voice-bridge-ipc.spec.ts` 的 SKIP 模式）：当前 5 个适配层套件固定 `transport:"in_process"`，`ipc` 路径由 R1-V2 Bridge 套件间接覆盖，Adapter 组合层自身无 IPC 用例（评审登记项，非本 PR 阻塞）。
 
 ## 7. R5 验收基线（本 PR 之后的状态声明）
 
 以下为 R5 实机验收入口清单（**当前全部未开始、未验证**）：思考中打断、播放中打断、连续抢话、服务重启、断网恢复、私有化设备激活/OTA、完整语音闭环（ASR → Gateway → DSH Bridge → 安全短句流 → TTS）。本 PR 交付的是这些项的**合同、可重放合成证据与拒绝路径**；通过本 POC 不代表正式儿童语音可用，任何一项在实机验证前不得标注 PASS。
+
+## 8. 服务端接线（v1.4，issue #57 / E2E-07 / ADR-0011）
+
+v1.4 把本合同的 Adapter 从"纯合成可重放"接入**真实服务端消息/音频路径**。拓扑：
+
+```text
+设备（v2.5.2 线协议）→ 钉死小智服务端（WS 鉴权/VAD/ASR/TTS/Opus）
+  → 桥接 LLM 模块（唯一选中 LLM，上游扩展点 core/providers/llm/lumithink/lumithink.py）
+    → 受保护内部传输（UDS + 令牌首帧认证，无 TCP 选项）
+      → 接线组合（voice-gateway-wiring.ts）→ 既有 Adapter（GatewayCorePort）
+        → Orchestrator → 真实 Bridge IPC（UDS）→ 锁定版 DSH runtime（#52）
+      ← fence 后安全句子（Output Gate 准入即投递）
+    ← tts_text_queue → 上游 TTS 引擎 → Opus → 设备（上游原生路径不动）
+```
+
+### 8.1 鉴权握手与服务端可信映射（验收 2）
+
+- 桥把服务端**已核验连接**的真实 `Device-Id/Client-Id/Authorization` 原样转交 `device_hello` 帧；网关侧按钉死 commit `core/auth.py` **逐字复算**上游 AuthManager 方案（HMAC-SHA256 over `client_id|device_id|ts`、共享 `auth_key`、新鲜度、constant-time 比较）。**凭证不得仅凭 MAC 派生**：MAC 之外必须持共享密钥签名 + 未过期时间戳 + 监护人绑定；验证通过后绑定 activation digest 才成为 Adapter 层持有凭证（§2.1 预告的"传输层映射"落点）。
+- 失败路径全部枚举化：令牌缺失/坏签名/过期 → `device_possession_denied`；未绑定 → `device_unbound`；重复连接 → `device_connection_conflict`（第二连接被服务端边缘关闭，第一连接不受影响——§5 `duplicate_connection` 合成结论的实进程复核）；伪造 session → `session_forged`；全部附 `device_drop` 帧。
+- 连接令牌绑定受保护内部传输：per-deployment 传输令牌只在 UDS/管道上被接受（0600 socket、无 TCP 选项、单桥租约），没有文件系统访问权令牌即无效。内部监听不暴露任何网络端口。
+
+### 8.2 事件与音频桥接（验收 1/3）
+
+- `turn_prompt`（ASR final，瞬态文本 ≤512）→ Input Safety Gate → 瞬态通道（§2.3）→ Orchestrator 轮；`turn_started{connId,turnId,epoch}` 供桥侧关联，`prompt_rejected{code}` 为枚举拒绝（输入门命中是**结果**而非传输故障，连接保持）。
+- TTS 发送栅栏：句子仅在 stream gate 准入（Output Gate + `tts_queue` fence）后交付；`abort` → fence-first epoch 提升（接线态对无 playback 绑定的 RUNNING 轮由组合层强制 barge-in——合成合同"无播放 abort=no-op"只假设 pump 时投递）→ 旧 epoch 句子结构性不可达；已入服务端队列由上游 native `clear_queues()` 清空 + 网关 `queue_clear` 帧 belt-and-braces；`tts_end{completed|interrupted|failed}` 保证桥侧流终止（零句输出轮也交付）；`failed` 补发端侧 stop。
+- **真实音频记账（解决 frameCount/audioDigest 占位）**：fork patch 3/5 在 `_do_send_audio` 逐包计数 + SHA-256 实际发往设备的 Opus 字节；utterance stop/abort 时 `audio_delivered {frames, digest}` 上报 → Adapter v1.4 `realAudioFramesDelivered`/`realAudioDeliveries` + 审计（内容无关）。**协议面不存在音频字节字段的零泄漏不变量保持不变**——占位由真实到账观测解决。
+- 帧序保证：全部外发帧经单一 FIFO 控制线程（上游 abort 流程严格先于下一轮 chat 提交 → abort 帧必然先于下一轮 `turn_prompt`）。
+- server_restart：桥重连（新连接 = 新服务实例）→ 网关关闭全部旧租约 + 播放挂起（§3 断线行语义的真实触发面）；重连凭受信绑定续接同一 sessionKey。
+
+### 8.3 已验证 / 未验证边界（如实声明）
+
+| 项 | 状态 |
+| --- | --- |
+| 桥 LLM 经上游扩展点唯一选中、内置 AI 第二路径不可达 | **已验证**（真实服务端进程联测，`e2e-07-gateway-wiring-gate.yml`；超时=接线失败，无回退） |
+| 受保护 UDS 传输 + 令牌 + 单桥租约 + 0600 | **已验证**（真实 UDS；Windows 开发沙箱按文档边界回退帧注入，字节层另测） |
+| 设备鉴权映射（未绑定/伪造/重复连接/坏令牌拒绝） | **已验证**（真实进程 + 契约级单测） |
+| hello→session→detect(text)→stt→Output Gate 句子→TTS→**真实 Opus 下行**→stop | **已验证**（协议模拟设备，本地 TTS stub；合成样例文本） |
+| **agent 运行时口径**：CI 联测轮次由 LumiThink **合成 Cordis 运行时**应答（接线面全部真实：传输/鉴权/租约/fence/帧序/记账）；**锁定版 DSH runtime** 的 CI 证明 = E2E-02 gate（poc/dsh-child，同 HEAD 随每轮 CI 绿）；`LUMITHINK_GATEWAY_AGENT=real` 为运营者 opt-in（同 job 内 E2E-02 规格演练通过） | **已验证（分层如实声明）** |
+| 播放中 abort → stop 零迟到帧；服务重启续接同一受信会话 | **已验证**（真实进程） |
+| 真实音频字节到账（frames+digest）进 Adapter v1.4 指标 | **已验证**（内容无关记账） |
+| 真实固件设备端到端（实机） | **未验证**（#E2E-08） |
+| 真实 ASR 音频上行→转写→网关（本档位 ASR 为回环占位；detect+text 与 ASR final 共用同一 `startToChat→chat` 入口） | **未验证** |
+| 真实供应商 LLM/ASR/TTS 组合档位（各自单独评审） | **未验证** |
+| 服务端 AEC / 二进制协议 v2/v3 / 断网实机时延 | **未验证** |
+
+本 Issue 不创建 Tag/Release；Mock 与合成数据验证不标注为真实设备验收。

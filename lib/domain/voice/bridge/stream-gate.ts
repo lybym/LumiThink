@@ -74,6 +74,30 @@ export interface StreamGateMetrics {
   readonly ttsBlockedSentences: number;
   /** First-safe-text latency per attempt: first admission − first delta. */
   readonly firstSafeText: { readonly count: number; readonly maxMs: number };
+  /**
+   * E2E-07 (issue #57): admitted sentences whose delivery sink THREW — the
+   * content-free TTS slot stays queued (the turn still settles) but the
+   * sentence text never reached the wired TTS input. Fail-closed direction:
+   * a wiring fault can never crash the stream, it is only ever counted.
+   */
+  readonly sentenceDeliveryFailures: number;
+}
+
+/**
+ * E2E-07 (issue #57): one Output-Gate-admitted TTS sentence, handed to an
+ * optional delivery sink (the wired xiaozhi bridge transport). The text is
+ * the authorized TTS INPUT (it already passed the children Output Gate and
+ * the `tts_queue` fence); it is transient — the sink must not persist,
+ * audit or log it. `itemId` is the exact id queued in the trusted store, so
+ * the wired device edge can correlate real audio accounting (frame counts +
+ * digests reported by the pinned server) back to this admission.
+ */
+export interface AdmittedSentenceEntry {
+  readonly sessionKey: string;
+  readonly turnId: string;
+  readonly epoch: number;
+  readonly itemId: string;
+  readonly text: string;
 }
 
 export interface BridgeStreamGate {
@@ -92,6 +116,15 @@ export interface BridgeStreamGateOptions {
   readonly clock?: () => number;
   readonly maxSentenceChars?: number;
   readonly maxBufferedChars?: number;
+  /**
+   * E2E-07 (issue #57): optional delivery sink for admitted sentences. When
+   * omitted (every pre-existing composition), admission stays exactly the
+   * v1.2 synthetic contract: the text is dropped after gating and only the
+   * content-free slot is queued. When present, the gate mints the TTS item
+   * id ITSELF (previously the orchestrator minted it), hands the identical
+   * id to the `tts_queue` fence and delivers the fence-stamped sentence.
+   */
+  readonly onAdmittedSentence?: (entry: AdmittedSentenceEntry) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +184,15 @@ export function createBridgeStreamGate(options: BridgeStreamGateOptions): Bridge
     ttsAdmissions: 0,
     ttsBlockedSentences: 0,
     firstSafeText: { count: 0, maxMs: 0 },
+    sentenceDeliveryFailures: 0,
   };
+  const onAdmittedSentence = options.onAdmittedSentence ?? null;
+  // E2E-07: per-gate monotonic TTS item-id sequence. The gate mints the id
+  // (same `tts_<turn-suffix>_<n>` shape the orchestrator's default minter
+  // uses) so the queued slot, the sink delivery and the wired audio
+  // accounting all reference ONE id. Monotonic per gate ⇒ no clock-tie
+  // collisions between sentences of the same turn.
+  let itemSeq = 0;
 
   function bufferKey(sessionKey: string, turnId: string): string {
     return `${sessionKey}|${turnId}`;
@@ -160,6 +201,10 @@ export function createBridgeStreamGate(options: BridgeStreamGateOptions): Bridge
   /**
    * Gate one complete sentence: REAL output gate first (fail-closed), then
    * the TTS fence re-check. Blocked or fenced sentences are never queued.
+   * E2E-07: when a delivery sink is wired, the gate mints the TTS item id,
+   * queues THAT id and (only after the fence admits) delivers the
+   * fence-stamped sentence text. A throwing sink is counted, never raised —
+   * the stream must not crash on a wiring fault (fail-closed observability).
    */
   function admitSentence(buffer: AttemptBuffer, sentence: string): { admitted: number; blocked: number } {
     let gate: OutputGateResult;
@@ -174,11 +219,20 @@ export function createBridgeStreamGate(options: BridgeStreamGateOptions): Bridge
       metrics.ttsBlockedSentences += 1;
       return { admitted: 0, blocked: 1 };
     }
+    // One epoch observation shared by the fence and the sink delivery: the
+    // store re-validates it anyway (fenceOutput re-checks the CURRENT epoch).
+    const turnEpoch = orchestrator.describeTurn(buffer.sessionKey, buffer.turnId)?.epoch ?? -1;
+    let itemId: string | null = null;
+    if (onAdmittedSentence !== null) {
+      itemSeq += 1;
+      itemId = `tts_${buffer.turnId.slice(4)}_${itemSeq.toString().padStart(6, "0")}`;
+    }
     const fence = orchestrator.fenceOutput({
       sessionKey: buffer.sessionKey,
       turnId: buffer.turnId,
-      epoch: orchestrator.describeTurn(buffer.sessionKey, buffer.turnId)?.epoch ?? -1,
+      epoch: turnEpoch,
       kind: "tts_queue",
+      ...(itemId !== null ? { ttsItemId: itemId } : {}),
     });
     if (!fence.ok) {
       // The turn was fenced between delta and admission: stale, dropped.
@@ -191,6 +245,22 @@ export function createBridgeStreamGate(options: BridgeStreamGateOptions): Bridge
       metrics.firstSafeText.count += 1;
       if (ms > metrics.firstSafeText.maxMs) {
         (metrics.firstSafeText as { maxMs: number }).maxMs = ms;
+      }
+    }
+    if (onAdmittedSentence !== null && itemId !== null) {
+      try {
+        onAdmittedSentence({
+          sessionKey: buffer.sessionKey,
+          turnId: buffer.turnId,
+          epoch: turnEpoch,
+          itemId,
+          text: sentence,
+        });
+      } catch {
+        // Fail-closed: a broken sink must never crash the stream; the
+        // content-free slot stays queued (the turn settles normally) and
+        // the wiring fault is only ever counted, never swallowed silently.
+        metrics.sentenceDeliveryFailures += 1;
       }
     }
     return { admitted: 1, blocked: 0 };

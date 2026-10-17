@@ -1,0 +1,118 @@
+# E2E-07 (issue #57) — 小智私有服务端 gateway-bridge 档位配置模板
+#
+# 基于 gateway-minimal 档位（deploy/xiaozhi/config/gateway-minimal.yaml，
+# 全部语义继承：回环监听、强制 HMAC 鉴权、显式模块覆盖、零外发），唯一
+# 档位差异：
+#   - selected_module.LLM -> LumithinkBridgeLLM（type: lumithink，即
+#     deploy/xiaozhi/gateway_bridge/lumithink_llm.py 安装的 LumiThink 桥）。
+#     这是唯一选中的 LLM：小智内置 AI 第二路径结构上不可达（issue #57
+#     "禁止回退到小智自带 LLM 生成回答" 的档位级落实）；
+#   - LLM 段注入受保护内部传输端点（UDS 路径）与令牌 env 名（令牌值
+#     绝不进配置文件）；
+#   - TTS 保持 CustomTTS 指向受控占位（本档位供 CI/联调用本地回环 stub
+#     渲染；生产启用真实 TTS = 换 gateway-tts-real 档位 = 供应商评审）。
+#
+# 渲染：deploy/xiaozhi/render_config.py（fail-closed 占位符、0600 产物）。
+# 安装：deploy/xiaozhi/gateway_bridge/install_bridge.py（逐字锚点 fork patch）。
+# 运行册：deploy/xiaozhi/runbook.md（E2E-07 节）。
+
+server:
+  # 仅回环监听；公网暴露只经 Caddy（deploy/xiaozhi/caddy/Caddyfile.xiaozhi）。
+  ip: 127.0.0.1
+  port: 8000
+  http_port: 8003
+  websocket: ${XIAOZHI_DEVICE_WS_URL}
+  vision_explain: http://${XIAOZHI_PUBLIC_DOMAIN}:8003/mcp/vision/explain
+  timezone_offset: +8
+  auth:
+    # 强制开启：设备必须持 HMAC-SHA256 token（server.auth_key 签名）连接。
+    # 网关侧用同一 auth_key 逐字复算（设备鉴权握手与服务端可信映射，
+    # 凭证不得仅凭 MAC 派生）。无白名单旁路。
+    enabled: true
+    allowed_devices: []
+    expire_seconds: 604800
+  auth_key: ${XIAOZHI_AUTH_KEY}
+
+# 单模块模式：设备差异化配置不走远端 API（屏蔽远端把 LLM 切回内置 AI 的
+# 第二路径）。
+read_config_from_api: false
+
+log:
+  # WARNING：钉死 commit 在 INFO 级打印识别文本/句子文本（E2E-05/06 同纪律）。
+  log_level: WARNING
+  log_dir: tmp
+  log_file: server.log
+  data_dir: data
+
+delete_audio: true
+close_connection_no_voice_time: 120
+enable_wakeup_words_response_cache: false
+enable_greeting: false
+enable_stop_tts_notify: false
+enable_websocket_ping: false
+
+xiaozhi:
+  type: hello
+  version: 1
+  transport: websocket
+  audio_params:
+    format: opus
+    # 下行采样率：与 VOICE_GATEWAY_PROTOCOL.md §1 一致（服务端可协商至 24k）。
+    sample_rate: 24000
+    channels: 1
+    frame_duration: 60
+
+# 全部模块键显式覆盖（对抗递归合并的缺省键存活）：
+selected_module:
+  VAD: SileroVAD
+  ASR: FunASRServer
+  # E2E-07 唯一档位差异：LLM = LumiThink 网关桥。
+  LLM: LumithinkBridgeLLM
+  TTS: CustomTTS
+  VLLM: ""
+  Memory: nomem
+  Intent: nointent
+
+VAD:
+  SileroVAD:
+    type: silero
+    threshold: 0.5
+    threshold_low: 0.3
+    model_dir: models/snakers4_silero-vad
+    min_silence_duration_ms: 200
+
+# 占位 ASR：本机 10096 端口不部署任何服务——初始化仅建对象，音频链路连接即
+# 拒绝（fail-loud）。真实 ASR = gateway-asr-real 档位（issue #55）。
+ASR:
+  FunASRServer:
+    type: fun_server
+    host: 127.0.0.1
+    port: 10096
+    is_ssl: false
+    api_key: none
+    output_dir: tmp/
+
+# LumiThink 网关桥：受保护内部传输（UDS；无 TCP 选项）。
+#   gateway_socket：网关进程监听的 UDS 路径（运行时注入）；
+#   auth_token_env：承载传输令牌的 env 名（令牌值绝不进配置/Git/日志）；
+#   turn_timeout_s：单轮等待上限（fail-closed，超时本轮无回答且不回退）。
+LLM:
+  LumithinkBridgeLLM:
+    type: lumithink
+    gateway_socket: ${LUMITHINK_GATEWAY_SOCKET}
+    auth_token_env: LUMITHINK_GATEWAY_BRIDGE_TOKEN
+    turn_timeout_s: 60
+
+# 占位 TTS：CI/联调由本地回环 stub 提供确定性音频字节（ffmpeg 转 Opus 下行）。
+# 生产真实 TTS = gateway-tts-real 档位（issue #56）。
+TTS:
+  CustomTTS:
+    type: custom
+    method: POST
+    url: "${XIAOZHI_TTS_STUB_URL}"
+    params:
+      input: "{prompt_text}"
+      response_format: "wav"
+    headers: {}
+    format: wav
+    output_dir: tmp/
