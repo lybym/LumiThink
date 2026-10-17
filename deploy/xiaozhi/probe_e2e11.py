@@ -326,6 +326,7 @@ async def run_full_turn(ws, args, result, sent_at):
     result.late_frames += late
     if late > 0:
         raise TrialFailure("late_frames_after_stop", f"{late} audio/sentence frames after the stop")
+    result.ok = True
 
 
 async def wait_audio_then_inject(ws, args, frames):
