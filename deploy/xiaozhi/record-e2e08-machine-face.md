@@ -64,3 +64,51 @@ r2 548 帧 / r3 162 帧，全部 tts_stop=1，零新增供应商失败。
   icacls 语法待修：默认 ACL，dev box）。
 - **真机物理面**：§11.3 步 4（3×断电重连）与 §11.4（唤醒 + 10 轮成人语音逐轮
   记录、冷启动/重连/再配网/断网恢复）待运营者执行；设备自 00:24Z 起待机属预期。
+
+## 2026-10-18 下午追加：LANE-1 机器面深入修复（v1→v5.3）与结构性失配发现
+
+> 背景：用户重定义验收为双通道——LANE 1（文本→LumiThink→TTS→设备发声，可全自动）
+> / LANE 2（人声→ASR→…→设备）。LANE 1 的 text→LumiThink→real-model→sentences
+> 半链全程帧证据证明健康（turn.accepted→assistant.delta→tts_sentence→tts_end→
+> settled COMPLETED，real worker live）；阻塞集中在服务端 TTS 模块（用户 V3
+> 覆盖文件）的会话生命周期。
+
+### 修复链（每步帧证据；备份/回滚纪律全程；批次 #7–#15）
+- v1 监控竞态：TTS_SESSION_END 后 `self.ws` 未清 → 后续会话打到已完成流
+  （vendor "rpc 13 the stream is done"）→ close+清引用。
+- v2 反向竞态：close 在 await 后作用于 self.ws → 可能杀死后继新连接 →
+  引用捕获 + `self.ws is ws_done` 判定（保留为正确卫生）。
+- v3 烟雾语义：对照 `volc_v3_smoke_test.py`（~100% 成功，同类同凭据）——
+  烟雾从不发连接级 StartConnection/FinishConnection → 移除模块中两大额外
+  流事件（监控 SessionFinished 分支 + _ensure_connection 重连分支）。
+- v4 每会话新鲜 uuid sid：与 conn.sentence_id 解耦（帧证据：同 sid 跨会话被
+  vendor 判 done）——后被 v5 证明"每轮一次"才是正确粒度（v4 的每句新开是
+  一次错误转向，责任在实现者与指令链，已如实记录）。
+- v5/v5.1/v5.3 轮级生命周期：单连接+单会话 per 轮、句间零 churn（H1 续流守卫、
+  H2 移除 close-prior、H3 LAST 收口）、文本提交恢复（pending 门吞掉短答）、
+  **移除监控器 TTS_SESSION_END 关闭分支**（该分支在文本队列排空即触发，孤儿化
+  刚被 TaskRequest 触发的合成——v2–v5 间所有"过早关闭"的真身）。
+- 诊断方法论：批 #10v2 帧级仪表（TTSFRAME：连接/收发事件/毫秒偏移，内容无关）
+  + 同类独立烟雾对照 → 一次定位机制；批 #12 修复了仪表自身的 f-string 插值缺陷。
+
+### 结构性失配（当前状态；重构提案待用户决策）
+v5.3 后仍 audio_frames=0：**滑窗 pending/confirmed 文本流（儿童保护，不可削弱）×
+上游 base 的 per-call 连接生命周期（全 pending 短句的连接在 confirmed 前已死）×
+轮级会话语义** 三者互斥。重构提案（TurnCtx：轮作用域连接跨
+pending→confirmed→submitted→audio-drained 存活；收口=供应商 SessionFinished
+音频后/轮终宽限/abort 三选一；close() 延迟语义为唯一上游接触面）已交
+lead+用户决策：`C:\CODE\lumithink-data\xiaozhi-e2e08\redesign-proposal-tts-text-flow.md`。
+**未获用户方向前不部署任何补丁。**
+
+### 今日已证明（与 TTS 模块无关的既得事实）
+- text→LumiThink→real worker→real model→fence-stamped sentences 全链健康。
+- 协议级 INTERRUPT fence 经桥干净（零迟到帧，abort-fence 探针 PASS）。
+- v1–v3 供应商失败修复真实且必要（"stream is done"/55000000 类失败归零后
+  才暴露出更深的生命周期问题）。
+- LANE-1 判据（本拓扑）：每轮 TaskRequest(s) + audio_frames>0 + tts_stop=1 +
+  settled COMPLETED + 零新增供应商失败 + fence 干净；句子级 sentence_start
+  为拓扑偏差（见上）。内容级文本证明通道：gateway assistant.delta/tts_sentence
+  流（`句子语音生成成功` 仅在字幕 resource_type 路径输出，DEBUG 级被
+  log_level=WARNING 敏感文本纪律抑制）。
+- 运维修复前向（lead）：容器重建参数程序化重建、gateway.env 引号/LF/容器路径、
+  探针 deviceId 语法、gw-sweep.sh、容器内原生重装（linux-x64 绑定发现）。
