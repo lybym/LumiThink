@@ -152,3 +152,27 @@ lead+用户决策：`C:\CODE\lumithink-data\xiaozhi-e2e08\redesign-proposal-tts-
   log_level=WARNING 敏感文本纪律抑制）。
 - 运维修复前向（lead）：容器重建参数程序化重建、gateway.env 引号/LF/容器路径、
   探针 deviceId 语法、gw-sweep.sh、容器内原生重装（linux-x64 绑定发现）。
+
+## 最终交付设计（v11）：原始逐句生命周期 + pending-flush 定时器（LANE-1 GREEN）
+
+**判定：LANE-1 GREEN。** 证据：3/3 探针轮真实音频（101/104/101 帧）+ tts_stop=1，
+**轮间 90s 暂停**（vendor 空闲丢弃场景被逐句生命周期结构性消除），零新增
+`TTS_SESSION_FAILED`（计数 18 全程不变）。
+
+**供应商协议发现（根本性）**：火山 seed-tts-2.0 双流端点为 **ONE-SHOT** ——
+一个会话只接受一次 StartSession+TaskRequest+音频；同一会话的第二个 TaskRequest
+被静默忽略。今日全部症状（"the stream is done"/55000000/空闲静默关闭）皆为其
+表现。用户配置注释 `enable_ws_reuse: False（必须保持！）` 早已记录该约束——
+其直连链的逐句连接从未触雷。
+
+**最终实现**：完全回退到原始用户 V3 模块（`.before-fix`，直连链验证过的逐句
+生命周期）+ 唯一增量 = **1.2s pending-flush 定时器**（序号守卫、conn.loop、
+经 text_to_speak 走原始逐句生命周期提交 pending 前缀——桥链轮末短答无后继
+片段时，滑窗确认不会到来，定时器在 vendor 空闲窗口内补交；**时序策略而非
+内容放宽**）。LAST-flush 保持（原始已有）。TurnCtx 链 = investigated-and-
+rejected（证据链完整保留于上文；v4/v8.2 的 sid 发现与监控重绑定发现仍然
+真实，只是在 one-shot 语义下不需要）。
+配置差量：`sentence_pace_*` 两键移除；`close_connection_no_voice_time: 600`
+保留（长答案期间设备连接存活）；`turn_timeout_s: 900` 保留（桥轮仍覆盖整个
+多句回答）。回滚：`.before-revert`（TurnCtx 态）或 `.before-fix`（原始）+
+wslc restart。
