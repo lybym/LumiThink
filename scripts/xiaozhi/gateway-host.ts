@@ -224,7 +224,7 @@ async function main(): Promise<void> {
           .mappingSnapshot()
           .map((entry) => `${entry.sessionKey}:${(agentPort as RealCordisAgentPort).hasLiveWorker(entry.sessionKey) ? "live" : "dead"}`)
           .join(",");
-        console.log(`[gateway-host] real agent workers ${workers}`);
+        console.log(`[gateway-host] real agent workers ${workers} rssMB=${Math.round(process.memoryUsage().rss / 1048576)} (E2E-08 memory trail)`);
       }
       return;
     }
