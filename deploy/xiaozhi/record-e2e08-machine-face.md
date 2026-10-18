@@ -65,6 +65,46 @@ r2 548 帧 / r3 162 帧，全部 tts_stop=1，零新增供应商失败。
 - **真机物理面**：§11.3 步 4（3×断电重连）与 §11.4（唤醒 + 10 轮成人语音逐轮
   记录、冷启动/重连/再配网/断网恢复）待运营者执行；设备自 00:24Z 起待机属预期。
 
+## 2026-10-18 LANE-1 收口：v8.2 sid-filter 对齐 = 修复链最终解（GREEN）
+
+**判定：LANE-1 GREEN。** 证据：3/3 自定义文本轮真实音频（26/197/212 帧）+
+`tts_stop=1` + settled COMPLETED；TASKREQ 时间线显示每轮独立 uuid sid 且
+回答文本在 FinishSession 之前提交；abort-fence PASS（stop 生效、零迟到帧）；
+`TTS_SESSION_FAILED` 计数全程稳定 18（零供应商失败）；零 agent fault。
+
+**最终一行根因（v8.2）**：监控器的 sid 过滤仍在比较 `conn.sentence_id`，而
+线上 sid 自 v4 起已是每轮 vendor uuid —— **供应商的每一帧都被该过滤器静默
+丢弃**；对齐到 `_vendor_sid` 后整条管线打开。（`sentence_starts=0` 断言保持
+为已记录拓扑偏差。）
+
+### 完整修复叙事（v1→v8.2；每步帧证据；诊断方法论 = 帧级仪表 + 同类独立烟雾对照）
+监控竞态（TTS_SESSION_END 后 ws 未清）→ 反向竞态（close 误杀后继连接）→
+烟雾语义（移除连接级冗余流事件）→ 每会话新鲜 sid（v4；后被 v5 证明每轮一次
+为正确粒度）→ 轮级生命周期 TurnCtx（单连接+单会话/轮、句间零 churn、
+pending 门文本提交恢复）→ 监控器 TTS_SESSION_END 兜底竞态（文本队列排空即关）→
+监控器重绑定（每连接重 spawn，旧监听阻塞在旧 ws 的 recv 上）→ pending-flush
+定时器（2.5s：滑窗确认依赖下一片段到来，轮末短答无后继 → 滞留至 vendor 空闲
+超时；**时序策略而非内容放宽**，防合成文本语义零改动）→ **v8.2 sid-filter
+对齐（最终解）**。结构性失配（滑窗 × per-call 生命周期 × 轮级语义）由
+TurnCtx 单遍重写消除（用户批准；原始模块备份 `.before-fix`，脏态备份
+`.before-turnctx`）。
+
+### 运营者侧模块变更清单（用户 V3 覆盖文件 huoshan_double_stream.py；全部有备份）
+备份链（backups\e2e08-bridge-20261018\）：.before-fix（原始）→ .before-fix2 →
+.before-fix3 → .before-v6 → .before-v7 → .before-v8 → .before-turnctx →
+.before-v51/.before-v53/.before-diag2/.before-diag3/.before-framelog（诊断态）。
+最终态 = v5.3+TurnCtx+monitor-rebind+v8.2+永久 TTSFRAME 诊断行。变更要点：
+监控竞态修复、每轮连接+会话生命周期、conn.loop 执行模型、FinishSession 去重、
+供应商 sid 解耦、pending-flush 定时器（2.5s）、sid-filter 对齐、TTSFRAME 永久
+诊断。回滚 = 恢复任一备份 + wslc restart。
+运营参数：`sentence_pace_min_interval_s=4.0`、`sentence_pace_audio_s_per_char=
+0.32`（v5.3 后由 TurnCtx 反压取代）、`turn_timeout_s=900`、`enable_ws_reuse=
+False`（用户约束，结构性满足）、auth.enabled=true（OTA HMAC token）。
+
+### LANE-2（进行中）
+人声→ASR→LumiThink→TTS→设备：串口捕获 + 服务端日志由 lead 于设备窗口运行；
+§11.4 逐轮编译（触发方式/成败/首音时延/端到端时延/异常）随设备窗口后产出。
+
 ## 2026-10-18 下午追加：LANE-1 机器面深入修复（v1→v5.3）与结构性失配发现
 
 > 背景：用户重定义验收为双通道——LANE 1（文本→LumiThink→TTS→设备发声，可全自动）
