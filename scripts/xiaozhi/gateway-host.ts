@@ -114,6 +114,17 @@ async function main(): Promise<void> {
   // base URL via workerEnv (the pinned profile prefers
   // DSH_BRIDGE_MODEL_BASE_URL over the synthetic mock); the vendor credential
   // never leaves the host-side keySource closure.
+  // E2E-08 (issue #58) CRASH CONTAINMENT: Node ≥15 turns an unhandled
+  // rejection into a process-fatal throw — the live window cannot afford a
+  // gateway death per residual async edge. Contain BOTH classes: log
+  // content-free (no prompt text) and CONTINUE; the supervisor's restart
+  // loop remains the backstop for genuine heap/loop corruption.
+  process.on("uncaughtException", (error) => {
+    console.error(`[gateway-host] uncaughtException (contained, continuing): ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+  });
+  process.on("unhandledRejection", (reason) => {
+    console.error(`[gateway-host] unhandledRejection (contained, continuing): ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`);
+  });
   let modelRoute: GatewayModelRoute;
   try {
     modelRoute = await createGatewayModelRoute(process.env);
