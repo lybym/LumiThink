@@ -1,0 +1,42 @@
+{
+  "id": "task-example",
+  "contextId": "ctx-example",
+  "status": {
+    "state": "TASK_STATE_COMPLETED",
+    "message": {
+      "messageId": "status-example",
+      "contextId": "ctx-example",
+      "taskId": "task-example",
+      "role": "ROLE_AGENT",
+      "parts": [
+        {
+          "text": "执行已完成，后续输出因取消被抑制。"
+        }
+      ]
+    }
+  },
+  "artifacts": [
+    {
+      "artifactId": "answer-example",
+      "name": "Admitted answer",
+      "parts": [
+        {
+          "text": "你好。"
+        }
+      ],
+      "metadata": {
+        "lumithinkContent": {
+          "version": 1,
+          "category": "admitted-answer"
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "lumithinkResult": {
+      "version": 1,
+      "outputSuppressedAfterCancel": true,
+      "answerComplete": false
+    }
+  }
+}

@@ -1,5 +1,16 @@
 # LumiThink Model Gateway 合同（MODEL_GATEWAY.md v1.0）
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+本页模型供应商出口与 A2A 客户端入口是不同协议。A2A 迁移不重写已交付供应商代理，也不新增 OpenAI-compatible 公共入口。P1 将执行、模型调用和预算归属关联到 Task/Execution；有限 Worker、队列、时限及模型预算参见整体方案 §13。取消保留资源处理通道，预算耗尽不继续派发。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 版本：`1.0` ｜ 日期：2026-10-14 ｜ 状态：**R1-02 域层已交付**——Provider 契约、Mock/真实 Provider 适配器、预算/熔断/超时/取消与审计由 `lib/domain/gateway/` + `tests/domain/gateway/` 实现；HTTP 端点接线（R1-05）与真实供应商的独立数据外发评审**尚未发生**（见 §7）。
 > **E2E-03（Issue #53）增补**：真实 Provider 的**激活机制与出网拓扑已交付**——`lib/server/real-provider-composition.ts`（fail-closed 激活记录：route 选择器 + 完整 Provider/价格/预算/评审字段）与 `lib/server/gateway-egress-proxy.ts`（DSH 运行时模型路由唯一出网口：回环代理 → Model Gateway → `http_messages` 供应商）；真实 DSH + 真实 LLM 的端到端证据链路由 E2E-03 零 SKIP 门禁在 CI 以回环合成 vendor 验证（`test:e2e03`），真实供应商调用仍是**显式运营者 opt-in**（`test:e2e03:real`，CI 永不携带真实密钥）。儿童数据处理评审保持 `not_performed`（见 §7）。
 > R1-03 接线说明（Issue #15）：`requestTimeoutMs` 与 `models[].maxOutputTokens` 成为被实际消费的配置（默认值 + 上限）；`GATEWAY_NO_PROVIDER` 与尝试前取消补齐审计事件；重试退避 abort-aware；baseURL 语义修正为 origin-only（适配器自行拼接 `/v1/messages`）。见 §3/§5。

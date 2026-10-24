@@ -1,5 +1,16 @@
 # LumiThink Persona 合同（PERSONA.md v0）
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+单 Agent 的一致人格保留；面向儿童、监护人的措辞和能力根据已验证主体、关系及用途调整。不能通过用户自称家长、切换渠道或声纹相似度绕过业务授权；家庭事实可按权复用，个人原始对话与独立会话不自动拼接。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 版本：v0 ｜ 日期：2026-10-14 ｜ 状态：**Persona Policy v0 资源、版本化 Registry 与轮次解析已随 R1-04 交付首版实现**——代码 `lib/domain/persona/`（Policy Schema + 只读版本化 Registry + 轮次解析 + EvalSubject 适配器），测试 `tests/domain/persona/`。模型调用（R1-02）与 Context Builder 接线（R1-03）尚未开始；本文不将未接线部分描述为端到端可用功能，全部语料为合成数据。
 > 对应：[Issue #16](https://github.com/lybym/LumiThink/issues/16) ｜ [PRD §6 Persona 人格需求 / FR-003 / UC-01](./PRD.md) ｜ [Roadmap R1-04](./ROADMAP.md) ｜ [总览 #11](https://github.com/lybym/LumiThink/issues/11) ｜ [API 合同](./API_CONTRACT.md) ｜ [Safety 策略](./SAFETY_POLICY.md) ｜ [Harness 合同 §6](./HARNESS.md) ｜ [Evidence 策略](./EVIDENCE_POLICY.md)
 

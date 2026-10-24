@@ -1,5 +1,16 @@
 # Voice Gateway Adapter：小智 v2.5.2 协议兼容矩阵与合同（R1-V3）
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+本页专用 UDS 协议属于现有运行链路及回滚路径，不再作为新跨服务公共协议。P2 以小智 LLM Provider 接入 A2A，P4 完整迁移；P0/P1 Gate 完成前不切换。设备控制仍用小智协议，内部 DSH IPC 保留。播放反馈独立 Channel Delivery，不能伪装成 CancelTask 或新 A2A 状态；客户端断流不得触发默认服务端取消。设备绑定只能确定设备/家庭，用户权限还需可信主体。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 版本：1.4 ｜ 2026-10-15（1.4 修订 2026-10-17；1.4 增补 §10 issue [#61](https://github.com/lybym/LumiThink/issues/61)）｜ Issue [#30](https://github.com/lybym/LumiThink/issues/30)，1.1 修订 Issue [#51](https://github.com/lybym/LumiThink/issues/51)，1.2 修订 Issue [#55](https://github.com/lybym/LumiThink/issues/55)，1.3 修订 Issue [#56](https://github.com/lybym/LumiThink/issues/56)，1.4 修订 Issue [#57](https://github.com/lybym/LumiThink/issues/57)，1.4 增补 Issue [#59](https://github.com/lybym/LumiThink/issues/59)（打断实测面 §9——测量与验收合同，不改 Adapter 合同），1.4 增补 Issue [#61](https://github.com/lybym/LumiThink/issues/61)（可靠性回归面 §10——测量与验收合同，不改 Adapter 合同） ｜ **合同 + 合成验证 + 服务端接线联测；固件/服务端兼容与私有 OTA 均【未实机验证】；真实 ASR/TTS 供应商行为未实机验证；真实设备验收未开始**
 > [VOICE_RUNTIME](./VOICE_RUNTIME.md) · [ADR-002](./adr/0002-voice-runtime-bridge.md) · [ADR-007](./adr/0007-asr-transient-text-channel.md) · [ADR-0009](./adr/0009-real-asr-provider-transient-channel.md) · [ADR-0010](./adr/0010-real-tts-provider-dual-stream.md) · [ADR-0011](./adr/0011-xiaozhi-gateway-wiring.md) · [硬件选型](./VOICE_HARDWARE.md) · [Roadmap R1-V3](./ROADMAP.md)
 
