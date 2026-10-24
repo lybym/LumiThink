@@ -1,5 +1,16 @@
 # LumiThink 2.0 隐私数据流（PRIVACY_DATA_FLOW v0）
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+新增数据路径：渠道受信绑定 → Client/Principal → 家庭授权 → A2A Task/Artifact/Outbox → 渠道交付。工作 DSH 不默认上传工作区或工作对话，不直接读取儿童数据库。数据删除及处理授权撤回优先于 Task 7 天等普通期限：清理输入、正文、含正文 Outbox、摘要/检索缓存、渠道待发和运行时上下文。仅保留受限、限期、不可还原正文的幂等墓碑；使用版本化持久密钥 HMAC，不能留可枚举短句摘要。访问撤销立即检查查询与现有流，是否删除共享事实按合法处理范围判断。恢复前先重放独立删除/撤权台账，再启动 Worker 和服务；P1 模块验证、P5 真实备份演练。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 版本：v0 ｜ 日期：2026-10-14 ｜ 状态：**随 R1-09（issue #21）交付**
 > 对应：[MEMORY_POLICY.md](./MEMORY_POLICY.md)（分类与保留策略）｜ [PRD §7 / §10](./PRD.md) ｜ [ADR-0005](./adr/0005-child-data-lifecycle-v0.md)
 > 代码侧源头：`lib/domain/lifecycle/policy.ts`。**新数据种类进入系统前必须更新本矩阵（issue #21 AC 3）并随 PR 审查。**

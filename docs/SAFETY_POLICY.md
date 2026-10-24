@@ -1,5 +1,16 @@
 # LumiThink 儿童 Safety Gate 策略（SAFETY_POLICY v0）
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+单 Agent 面向不同角色时，统一授权规则先于 Persona 和模型解释。儿童/监护人访问差异不能只靠提示词实现；Agent Card Skill 与声纹候选均不授予权限。公开 Artifact 必须经过当前主体/参与者的安全与数据准入，拒绝和日志不混入语音正文；撤权、取消与换人后关闭旧输出。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 版本：`v0` ｜ 策略版本：`1.0`（`SAFETY_POLICY_VERSIONS`）｜ 状态：**策略定义与领域层强制随 R1-15 交付；HTTP/UI/DSH 接线由 R1-03/R1-05 承接。本文件不将未接线部分描述为已可用的端到端功能，且全部证据均基于合成数据。**
 > 对应：[Issue #27](https://github.com/lybym/LumiThink/issues/27) ｜ [PRD FR-005 / FR-002 / FR-007、§5.1、§10.1](./PRD.md) ｜ [Roadmap R1](./ROADMAP.md) ｜ [架构](./ARCHITECTURE.md) ｜ [Harness 合同](./HARNESS.md) ｜ [API 合同](./API_CONTRACT.md)
 > 代码：`lib/domain/safety/`（策略注册表 + 三层 Gate + 危机分支 + Trace + 轮次流水线）｜ 测试：`tests/domain/safety/`

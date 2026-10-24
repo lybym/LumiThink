@@ -1,5 +1,16 @@
 # LumiThink 2.0 技术栈与工程基线（TECH_STACK）
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+新阶段冻结 A2A v1.0.1（协议头 1.0）、HTTPS JSON-RPC + SSE，服务端优先官方 @a2a-js/sdk，小智优先 a2a-sdk。具体包版本、兼容性、Node/Python/DSH 矩阵由 P0-02 锁定，不能由“支持 1.0”推断已互通。Task 持久化选定 SQLite，Task / Ledger / Outbox 共用事务；SDK 自带 Store 只有满足同一事务与唯一写入者约束才可复用。下文旧 Prisma schema 仍冻结，新 schema、SQLite 驱动及迁移工具由 P1-02 落地。已有 Node 24.21.0、pnpm 10.34.7 和 DSH 锁定版本不因文档更新而升级。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 版本：v0.1 ｜ 日期：2026-10-13 ｜ 状态：**基线已建立（R1-00）**；标注“待定”的项仍未决策  
 > 对应：[Issue #12 · R1-00 工程基线与旧原型审计](https://github.com/lybym/LumiThink/issues/12) ｜ [PRD](./PRD.md) ｜ [Roadmap](./ROADMAP.md) ｜ [ADR-001](./adr/0001-deepseek-harness.md) ｜ [架构](./ARCHITECTURE.md) ｜ [旧资产审计](./LEGACY_AUDIT.md)
 

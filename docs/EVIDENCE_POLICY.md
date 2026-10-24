@@ -1,5 +1,16 @@
 # LumiThink Evidence & Skill 证据治理（EVIDENCE_POLICY.md v0）
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+ChildEvidence 及其他事实系统是受控只读适配器的候选来源，P3 验证实际可用性；当前测试 Profile 不证明已接入真实学习记录。输出含来源引用、统计周期、记录覆盖、更新时间及证据不足项；来源不可用时明确缺失，不用生成结果冒充事实。读取前授权、返回前再查当前权限；来源撤回/删除使关联缓存失效，禁止无来源第二份事实库。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 版本：v0.1 ｜ 日期：2026-10-14 ｜ 状态：**Evidence Card v0 + Skill Registry v0 已随 R1-13 交付首版实现**——代码 `lib/domain/evidence/`（Schema + Registry + 加载/发布/回滚），测试 `tests/domain/evidence/`；R3 再扩充更深入的证据治理。
 > 对应：[PRD §8 循证专业能力与 Skill](./PRD.md) ｜ [Roadmap R1-13](./ROADMAP.md) ｜ [R1 总览 #11](https://github.com/lybym/LumiThink/issues/11) ｜ [HARNESS §6 评测契约](./HARNESS.md) ｜ [SAFETY_POLICY](./SAFETY_POLICY.md) ｜ Issue [#25](https://github.com/lybym/LumiThink/issues/25)
 > 本文档描述已实现的 v0 证据治理合同：Evidence Card / Skill Manifest 可验证 Schema、本地只读 Registry、显式人工审核发布门槛、可复现发布/回滚，以及与 Eval 套件的回归联动。

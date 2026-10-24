@@ -1,5 +1,16 @@
 # LumiThink 2.0 统一交互 API 合同（Contract v1.0）
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+新外部 Agent 接口统一采用 A2A，不再用本页 Web MVP 的 requestId、进程内台账或自定义 cancel 端点作为三端接入规范。成功受理业务统一 Task；contextId 映射独立 Conversation，Task 可包含多个顺序 Turn。下文仍描述已交付 Web 接口，迁移需单独实施。新通路的撤权立即阻断订阅、读取、工具提交和后续输出，不能沿用“在途授权一直有效”的旧假设。详见 Task 契约与协议 JSON 示例；本页不声明旧路由已被替换。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 版本：`1.0` ｜ 状态：**合同定义与契约测试随 R1-01 交付；端点层自 R1-05 起为 Web MVP 接线（进程内内存态、单进程拓扑，见下方交付说明）；R1-06 起新增 §12 监护人鉴权、授权与功能开关（解析级 fail-closed，Bearer 会话，无 Cookie）**
 > R1-05 交付说明（Issue #17）：§4/§5/§6 三条路由由 `app/api/v1/interactions/*`（薄传输层）+ `lib/server/interaction-service.ts`（服务语义）为 Web MVP 接线——服务端验证身份注入（R1-06 鉴权落地前为固定合成演示儿童，客户端无法影响任何身份字段）、幂等台账按 **(verifiedActor, requestId)** 隔离（评审硬前置：全局台账会让重放的 requestId 返回他人会话）、请求体字节上限（超限映射 `CONTRACT_TEXT_TOO_LONG` 413）、SSE 流把 **Gate 批准后的完整输出**按有界短片段节流发出（合同 §5 语义"短句片段，非原始模型 token"；未过 Output Gate 的模型增量永远不可达儿童）、取消 = 网关调用者取消 + 迟到结果抑制。会话/台账/在途轮次状态为进程内内存（单进程 MVP），持久化选型仍按 TECH_STACK §3 待定。
 > 对应：[Issue #13](https://github.com/lybym/LumiThink/issues/13) ｜ [PRD FR-001](./PRD.md) ｜ [Roadmap R1-01](./ROADMAP.md) ｜ [架构](./ARCHITECTURE.md)
