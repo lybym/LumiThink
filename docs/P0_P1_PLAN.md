@@ -1,27 +1,31 @@
 # P0/P1 执行计划
 
-2026-10-25：设计 GO，仅批准开展 P0/P1；工程门禁尚未通过。依据 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 与 [路线图](ROADMAP.md)。稳定编号用于 Issue 对照，文档合并后创建对应任务；实际 Issue 链接以仓库 Issues 中的编号前缀为准。
+2026-10-25：设计 GO，仅批准开展 P0/P1；工程门禁尚未通过。依据 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 与 [路线图](ROADMAP.md)。全部 14 个实施任务已创建，总任务为 [#78](https://github.com/lybym/LumiThink/issues/78)。下表是实际 Issue 与依赖的对应关系。
 
 ## 依赖与解决顺序
 
 | 顺序 | 编号与交付 | 前置任务 |
 | --- | --- | --- |
-| 1 | P0-01 核对仓库、部署补丁与设备现状，冻结源码清单 | 无 |
-| 2 | P0-02 锁定 A2A、SDK 与 DSH 兼容矩阵及协议 Fixtures | P0-01 |
-| 3 | P0-03 建立隔离验证环境和可复现部署、备份与回滚基线 | P0-01 |
-| 4 | P0-04 P0 基线验收 Gate 与 P1 开发入口冻结 | P0-01、P0-02、P0-03 |
-| 5 | P1-01 单 Agent A2A Server 与官方独立客户端协议骨架 | P0-04 |
-| 6 | P1-02 SQLite 统一仓储、Task Manager 状态机与事务 Outbox | P1-01 |
-| 7 | P1-03 家庭租户、Client/Principal 双层认证与集中授权 | P1-02 |
-| 8 | P1-04 持久幂等受理、首响应丢失恢复与执行派发租约 | P1-02、P1-03 |
-| 9 | P1-05 Task Manager 接入真实 DSH Worker 与 Runtime 租约 | P1-04 |
-| 10 | P1-06 安全准入、追加 Artifact、事件 Outbox 与快照恢复 | P1-05 |
-| 11 | P1-07 真实取消、完成竞态及取消后不完整答案语义 | P1-05、P1-06 |
-| 12 | P1-08 重启恢复、数据删除优先与最小幂等墓碑 | P1-07 |
-| 13 | P1-09 有限资源、隔离、背压与内容最小化可观测性 | P1-05 |
-| 14 | P1-10 P1 官方双 SDK × SQLite × 真实 DSH 核心验收 Gate | P1-01、P1-02、P1-03、P1-04、P1-05、P1-06、P1-07、P1-08、P1-09 |
+| 1 | [P0-01 · #79](https://github.com/lybym/LumiThink/issues/79) 核对仓库、部署补丁与设备现状，冻结源码清单 | 无 |
+| 2 | [P0-02 · #80](https://github.com/lybym/LumiThink/issues/80) 锁定 A2A、SDK 与 DSH 兼容矩阵及协议 Fixtures | P0-01 |
+| 3 | [P0-03 · #81](https://github.com/lybym/LumiThink/issues/81) 建立隔离验证环境和可复现部署、备份与回滚基线 | P0-01 |
+| 4 | [P0-04 · #82](https://github.com/lybym/LumiThink/issues/82) P0 基线验收 Gate 与 P1 开发入口冻结 | P0-01、P0-02、P0-03 |
+| 5 | [P1-01 · #83](https://github.com/lybym/LumiThink/issues/83) 单 Agent A2A Server 与官方独立客户端协议骨架 | P0-04 |
+| 6 | [P1-02 · #84](https://github.com/lybym/LumiThink/issues/84) SQLite 统一仓储、Task Manager 状态机与事务 Outbox | P1-01 |
+| 7 | [P1-03 · #85](https://github.com/lybym/LumiThink/issues/85) 家庭租户、Client/Principal 双层认证与集中授权 | P1-02 |
+| 8 | [P1-04 · #86](https://github.com/lybym/LumiThink/issues/86) 持久幂等受理、首响应丢失恢复与执行派发租约 | P1-02、P1-03 |
+| 9 | [P1-05 · #87](https://github.com/lybym/LumiThink/issues/87) Task Manager 接入真实 DSH Worker 与 Runtime 租约 | P1-04 |
+| 10 | [P1-06 · #88](https://github.com/lybym/LumiThink/issues/88) 安全准入、追加 Artifact、事件 Outbox 与快照恢复 | P1-05 |
+| 11 | [P1-07 · #89](https://github.com/lybym/LumiThink/issues/89) 真实取消、完成竞态及取消后不完整答案语义 | P1-05、P1-06 |
+| 12 | [P1-08 · #90](https://github.com/lybym/LumiThink/issues/90) 重启恢复、数据删除优先与最小幂等墓碑 | P1-07 |
+| 13 | [P1-09 · #91](https://github.com/lybym/LumiThink/issues/91) 有限资源、隔离、背压与内容最小化可观测性 | P1-05 |
+| 14 | [P1-10 · #92](https://github.com/lybym/LumiThink/issues/92) P1 官方双 SDK × SQLite × 真实 DSH 核心验收 Gate | P1-01、P1-02、P1-03、P1-04、P1-05、P1-06、P1-07、P1-08、P1-09 |
 
 建议先按表顺序串行完成。P0-02 与 P0-03 在 P0-01 后可并行；P1-09 在 P1-05 后可并行，但 P1-10 必须等待所有 P1 实现项。P0-04、P1-10 是工程 Gate，不能仅通过关闭上游 Issue 自动宣布通过。
+
+
+
+实际 Issue 顺序：#79 → #80 → #81 → #82（P0 Gate）→ #83 → #84 → #85 → #86 → #87 → #88 → #89 → #90 → #91 → #92（P1 Gate）。#80/#81 可并行；#91 在 #87 后可并行，#92 汇总所有核心项。
 
 ## 任务范围与验收
 
@@ -209,7 +213,7 @@
 
 ## 历史任务处置
 
-旧 #50 Epic 被新 A2A 总计划替代，以关闭并交叉引用保留证据，不硬删除。#58/#59 保留现有自动化证据并承接 P4 设备/打断；#60 承接 P3–P5 专业业务；#61/#62 承接 P5 可靠性与发布。旧标题中的 P0 不再表示本计划 P0。已完成的旧实现不重复开任务，开放 PR #76 单独进入 P0 清单。
+旧 [#50](https://github.com/lybym/LumiThink/issues/50) Epic 已按 not_planned 关闭，由 [#78](https://github.com/lybym/LumiThink/issues/78) 替代；保留证据，不硬删除。#58/#59 保留现有自动化证据并承接 P4 设备/打断；#60 承接 P3–P5 专业业务；#61/#62 承接 P5 可靠性与发布。旧标题中的 P0 不再表示本计划 P0。已完成的旧实现不重复开任务，开放 PR #76 单独进入 P0 清单。
 
 ## 完成定义
 
