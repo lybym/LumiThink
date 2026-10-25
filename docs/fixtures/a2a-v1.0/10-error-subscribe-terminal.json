@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "id": 999,
+  "error": {
+    "code": -32004,
+    "message": "Task task-example is in a terminal state (3) and cannot be subscribed to.",
+    "data": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "UNSUPPORTED_OPERATION",
+        "domain": "a2a-protocol.org"
+      }
+    ]
+  }
+}

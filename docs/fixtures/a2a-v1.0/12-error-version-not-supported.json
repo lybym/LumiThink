@@ -1,0 +1,35 @@
+{
+  "comment": "两个变体共用同一错误码：显式不支持的版本与缺失 A2A-Version 头（缺失按 0.3 处理，本服务只声明 1.0，故同样返回 -32009）。",
+  "variants": {
+    "unsupportedVersionHeader": {
+      "jsonrpc": "2.0",
+      "id": 999,
+      "error": {
+        "code": -32009,
+        "message": "The requested A2A protocol version '9.9' is not supported. Supported versions: 1.0",
+        "data": [
+          {
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            "reason": "VERSION_NOT_SUPPORTED",
+            "domain": "a2a-protocol.org"
+          }
+        ]
+      }
+    },
+    "missingVersionHeader": {
+      "jsonrpc": "2.0",
+      "id": 999,
+      "error": {
+        "code": -32009,
+        "message": "The requested A2A protocol version '0.3' is not supported. Supported versions: 1.0",
+        "data": [
+          {
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            "reason": "VERSION_NOT_SUPPORTED",
+            "domain": "a2a-protocol.org"
+          }
+        ]
+      }
+    }
+  }
+}
