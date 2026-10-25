@@ -1,0 +1,28 @@
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": {
+    "id": "task-example",
+    "contextId": "ctx-example",
+    "status": {
+      "state": "TASK_STATE_CANCELED",
+      "timestamp": "2026-10-25T00:00:00.000Z"
+    },
+    "history": [
+      {
+        "messageId": "msg-cancel-001",
+        "contextId": "ctx-example",
+        "taskId": "task-example",
+        "role": "ROLE_USER",
+        "parts": [
+          {
+            "text": "请取消我"
+          }
+        ],
+        "metadata": {
+          "lumithinkScenario": "cancel-test"
+        }
+      }
+    ]
+  }
+}

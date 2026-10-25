@@ -1,0 +1,10 @@
+# Single-package project file; in pnpm >=10 it also hosts install settings.
+# Same rationale as poc/dsh-child: the isolated junction layout breaks ESM
+# resolution on this Windows sandbox. A hoisted (npm-like) layout keeps the
+# pinned dependency graph from pnpm-lock.yaml while keeping resolution
+# portable. This file also fully isolates this package from the root
+# pnpm-workspace.yaml settings (overrides, hoist:false, onlyBuiltDependencies).
+nodeLinker: hoisted
+allowBuilds:
+  esbuild: false
+  jose: false

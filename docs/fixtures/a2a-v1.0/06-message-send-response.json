@@ -1,0 +1,56 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "task": {
+      "id": "task-example",
+      "contextId": "ctx-example",
+      "status": {
+        "state": "TASK_STATE_COMPLETED",
+        "timestamp": "2026-10-25T00:00:00Z"
+      },
+      "artifacts": [
+        {
+          "artifactId": "answer-example",
+          "name": "Admitted answer",
+          "parts": [
+            {
+              "text": "你好。"
+            },
+            {
+              "text": "我们开始吧。"
+            }
+          ],
+          "metadata": {
+            "lumithinkContent": {
+              "version": 1,
+              "category": "admitted-answer"
+            }
+          }
+        }
+      ],
+      "history": [
+        {
+          "messageId": "msg-send-001",
+          "contextId": "ctx-example",
+          "taskId": "task-example",
+          "role": "ROLE_USER",
+          "parts": [
+            {
+              "text": "你好"
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "lumithinkOutput": {
+          "version": 1,
+          "chunkId": "chunk-2",
+          "startByte": 9,
+          "endByte": 27,
+          "sha256": "3397bd52dffc146c5dd24193bded380a4f9a0c26c3fcf99f397d4bdde59cb4c9"
+        }
+      }
+    }
+  }
+}

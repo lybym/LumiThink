@@ -1,0 +1,21 @@
+{
+  "name": "@lumithink/poc-a2a-compat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "P0-02 (issue #80) isolated A2A compatibility verification: locked official JS SDK @a2a-js/sdk decodes/re-encodes the v1.0 fixtures, and a loopback wire check exercises JSON-RPC, SSE, standard errors, duplicate CancelTask and A2A-Version behavior. Synthetic data only. This package is fully isolated from the root workspace (own lockfile, no root dependency changes).",
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "verify:codec": "node src/codec-verify.mjs",
+    "verify:wire": "node src/wire-verify.mjs",
+    "test": "node --test --test-isolation=none tests/codec.spec.mjs tests/wire.spec.mjs"
+  },
+  "dependencies": {
+    "@a2a-js/sdk": "1.3.0"
+  },
+  "devDependencies": {
+    "express": "5.1.0"
+  }
+}

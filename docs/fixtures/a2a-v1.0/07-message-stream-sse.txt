@@ -1,0 +1,7 @@
+data: {"jsonrpc":"2.0","id":3,"result":{"task":{"id":"task-example","contextId":"ctx-example","status":{"state":"TASK_STATE_SUBMITTED","timestamp":"2026-10-25T00:00:00.000Z"},"history":[{"messageId":"msg-stream-001","contextId":"ctx-example","taskId":"task-example","role":"ROLE_USER","parts":[{"text":"你好"}]}]}}}
+
+data: {"jsonrpc":"2.0","id":3,"result":{"artifactUpdate":{"taskId":"task-example","contextId":"ctx-example","artifact":{"artifactId":"answer-example","name":"Admitted answer","parts":[{"text":"你好。"}],"metadata":{"lumithinkContent":{"version":1,"category":"admitted-answer"}}},"metadata":{"lumithinkOutput":{"version":1,"chunkId":"chunk-1","startByte":0,"endByte":9,"sha256":"81fddea03ec6aa29ed52fc9b346ca130613650a71fd8d3ffc93077bc27806bc1"}}}}}
+
+data: {"jsonrpc":"2.0","id":3,"result":{"artifactUpdate":{"taskId":"task-example","contextId":"ctx-example","artifact":{"artifactId":"answer-example","name":"Admitted answer","parts":[{"text":"我们开始吧。"}],"metadata":{"lumithinkContent":{"version":1,"category":"admitted-answer"}}},"append":true,"lastChunk":true,"metadata":{"lumithinkOutput":{"version":1,"chunkId":"chunk-2","startByte":9,"endByte":27,"sha256":"3397bd52dffc146c5dd24193bded380a4f9a0c26c3fcf99f397d4bdde59cb4c9"}}}}}
+
+data: {"jsonrpc":"2.0","id":3,"result":{"statusUpdate":{"taskId":"task-example","contextId":"ctx-example","status":{"state":"TASK_STATE_COMPLETED","timestamp":"2026-10-25T00:00:00.000Z"}}}}
