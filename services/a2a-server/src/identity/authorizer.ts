@@ -273,18 +273,6 @@ export class Authorizer {
     return grant;
   }
 
-  /** Scope of the principal's grant, when the principal is grant-elevated. */
-  grantScopeOf(auth: AuthContext): readonly Operation[] | null {
-    if (
-      auth.principal.kind === 'session_verified' ||
-      auth.principal.kind === 'voiceprint_candidate'
-    ) {
-      const grant = this.store.findGrant(auth.principal.grantId);
-      return grant ? grant.scope : null;
-    }
-    return null;
-  }
-
   /**
    * Executor admission gate (工具提交 / 输出准入): re-checks the COMPLETE
    * acceptance chain against CURRENT server-side state — never the

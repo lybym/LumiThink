@@ -20,6 +20,11 @@ export function testConfig(overrides: Partial<A2aServiceConfig> = {}): A2aServic
     supportedVersions: ['1.0'],
     dbPath: ':memory:',
     identityDbPath: ':memory:',
+    // P1-04 defaults (deterministic in tests; loadA2aServiceConfig derives
+    // the same values from env for the real entrypoint).
+    fingerprintKey: 'test-fingerprint-hmac-key',
+    dispatchLeaseTtlMs: 5 * 60 * 1000,
+    retention: { retryWindowMs: 24 * 3600 * 1000, resultRetentionMs: 7 * 24 * 3600 * 1000, tombstoneRetentionMs: 30 * 24 * 3600 * 1000 },
     ...overrides,
   };
 }

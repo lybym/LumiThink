@@ -747,3 +747,282 @@ test('repository operations make NO network calls (sync transaction bodies, AC 4
     mgr.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// P1-04 (issue #86): dispatch lease vs cancel, lease-holder attribution,
+// body purge / tombstones, bridge sync identity-dedupe, schema v2
+// ---------------------------------------------------------------------------
+
+test('claimExecution refuses a task with a persisted cancel intent (canceled_pre_dispatch)', () => {
+  const mgr = newManager(':memory:');
+  try {
+    const { taskId } = accept(mgr, 'claim-cancel-1');
+    const intent = mgr.recordCancelIntent({ taskId, reason: 'cancel_requested' });
+    assert.equal(intent.outcome, 'recorded');
+
+    const claim = mgr.claimExecution({ taskId, executionId: 'exec-canceled' });
+    assert.equal(claim.outcome, 'canceled_pre_dispatch');
+    if (claim.outcome === 'canceled_pre_dispatch') {
+      assert.equal(claim.currentState, 'submitted');
+      assert.equal(claim.stateVersion, 1, 'the refusal does not bump the version');
+    }
+    assert.equal(mgr.stats().executions, 0, 'no execution row for a refused claim');
+
+    // The conditional-update discipline still applies: without the intent
+    // the same claim wins.
+    const mgr2 = newManager(':memory:');
+    try {
+      const second = accept(mgr2, 'claim-cancel-2');
+      const ok = mgr2.claimExecution({ taskId: second.taskId, executionId: 'exec-ok' });
+      assert.equal(ok.outcome, 'claimed');
+    } finally {
+      mgr2.close();
+    }
+  } finally {
+    mgr.close();
+  }
+});
+
+test('lease-holder attribution: omitting leaseId on a leased execution is rejected (review #101 ⑤)', () => {
+  const mgr = newManager(':memory:');
+  try {
+    const { taskId } = accept(mgr, 'lease-holder-1');
+    assert.equal(
+      mgr.claimExecution({ taskId, executionId: 'exec-leased', leaseId: 'lease-A' }).outcome,
+      'claimed',
+    );
+
+    // Omitted leaseId on a LEASED execution: rejected — presenting nothing
+    // is not holder proof.
+    const omitted = mgr.admitChunk({
+      taskId, executionId: 'exec-leased', turnSeq: 1, epoch: 1,
+      artifactId: 'answer-1', text: '省略租约', leaseId: undefined,
+    });
+    assert.deepEqual(omitted, { outcome: 'rejected', reason: 'lease_invalid' });
+
+    // Wrong holder: rejected.
+    const wrong = mgr.admitChunk({
+      taskId, executionId: 'exec-leased', turnSeq: 1, epoch: 1,
+      artifactId: 'answer-1', text: '错租约', leaseId: 'lease-B',
+    });
+    assert.deepEqual(wrong, { outcome: 'rejected', reason: 'lease_invalid' });
+
+    // Correct holder: admitted (and the row moves registered→running).
+    const right = mgr.admitChunk({
+      taskId, executionId: 'exec-leased', turnSeq: 1, epoch: 1,
+      artifactId: 'answer-1', text: '对租约', leaseId: 'lease-A',
+    });
+    assert.equal(right.outcome, 'admitted');
+
+    // An UNLEASED execution keeps accepting callbacks without a lease.
+    const { taskId: task2 } = accept(mgr, 'lease-holder-2');
+    assert.equal(mgr2TaskState(mgr, task2), 'submitted');
+    assert.equal(
+      mgr.claimExecution({ taskId: task2, executionId: 'exec-bare' }).outcome,
+      'claimed',
+    );
+    const bare = mgr.admitChunk({
+      taskId: task2, executionId: 'exec-bare', turnSeq: 1, epoch: 1,
+      artifactId: 'answer-2', text: '无租约执行',
+    });
+    assert.equal(bare.outcome, 'admitted');
+
+    // transitionTask with an execution ref follows the same holder rule.
+    assert.throws(
+      () =>
+        mgr.transitionTask({
+          taskId, expectedState: 'working', expectedStateVersion: 2, nextState: 'completed',
+          execution: { executionId: 'exec-leased', turnSeq: 1, epoch: 1 },
+        }),
+      (error: unknown) => error instanceof TaskManagerError && error.code === 'execution_attribution',
+      'an execution ref omitting the lease of a leased execution is attributed-rejected',
+    );
+  } finally {
+    mgr.close();
+  }
+});
+
+function mgr2TaskState(mgr: SqliteTaskManager, taskId: string): string {
+  return mgr.getTaskDetail(taskId).currentState;
+}
+
+test('purgeTaskBody deletes all body, tombstones ledger keys, and replays/retries cannot resurrect', async () => {
+  const mgr = newManager(':memory:');
+  try {
+    const { taskId } = accept(mgr, 'purge-1');
+    assert.equal(mgr.claimExecution({ taskId, executionId: 'exec-1' }).outcome, 'claimed');
+    assert.equal(
+      mgr.admitChunk({ taskId, executionId: 'exec-1', turnSeq: 1, epoch: 1, artifactId: 'answer-1', text: '待清理正文' })
+        .outcome,
+      'admitted',
+    );
+
+    const purged = mgr.purgeTaskBody(taskId);
+    assert.equal(purged.outcome, 'purged');
+    assert.equal(purged.tombstonedKeys, 1);
+
+    const snapshot = JSON.stringify({
+      detail: mgr.getTaskDetail(taskId),
+      journal: mgr.readOutbox(taskId, { includePublished: true }),
+      stats: mgr.stats(),
+    });
+    assert.ok(!snapshot.includes('待清理正文'), 'no body survives in detail, journal or stats');
+    assert.ok(!snapshot.includes('你好'), 'input body is gone');
+    assert.equal(mgr.stats().chunks, 0);
+    assert.equal(mgr.stats().history, 0);
+    assert.equal(mgr.stats().artifacts, 0);
+
+    // Duplicate acceptance on the tombstoned key: tombstoned, never re-run.
+    const retry = mgr.acceptInput({
+      requestKey: 'purge-1',
+      fingerprint: 'fp-purge-1',
+      messageId: 'msg-purge-1',
+      inputMessage: userMessage('msg-purge-1', '待清理正文'),
+    });
+    assert.deepEqual(retry, { outcome: 'tombstoned', taskId });
+    assert.equal(mgr.stats().executions, 1, 'no new execution behind the tombstone');
+
+    // SDK-bridge save of the purged (empty) snapshot cannot resurrect body.
+    const task = await mgr.load(taskId);
+    assert.ok(task);
+    await mgr.save(task);
+    assert.equal(mgr.stats().chunks, 0, 'replay of an empty snapshot does not recreate chunks');
+  } finally {
+    mgr.close();
+  }
+});
+
+test('bridge save sync is message-identity keyed: windowed snapshots lose nothing and duplicate nothing (review #101 ⑥)', async () => {
+  const mgr = newManager(':memory:');
+  try {
+    const taskId = 'task-windowed';
+    const m1 = userMessage('win-msg-1', '第一');
+    const m2 = userMessage('win-msg-2', '第二');
+    const m3 = userMessage('win-msg-3', '第三');
+    await mgr.save({
+      id: taskId, contextId: 'ctx-windowed',
+      status: { state: 1, message: undefined, timestamp: undefined },
+      artifacts: [], history: [m1], metadata: undefined,
+    });
+    await mgr.save({
+      id: taskId, contextId: 'ctx-windowed',
+      status: { state: 1, message: undefined, timestamp: undefined },
+      artifacts: [], history: [m1, m2], metadata: undefined,
+    });
+    assert.equal(mgr.getTaskDetail(taskId).turns.length, 2, 'turn per NEW user message');
+
+    // WINDOWED snapshot (only the last message): existing rows keep their
+    // seqs; nothing is dropped, nothing duplicated, no phantom turn.
+    await mgr.save({
+      id: taskId, contextId: 'ctx-windowed',
+      status: { state: 1, message: undefined, timestamp: undefined },
+      artifacts: [], history: [m3], metadata: undefined,
+    });
+    const loaded = await mgr.load(taskId);
+    assert.ok(loaded);
+    assert.deepEqual(
+      (loaded.history ?? []).map((message) => message.messageId),
+      ['win-msg-1', 'win-msg-2', 'win-msg-3'],
+      'append-only history keeps every message in order despite the windowed save',
+    );
+    const detail = mgr.getTaskDetail(taskId);
+    assert.equal(detail.turns.length, 3, 'the new message created exactly one new turn');
+    assert.deepEqual(detail.turns.map((turn) => turn.epoch), [1, 2, 3]);
+
+    // Re-sending the SAME full history is a no-op (idempotent save).
+    await mgr.save({
+      id: taskId, contextId: 'ctx-windowed',
+      status: { state: 1, message: undefined, timestamp: undefined },
+      artifacts: [], history: [m1, m2, m3], metadata: undefined,
+    });
+    assert.equal(mgr.getTaskDetail(taskId).turns.length, 3, 'no duplicate turns for known messages');
+  } finally {
+    mgr.close();
+  }
+});
+
+test('bridge append path enforces output admission (review #101 ①: cancel intent closes snapshot appends)', async () => {
+  const mgr = newManager(':memory:');
+  try {
+    const { taskId } = accept(mgr, 'bridge-admission-1');
+    assert.equal(mgr.claimExecution({ taskId, executionId: 'exec-1' }).outcome, 'claimed');
+    assert.equal(
+      mgr.admitChunk({ taskId, executionId: 'exec-1', turnSeq: 1, epoch: 1, artifactId: 'answer-1', text: '已准入' })
+        .outcome,
+      'admitted',
+    );
+
+    // Record the cancel intent (closes output admission on open turns)…
+    assert.equal(mgr.recordCancelIntent({ taskId, reason: 'cancel_requested' }).outcome, 'recorded');
+
+    // …a bridge save whose snapshot carries a NEW part is rejected loudly.
+    const task = await mgr.load(taskId);
+    assert.ok(task);
+    await assert.rejects(
+      () =>
+        mgr.save({
+          ...task,
+          artifacts: [
+            {
+              artifactId: 'answer-1', name: 'Admitted answer', description: '',
+              parts: [
+                { content: { $case: 'text' as const, value: '已准入' }, metadata: undefined, filename: '', mediaType: 'text/plain' },
+                { content: { $case: 'text' as const, value: '取消后迟到正文' }, metadata: undefined, filename: '', mediaType: 'text/plain' },
+              ],
+              metadata: undefined, extensions: [],
+            },
+          ],
+        }),
+      (error: unknown) =>
+        error instanceof TaskManagerError && error.code === 'output_admission_closed',
+    );
+    assert.equal(mgr.stats().chunks, 1, 'the late part was NOT appended');
+
+    // The same snapshot WITHOUT new parts stays a clean idempotent save.
+    await mgr.save(task);
+    assert.equal(mgr.stats().chunks, 1);
+  } finally {
+    mgr.close();
+  }
+});
+
+test('schema v2: v1 databases re-migrate additively; tombstoned_at_ms appears and data survives', () => {
+  const { dir, dbPath } = tempDbPath();
+  try {
+    // Build a v2 database, then rewind it to a v1 shape.
+    const first = newManager(dbPath);
+    const { taskId } = accept(first, 'migration-v2-1');
+    first.close();
+
+    const raw = new DatabaseSync(dbPath);
+    raw.exec('ALTER TABLE a2a_request_ledger DROP COLUMN tombstoned_at_ms');
+    raw.prepare("UPDATE lumithink_a2a_meta SET value = '1' WHERE key = 'schema_version'").run();
+    raw.close();
+
+    const reopened = newManager(dbPath);
+    try {
+      assert.equal(reopened.schemaVersion, 2);
+      const probe = new DatabaseSync(dbPath);
+      const columns = probe.prepare("PRAGMA table_info('a2a_request_ledger')").all() as { name: string }[];
+      assert.ok(columns.some((column) => column.name === 'tombstoned_at_ms'), 'v2 column restored');
+      probe.close();
+      // Existing data survived the migration.
+      assert.equal(reopened.getTaskDetail(taskId).currentState, 'submitted');
+      // Purge sets the tombstone timestamp on the migrated column.
+      const purged = reopened.purgeTaskBody(taskId);
+      assert.equal(purged.outcome, 'purged');
+      assert.ok(purged.purgedAtMs > 0);
+      const db = new DatabaseSync(dbPath);
+      const tomb = db
+        .prepare('SELECT status, tombstoned_at_ms FROM a2a_request_ledger WHERE request_key = ?')
+        .get('migration-v2-1') as { status: string; tombstoned_at_ms: number | null };
+      db.close();
+      assert.equal(tomb.status, 'tombstoned');
+      assert.ok(tomb.tombstoned_at_ms !== null, 'tombstone timestamp recorded');
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    removeTempDir(dir);
+  }
+});

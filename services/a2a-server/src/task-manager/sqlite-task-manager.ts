@@ -93,6 +93,12 @@ export interface AcceptInputParams {
   inputMessage: Message;
   /** Empty/absent lets the server assign the context id. */
   contextId?: string;
+  /**
+   * Caller pre-assigned task id (P1-04 acceptance gate: the ownership
+   * binding is written BEFORE the task row, so the id must exist first).
+   * Empty/absent lets the repository assign one.
+   */
+  taskId?: string;
   taskMetadata?: Record<string, unknown>;
 }
 
@@ -149,7 +155,14 @@ export type ClaimExecutionResult =
       epoch: number;
       stateVersion: number;
     }
-  | { outcome: 'stale'; currentState: A2aTaskState; stateVersion: number };
+  | { outcome: 'stale'; currentState: A2aTaskState; stateVersion: number }
+  /**
+   * A persisted cancel intent (§7.1 step 3) won the race against dispatch:
+   * the lease is NOT granted (no Worker start, TASK_LIFECYCLE §7.1.4 and
+   * P1-04 AC 3: 取消先于派发时无执行启动). The cancel path owns the
+   * CANCELED settlement through the same conditional-update discipline.
+   */
+  | { outcome: 'canceled_pre_dispatch'; currentState: A2aTaskState; stateVersion: number };
 
 export interface AdmitChunkParams {
   taskId: string;
@@ -191,6 +204,14 @@ export type RecordCancelIntentResult =
   /** 重复取消不重复副作用 (§7.1.2). */
   | { outcome: 'already-recorded'; currentState: A2aTaskState }
   | { outcome: 'already-terminal'; currentState: A2aTaskState };
+
+export interface PurgeTaskBodyResult {
+  outcome: 'purged';
+  taskId: string;
+  purgedAtMs: number;
+  /** Ledger keys (original + supplementary inputs) moved to tombstoned. */
+  tombstonedKeys: number;
+}
 
 export interface AppendTurnParams {
   taskId: string;
@@ -436,6 +457,7 @@ export class SqliteTaskManager implements TaskStore {
     this.assertValidText(params.requestKey, 'requestKey');
     this.assertValidText(params.fingerprint, 'fingerprint');
     this.assertValidText(params.messageId, 'messageId');
+    if (params.taskId !== undefined) this.assertValidText(params.taskId, 'taskId');
     return this.withWriteTransaction(() => {
       const nowMs = this.now();
       const ledger = this.selectLedgerLocked(params.requestKey);
@@ -471,8 +493,9 @@ export class SqliteTaskManager implements TaskStore {
         params.contextId !== undefined && params.contextId !== ''
           ? params.contextId
           : randomUUID();
+      const taskId =
+        params.taskId !== undefined && params.taskId !== '' ? params.taskId : randomUUID();
       this.ensureConversationLocked(contextId, nowMs);
-      const taskId = randomUUID();
       this.insertTaskLocked({
         taskId,
         contextId,
@@ -634,7 +657,9 @@ export class SqliteTaskManager implements TaskStore {
    * Claims the dispatch lease from the UNDISPATCHED submitted state
    * (§4.1.6, §7.1.4): conditional update submitted→working plus the
    * execution/lease row commit atomically. Cancel-vs-dispatch races resolve
-   * through the same conditional update — only one side wins.
+   * through the same conditional update — only one side wins: a task with a
+   * persisted cancel intent is never claimed (canceled_pre_dispatch), and a
+   * task claimed first makes the cancel path take the real-cancel route.
    */
   claimExecution(params: ClaimExecutionParams): ClaimExecutionResult {
     return this.withWriteTransaction(() => {
@@ -644,6 +669,13 @@ export class SqliteTaskManager implements TaskStore {
       }
       if (row.current_state !== 'submitted') {
         return { outcome: 'stale', currentState: row.current_state as A2aTaskState, stateVersion: row.state_version };
+      }
+      if (row.cancel_intent === 1) {
+        return {
+          outcome: 'canceled_pre_dispatch',
+          currentState: row.current_state as A2aTaskState,
+          stateVersion: row.state_version,
+        };
       }
       const turnSeq = params.turnSeq ?? 1;
       const turn = this.db
@@ -740,7 +772,10 @@ export class SqliteTaskManager implements TaskStore {
         return { outcome: 'rejected', reason: 'execution_settled' };
       }
       if (
-        (exec.lease_id !== null && params.leaseId !== undefined && exec.lease_id !== params.leaseId) ||
+        // Review #101 carry-over ⑤: a leased execution requires the callback
+        // to PRESENT its lease — omitting leaseId is not a pass (the holder
+        // identity must be verified, not just non-contradiction).
+        (exec.lease_id !== null && params.leaseId !== exec.lease_id) ||
         (exec.lease_expires_at_ms !== null && this.now() > exec.lease_expires_at_ms)
       ) {
         return { outcome: 'rejected', reason: 'lease_invalid' };
@@ -879,6 +914,66 @@ export class SqliteTaskManager implements TaskStore {
       this.checkFailurePoint('afterOutboxWrite');
       this.checkFailurePoint('beforeCommit');
       return { outcome: 'recorded', currentState: state, stateVersion: row.state_version };
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Body purge / idempotency tombstone (§5.4, P1-04 AC 4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Removes ALL stored body of one task and tombstones its ledger keys, in
+   * ONE transaction (§5.4: 删除个人正文…优先于常规窗口；仅保留必要墓碑):
+   *   - task history rows (user/agent message bodies) — deleted;
+   *   - artifacts + admitted chunks (public body) — deleted;
+   *   - turn input_message_json — replaced by a redacted marker (NOT NULL
+   *     column; the marker carries no body and no keyless digest);
+   *   - task status message + metadata — cleared;
+   *   - ledger keys — status='tombstoned' + tombstoned_at_ms (retention
+   *     baseline for the ≥30d minimum tombstone window).
+   *
+   * Kept (minimal, body-free by construction): task/state/version rows,
+   * execution lease records, and Outbox rows — P1-02 outbox payloads hold
+   * ids/positions/digests only, never text, so replaying them cannot
+   * resurrect body ("清理或重放不复活已删正文"). A retried request on a
+   * tombstoned key returns the tombstoned outcome and never re-executes.
+   *
+   * The cross-cutting cleanup orchestration (startup scan, caches, channel
+   * deliveries, outbox-with-body from P1-06) is P1-08/#90; this is the
+   * repository primitive that contract builds on.
+   */
+  purgeTaskBody(taskId: string): PurgeTaskBodyResult {
+    return this.withWriteTransaction(() => {
+      const row = this.selectTaskLocked(taskId);
+      if (!row) {
+        throw new TaskManagerError('task_not_found', `Task not found: ${taskId}`);
+      }
+      const nowMs = this.now();
+      this.db.prepare('DELETE FROM a2a_task_history WHERE task_id = ?').run(taskId);
+      this.db.prepare('DELETE FROM a2a_artifact_chunks WHERE task_id = ?').run(taskId);
+      this.db.prepare('DELETE FROM a2a_artifacts WHERE task_id = ?').run(taskId);
+      this.db
+        .prepare("UPDATE a2a_turns SET input_message_json = ? WHERE task_id = ?")
+        .run(JSON.stringify({ lumithinkPurged: true, version: 1 }), taskId);
+      this.db
+        .prepare(
+          'UPDATE a2a_tasks SET status_message_json = NULL, metadata_json = NULL, updated_at_ms = ? ' +
+            'WHERE task_id = ?',
+        )
+        .run(nowMs, taskId);
+      const ledgerChanges = this.db
+        .prepare(
+          "UPDATE a2a_request_ledger SET status = 'tombstoned', tombstoned_at_ms = ? " +
+            'WHERE task_id = ? AND status = \'active\'',
+        )
+        .run(nowMs, taskId).changes;
+      this.checkFailurePoint('beforeCommit');
+      return {
+        outcome: 'purged',
+        taskId,
+        purgedAtMs: nowMs,
+        tombstonedKeys: Number(ledgerChanges),
+      };
     });
   }
 
@@ -1270,36 +1365,70 @@ export class SqliteTaskManager implements TaskStore {
   /**
    * Turns derive from USER-role history messages (agent status messages also
    * land in the SDK history but belong to the current turn's output, not to
-   * a new turn). Every missing user message creates the next sequential turn
-   * with epoch = turn seq.
+   * a new turn). Every user message whose messageId is NOT already bound to
+   * an existing turn creates the next sequential turn with epoch = turn seq
+   * (review #101 carry-over ⑥: derivation is keyed by message identity, so a
+   * windowed or re-delivered snapshot can neither duplicate turns for a
+   * known message nor silently shift turn numbering).
    */
   private syncTurnsFromHistoryLocked(task: Task, nowMs: number): void {
     const userMessages = (task.history ?? []).filter((message) => message.role === Role.ROLE_USER);
     if (userMessages.length === 0) return;
-    const existing = (
-      this.db
-        .prepare('SELECT COUNT(*) AS n FROM a2a_turns WHERE task_id = ?')
-        .get(task.id) as { n: number }
-    ).n;
-    for (let index = existing; index < userMessages.length; index += 1) {
-      const turnSeq = index + 1;
-      this.insertTurnLocked(task.id, turnSeq, turnSeq, userMessages[index], nowMs);
+    const boundMessageIds = new Set<string>();
+    let maxSeq = 0;
+    for (const row of this.db
+      .prepare('SELECT turn_seq, input_message_json FROM a2a_turns WHERE task_id = ?')
+      .all(task.id) as { turn_seq: number; input_message_json: string }[]) {
+      maxSeq = Math.max(maxSeq, row.turn_seq);
+      try {
+        boundMessageIds.add((JSON.parse(row.input_message_json) as Message).messageId);
+      } catch {
+        // A purged turn input ({lumithinkPurged:true}) has no messageId —
+        // nothing to bind; the row still counts through maxSeq above.
+      }
+    }
+    let turnSeq = maxSeq;
+    for (const message of userMessages) {
+      if (boundMessageIds.has(message.messageId)) continue;
+      turnSeq += 1;
+      this.insertTurnLocked(task.id, turnSeq, turnSeq, message, nowMs);
       if (turnSeq > 1) {
         this.appendOutboxLocked(task.id, 'turnAccepted', {
           taskId: task.id,
           turnSeq,
           epoch: turnSeq,
-          messageId: userMessages[index].messageId,
+          messageId: message.messageId,
           source: 'sdk-bridge',
         });
       }
+      boundMessageIds.add(message.messageId);
     }
   }
 
+  /**
+   * History is append-only and keyed by message identity: a message already
+   * recorded under any seq keeps its position; NEW messages append at the
+   * next free seq (review #101 carry-over ⑥: a windowed snapshot must not
+   * overwrite/shift existing seq positions — INSERT OR IGNORE on a position
+   * basis would silently drop a shifted message).
+   */
   private syncHistoryLocked(task: Task, nowMs: number): void {
     const history = task.history ?? [];
-    for (let index = 0; index < history.length; index += 1) {
-      this.insertHistoryLocked(task.id, index + 1, history[index], nowMs);
+    if (history.length === 0) return;
+    const seqByMessageId = new Map<string, number>();
+    let maxSeq = 0;
+    for (const row of this.db
+      .prepare('SELECT seq, message_id FROM a2a_task_history WHERE task_id = ?')
+      .all(task.id) as { seq: number; message_id: string }[]) {
+      maxSeq = Math.max(maxSeq, row.seq);
+      seqByMessageId.set(row.message_id, row.seq);
+    }
+    let nextSeq = maxSeq;
+    for (const message of history) {
+      if (seqByMessageId.has(message.messageId)) continue;
+      nextSeq += 1;
+      this.insertHistoryLocked(task.id, nextSeq, message, nowMs);
+      seqByMessageId.set(message.messageId, nextSeq);
     }
   }
 
@@ -1343,6 +1472,30 @@ export class SqliteTaskManager implements TaskStore {
           `Late body chunk for terminal task ${task.id} (artifact ${artifact.artifactId}) — ` +
             'late callbacks must not append public body (TASK_LIFECYCLE §1.4/§6.2, AC 3)',
         );
+      }
+      if (!terminal && parts.length > countRow.n) {
+        // Review #101 carry-over ①: the bridge append path enforces the SAME
+        // output-admission contract as admitChunk — after a cancel intent
+        // (or any closed latest-turn admission) a snapshot carrying NEW body
+        // parts is a contract violation, not a silent append (§6.2: 取消、
+        // 权限撤销关闭对应交付准入).
+        const latestTurn = this.db
+          .prepare(
+            'SELECT output_admission FROM a2a_turns WHERE task_id = ? ORDER BY turn_seq DESC LIMIT 1',
+          )
+          .get(task.id) as { output_admission: string } | undefined;
+        if (
+          current.cancel_intent === 1 ||
+          !latestTurn ||
+          latestTurn.output_admission !== 'open'
+        ) {
+          throw new TaskManagerError(
+            'output_admission_closed',
+            `Snapshot carries new body parts for task ${task.id} (artifact ` +
+              `${artifact.artifactId}) while output admission is closed ` +
+              '(cancel intent recorded or turn admission closed, TASK_LIFECYCLE §6.2/§7.1)',
+          );
+        }
       }
       let startByte = startRow.maxEnd;
       for (let index = countRow.n; index < parts.length; index += 1) {
@@ -1432,7 +1585,9 @@ export class SqliteTaskManager implements TaskStore {
       );
     }
     if (
-      (exec.lease_id !== null && ref.leaseId !== undefined && exec.lease_id !== ref.leaseId) ||
+      // Same lease-holder rule as admitChunk (review #101 carry-over ⑤): a
+      // leased execution requires the ref to present its lease.
+      (exec.lease_id !== null && ref.leaseId !== exec.lease_id) ||
       (exec.lease_expires_at_ms !== null && this.now() > exec.lease_expires_at_ms)
     ) {
       throw new TaskManagerError(

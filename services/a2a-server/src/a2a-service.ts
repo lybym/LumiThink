@@ -15,10 +15,23 @@
  *   5. requireContextAccess            — 会话续接 guard: a contextId already
  *                                        bound to another household/principal is
  *                                        rejected (-32602) before the handler;
- *   6. jsonRpcHandler (locked SDK)     — JSON-RPC over HTTPS + SSE; the user
+ *   6. requireIdempotentAcceptance     — PERSISTENT idempotent acceptance
+ *                                        (P1-04): scoped request key + versioned
+ *                                        HMAC fingerprint through the repository's
+ *                                        atomic ledger transaction; duplicates
+ *                                        return the ORIGINAL task snapshot without
+ *                                        re-running the executor; key reuse with
+ *                                        different content → -32602
+ *                                        MESSAGE_ID_CONFLICT; tombstoned →
+ *                                        RESULT_PURGED;
+ *   7. jsonRpcHandler (locked SDK)     — JSON-RPC over HTTPS + SSE; the user
  *                                        builder projects the resolved
  *                                        AuthContext into ServerCallContext.user;
- *   7. jsonRpcParseErrorHandler        — malformed JSON → standard -32700.
+ *                                        the executor is wrapped by the
+ *                                        dispatch-lease decorator (quota →
+ *                                        claimExecution → authorization
+ *                                        re-check → Worker);
+ *   8. jsonRpcParseErrorHandler        — malformed JSON → standard -32700.
  *
  * The SDK handler receives EXACTLY ONE Task Store (see task-manager-port.ts):
  * the SQLite Task Manager (P1-02) wrapped in the authorizing decorator
@@ -41,10 +54,12 @@ import {
 import { agentCardHandler, jsonRpcHandler } from '@a2a-js/sdk/server/express';
 import type { AgentCard } from '@a2a-js/sdk';
 import { type A2aServiceConfig } from './config.ts';
-import { buildLumithinkAgentCard } from './lumithink-agent-card.ts';
+import { buildLumithinkAgentCard, LUMITHINK_AGENT_NAME } from './lumithink-agent-card.ts';
 import { jsonRpcParseErrorHandler, requireA2aVersion } from './error-map.ts';
 import { SyntheticExecutor } from './synthetic-executor.ts';
 import { SqliteTaskManager } from './task-manager/sqlite-task-manager.ts';
+import { requireIdempotentAcceptance } from './acceptance/acceptance-gate.ts';
+import { leaseDispatchExecutor, type QuotaGate } from './acceptance/dispatch-lease-executor.ts';
 import {
   IdentityController,
   StreamRegistry,
@@ -76,6 +91,12 @@ export interface StartA2aServiceOptions {
   identityBootstrap?: IdentityBootstrap;
   /** Pre-built identity controller (tests that share one directory). */
   identity?: IdentityController;
+  /**
+   * Dispatch quota re-check consulted BEFORE the execution-lease claim
+   * (P1-04 AC 3 派发前复查限额). Default: allow-all — the real resource
+   * limits are P1-09/#91; tests inject denials here.
+   */
+  quotaGate?: QuotaGate;
 }
 
 export interface StartedA2aService {
@@ -141,10 +162,23 @@ export async function startA2aService(
     authoritativeStore = new SqliteTaskManager({ dbPath: config.dbPath });
     ownsTaskStore = true;
   }
+  // P1-04 (#86): the idempotency gate and the dispatch lease are
+  // REPOSITORY-owned semantics — they wire only when the authoritative store
+  // is the SQLite Task Manager; a caller-supplied custom TaskStore passes
+  // through unchanged (no second store, no partial semantics).
+  const sqliteTaskManager =
+    authoritativeStore instanceof SqliteTaskManager ? authoritativeStore : undefined;
   const guardedTaskStore = authorizingTaskStore(authoritativeStore, { store: identity.store });
-  const executor =
+  const innerExecutor =
     options.executor ??
     new SyntheticExecutor({ authorizationGate: (taskId) => identity.executorGate(taskId) });
+  const executor = leaseDispatchExecutor({
+    inner: innerExecutor,
+    taskManager: sqliteTaskManager,
+    authorizationGate: (taskId) => identity.executorGate(taskId),
+    quotaGate: options.quotaGate,
+    leaseTtlMs: config.dispatchLeaseTtlMs,
+  });
   // The handler keeps a reference to this card object; URL fields are
   // finalized in place once the loopback port is bound (P0-02 pattern).
   const agentCard = options.agentCard ?? buildLumithinkAgentCard(`http://${config.host}:0`);
@@ -169,6 +203,19 @@ export async function startA2aService(
     }),
   );
   app.use('/', requireContextAccess({ store: identity.store }));
+  // P1-04 (#86): persistent idempotent acceptance — runs BEFORE the SDK
+  // handler so the ledger/Task/Turn/Outbox acceptance transaction commits
+  // first and the SDK handler dispatches the ACCEPTED task id; duplicates
+  // return the original snapshot without re-running the executor.
+  app.use(
+    '/',
+    requireIdempotentAcceptance({
+      taskManager: sqliteTaskManager,
+      identity: identity.store,
+      fingerprintKey: config.fingerprintKey,
+      agentName: LUMITHINK_AGENT_NAME,
+    }),
+  );
   app.use('/', jsonRpcHandler({ requestHandler, userBuilder: lumithinkUserBuilder }));
   app.use('/', jsonRpcParseErrorHandler());
 

@@ -27,7 +27,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { TaskManagerError } from './errors.ts';
 
-export const A2A_TASK_MANAGER_SCHEMA_VERSION = 1;
+export const A2A_TASK_MANAGER_SCHEMA_VERSION = 2;
 
 interface SchemaMigration {
   readonly version: number;
@@ -184,7 +184,21 @@ const MIGRATION_V1: SchemaMigration = {
   `,
 };
 
-const MIGRATIONS: readonly SchemaMigration[] = [MIGRATION_V1];
+/**
+ * v2 (issue #86, P1-04): request-ledger tombstone retention timestamp.
+ * The tombstone itself (status='tombstoned') existed since v1; v2 records
+ * WHEN the body was purged so the retention policy (TASK_LIFECYCLE §5.4:
+ * 请求键/指纹/墓碑至少保留 30 天) can be enforced by the P1-08 cleanup
+ * contract. ADDITIVE only — no destructive statements.
+ */
+const MIGRATION_V2: SchemaMigration = {
+  version: 2,
+  ddl: `
+    ALTER TABLE a2a_request_ledger ADD COLUMN tombstoned_at_ms INTEGER;
+  `,
+};
+
+const MIGRATIONS: readonly SchemaMigration[] = [MIGRATION_V1, MIGRATION_V2];
 
 const META_TABLE_DDL = `
   CREATE TABLE IF NOT EXISTS lumithink_a2a_meta (

@@ -41,11 +41,14 @@ test('SSE disconnect does not default-cancel; explicit CancelTask then settles t
 
     // 3. Give the server time to notice the dropped connection. The task
     //    must REMAIN non-terminal: SSE disconnect never cancels (R8).
+    //    P1-04 (#86): dispatch claimed the execution lease, so the parked
+    //    task sits in WORKING — the invariant under test is still
+    //    "non-terminal", not the pre-lease submitted state.
     await new Promise((resolve) => setTimeout(resolve, 250));
     const stillRunning = await rpcResultOf(service.base, 2, 'GetTask', { id: taskId });
     const state = ((stillRunning.body['result'] as Record<string, unknown>)['status'] as { state: string }).state;
-    assert.equal(state, 'TASK_STATE_SUBMITTED',
-      'SSE disconnect must NOT cancel the task (still non-terminal)');
+    assert.equal(state, 'TASK_STATE_WORKING',
+      'SSE disconnect must NOT cancel the task (still non-terminal; dispatch lease claimed)');
 
     // 4. GetTask recovery: the disconnected client can read the snapshot.
     assert.ok((stillRunning.body['result'] as Record<string, unknown>)['id'] === taskId);

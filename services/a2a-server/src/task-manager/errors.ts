@@ -18,6 +18,13 @@ export type TaskManagerErrorCode =
   | 'state_version_conflict'
   /** Callback failed execution attribution: task/turn/epoch/lease mismatch. */
   | 'execution_attribution'
+  /**
+   * Body arrival while the turn's output admission is closed (cancel intent,
+   * revocation) — the SDK-bridge analog of the admitChunk rejection reason
+   * (P1-04 closes review #101 carry-over ①: the bridge save path now checks
+   * output_admission/cancel_intent exactly like the direct admission path).
+   */
+  | 'output_admission_closed'
   /** SQLite write lock could not be acquired within busy_timeout. */
   | 'write_lock_busy'
   /** Store opened against an unknown future schema version (fail-closed). */
