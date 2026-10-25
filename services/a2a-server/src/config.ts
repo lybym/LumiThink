@@ -32,6 +32,36 @@ export const A2A_VALIDATION_DEFAULT_DB_PATH = ':memory:';
  */
 export const A2A_IDENTITY_DEFAULT_DB_PATH = ':memory:';
 
+/**
+ * HMAC key for versioned request fingerprints (P1-04, issue #86;
+ * TASK_LIFECYCLE §5.4: 指纹使用服务端持久密钥的版本化 HMAC). The fixed
+ * synthetic default keeps standalone/CI runs deterministic and is NOT a
+ * credential (fingerprints cover ids + synthetic validation text only);
+ * durable deployments MUST set LUMITHINK_A2A_FINGERPRINT_KEY so stored
+ * fingerprints are not enumerable across deployments.
+ */
+export const A2A_FINGERPRINT_SYNTHETIC_DEFAULT_KEY = 'p1-04-synthetic-fingerprint-hmac-key';
+
+/** Retention windows (P1-04 AC 4; TASK_LIFECYCLE §5.4 initial values). */
+export interface A2aRetentionConfig {
+  /** Auto-retry window for the ORIGINAL message (default 24h). */
+  retryWindowMs: number;
+  /** Full task-result retention (default 7d). */
+  resultRetentionMs: number;
+  /** Minimum idempotency-tombstone retention (default AND floor: 30d). */
+  tombstoneRetentionMs: number;
+}
+
+/** The TASK_LIFECYCLE §5.4 initial values: 24h / 7d / 30d. */
+export const A2A_RETENTION_DEFAULTS: A2aRetentionConfig = {
+  retryWindowMs: 24 * 60 * 60 * 1000,
+  resultRetentionMs: 7 * 24 * 60 * 60 * 1000,
+  tombstoneRetentionMs: 30 * 24 * 60 * 60 * 1000,
+};
+
+/** Dispatch-lease TTL default (P1-04): 5 minutes for in-process execution. */
+export const A2A_DISPATCH_LEASE_DEFAULT_TTL_MS = 5 * 60 * 1000;
+
 export interface A2aServiceConfig {
   /** Loopback bind port; 0 lets the OS pick an ephemeral port (tests). */
   port: number;
@@ -47,6 +77,12 @@ export interface A2aServiceConfig {
   identityDbPath: string;
   /** Optional JSON bootstrap for additional synthetic clients/credentials/grants. */
   identityBootstrapJson?: string;
+  /** HMAC key for versioned request fingerprints (P1-04, issue #86). */
+  fingerprintKey: string;
+  /** Dispatch-lease TTL for the transactional claim (P1-04). */
+  dispatchLeaseTtlMs: number;
+  /** Retention windows: 24h retry / 7d result / ≥30d tombstone (AC 4). */
+  retention: A2aRetentionConfig;
 }
 
 export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aServiceConfig {
@@ -79,6 +115,66 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
   const rawBootstrap = env.LUMITHINK_A2A_IDENTITY_BOOTSTRAP;
   const identityBootstrapJson =
     rawBootstrap !== undefined && rawBootstrap.trim() !== '' ? rawBootstrap : undefined;
+
+  const rawFingerprintKey = env.LUMITHINK_A2A_FINGERPRINT_KEY;
+  const fingerprintKey =
+    rawFingerprintKey !== undefined && rawFingerprintKey.trim() !== ''
+      ? rawFingerprintKey.trim()
+      : A2A_FINGERPRINT_SYNTHETIC_DEFAULT_KEY;
+
+  const rawLeaseTtl = env.LUMITHINK_A2A_DISPATCH_LEASE_TTL_MS;
+  let dispatchLeaseTtlMs = A2A_DISPATCH_LEASE_DEFAULT_TTL_MS;
+  if (rawLeaseTtl !== undefined && rawLeaseTtl !== '') {
+    dispatchLeaseTtlMs = Number(rawLeaseTtl);
+    if (!Number.isFinite(dispatchLeaseTtlMs) || dispatchLeaseTtlMs <= 0) {
+      throw new Error(
+        `LUMITHINK_A2A_DISPATCH_LEASE_TTL_MS must be a positive number, got: ${rawLeaseTtl}`,
+      );
+    }
+  }
+
+  // Retention windows (AC 4): 24h retry / 7d result / ≥30d tombstone. The
+  // tombstone window has a HARD floor of 30 days — a configuration below it
+  // refuses to start (最小墓碑至少保留 30 天, §5.4).
+  const retention = { ...A2A_RETENTION_DEFAULTS };
+  const rawRetryHours = env.LUMITHINK_A2A_RETENTION_RETRY_HOURS;
+  if (rawRetryHours !== undefined && rawRetryHours !== '') {
+    const hours = Number(rawRetryHours);
+    if (!Number.isFinite(hours) || hours <= 0) {
+      throw new Error(
+        `LUMITHINK_A2A_RETENTION_RETRY_HOURS must be a positive number, got: ${rawRetryHours}`,
+      );
+    }
+    retention.retryWindowMs = hours * 60 * 60 * 1000;
+  }
+  const rawResultDays = env.LUMITHINK_A2A_RETENTION_RESULT_DAYS;
+  if (rawResultDays !== undefined && rawResultDays !== '') {
+    const days = Number(rawResultDays);
+    if (!Number.isFinite(days) || days <= 0) {
+      throw new Error(
+        `LUMITHINK_A2A_RETENTION_RESULT_DAYS must be a positive number, got: ${rawResultDays}`,
+      );
+    }
+    retention.resultRetentionMs = days * 24 * 60 * 60 * 1000;
+  }
+  const rawTombstoneDays = env.LUMITHINK_A2A_RETENTION_TOMBSTONE_DAYS;
+  if (rawTombstoneDays !== undefined && rawTombstoneDays !== '') {
+    const days = Number(rawTombstoneDays);
+    if (!Number.isFinite(days) || days <= 0) {
+      throw new Error(
+        `LUMITHINK_A2A_RETENTION_TOMBSTONE_DAYS must be a positive number, got: ${rawTombstoneDays}`,
+      );
+    }
+    retention.tombstoneRetentionMs = days * 24 * 60 * 60 * 1000;
+  }
+  if (retention.tombstoneRetentionMs < A2A_RETENTION_DEFAULTS.tombstoneRetentionMs) {
+    throw new Error(
+      `LUMITHINK_A2A_RETENTION_TOMBSTONE_DAYS is below the 30-day minimum tombstone ` +
+        `(got ${(retention.tombstoneRetentionMs / (24 * 60 * 60 * 1000)).toString()} days); ` +
+        'the service refuses to start with a weaker retention contract (TASK_LIFECYCLE §5.4).',
+    );
+  }
+
   return {
     port,
     host: A2A_LOOPBACK_HOST,
@@ -87,5 +183,8 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
     dbPath,
     identityDbPath,
     identityBootstrapJson,
+    fingerprintKey,
+    dispatchLeaseTtlMs,
+    retention,
   };
 }

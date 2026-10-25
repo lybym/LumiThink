@@ -6,6 +6,10 @@
  */
 import test from 'node:test';
 import { strict as assert } from 'node:assert';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import {
   IdentityStore,
   defaultValidationBootstrap,
@@ -73,6 +77,11 @@ function harness(options: { nowMs?: number } = {}): {
   store.applyBootstrap(richBootstrap(nowMs));
   const authorizer = new Authorizer({ store, now: () => nowMs });
   return { store, authorizer, now: () => nowMs };
+}
+
+/** Fresh authorizer over an existing store (file-backed reopen tests). */
+function authorizerOf(store: IdentityStore, nowMs: number): Authorizer {
+  return new Authorizer({ store, now: () => nowMs });
 }
 
 test('unknown credentials deny with a stable code; the default bootstrap token resolves the bound guardian', () => {
@@ -351,5 +360,80 @@ test('gate policy wiring: an operation outside the grant scope is denied at admi
     assert.equal(decision.reason, 'operation_outside_grant_scope');
   } finally {
     store.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Review #102 carry-overs (closed with P1-04/#86): direct negative evidence
+// for the two remaining gate branches.
+// ---------------------------------------------------------------------------
+
+test('gate branch: a binding without attribution (pre-v2 row) denies with task_not_attributable', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'a2a-gate-attrib-'));
+  try {
+    const dbPath = path.join(dir, 'identity.sqlite3');
+    const nowMs = 1_780_000_000_000;
+    const store = new IdentityStore({ dbPath, now: () => nowMs });
+    store.applyBootstrap(richBootstrap(nowMs));
+    const resolved = authorizerOf(store, nowMs).resolve(TOKEN);
+    assert.equal(resolved.kind, 'authorized');
+    if (resolved.kind !== 'authorized') throw new Error('unreachable');
+    store.bindTask({ taskId: 'task-legacy-attr', contextId: 'ctx-legacy-attr', auth: resolved.auth });
+    store.close();
+
+    // Simulate the pre-v2 shape: the binding row exists but carries no
+    // accepting-credential attribution (schema v2 added credential_id).
+    const raw = new DatabaseSync(dbPath);
+    raw
+      .prepare('UPDATE a2a_identity_task_bindings SET credential_id = NULL, grant_id = NULL WHERE task_id = ?')
+      .run('task-legacy-attr');
+    raw.close();
+
+    const reopened = new IdentityStore({ dbPath, now: () => nowMs });
+    try {
+      const decision = authorizerOf(reopened, nowMs).assertTaskStillAuthorized('task-legacy-attr');
+      assert.equal(decision.allowed, false, 'an unattributable binding can never pass the gate');
+      assert.equal(decision.reason, 'task_not_attributable');
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('gate branch: credential EXPIRY (not revocation) is its own denial reason credential_expired', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'a2a-gate-expiry-'));
+  try {
+    const dbPath = path.join(dir, 'identity.sqlite3');
+    const nowMs = 1_780_000_000_000;
+    const store = new IdentityStore({ dbPath, now: () => nowMs });
+    store.applyBootstrap(richBootstrap(nowMs));
+    const resolved = authorizerOf(store, nowMs).resolve(TOKEN);
+    assert.equal(resolved.kind, 'authorized');
+    if (resolved.kind !== 'authorized') throw new Error('unreachable');
+    store.bindTask({ taskId: 'task-expiry', contextId: 'ctx-expiry', auth: resolved.auth });
+    const before = authorizerOf(store, nowMs).assertTaskStillAuthorized('task-expiry');
+    assert.equal(before.allowed, true, 'sanity: active credential passes the gate');
+    store.close();
+
+    // Expire the accepting credential WITHOUT revoking it: the gate must
+    // report the distinct expiry reason, not credential_revoked.
+    const raw = new DatabaseSync(dbPath);
+    raw
+      .prepare('UPDATE a2a_identity_credentials SET expires_at_ms = ? WHERE credential_id = ?')
+      .run(nowMs - 1000, 'cred-validation-harness');
+    raw.close();
+
+    const reopened = new IdentityStore({ dbPath, now: () => nowMs });
+    try {
+      const decision = authorizerOf(reopened, nowMs).assertTaskStillAuthorized('task-expiry');
+      assert.equal(decision.allowed, false);
+      assert.equal(decision.reason, 'credential_expired');
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

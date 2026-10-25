@@ -142,8 +142,10 @@ test('official client: CancelTask on a parked task → CANCELED; GetTask confirm
     assert.ok(parkedId, 'stream must yield the Task first');
 
     const before = await client.getTask({ tenant: '', id: parkedId });
-    assert.equal(before.status?.state, TaskState.TASK_STATE_SUBMITTED,
-      'parked task is non-terminal before cancel');
+    // P1-04 (#86): the dispatch lease is claimed at executor start, so the
+    // parked task is WORKING; the invariant is "non-terminal before cancel".
+    assert.equal(before.status?.state, TaskState.TASK_STATE_WORKING,
+      'parked task is non-terminal before cancel (dispatch lease claimed)');
 
     const canceled = await client.cancelTask({ tenant: '', id: parkedId, metadata: undefined });
     assert.equal(canceled.status?.state, TaskState.TASK_STATE_CANCELED,

@@ -30,7 +30,9 @@ test('the composed service defaults to the SQLite Task Manager as its single sto
   try {
     assert.ok(service.taskStore instanceof SqliteTaskManager,
       'the default store must be the SQLite Task Manager (no InMemory stand-in)');
-    assert.equal((service.taskStore as SqliteTaskManager).schemaVersion, 1);
+    // P1-04 (#86): schema v2 adds the ledger tombstone timestamp
+    // (a2a_request_ledger.tombstoned_at_ms) via an additive migration.
+    assert.equal((service.taskStore as SqliteTaskManager).schemaVersion, 2);
     assert.equal(service.ownsTaskStore, true, 'the service owns and closes its default store');
   } finally {
     await stopA2aService(service);
