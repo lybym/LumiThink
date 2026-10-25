@@ -90,9 +90,11 @@ async function run() {
     await forever();
   }
   if (behavior === 'crash-after-ready') {
-    // Crash profile: abnormal termination before any result.
+    // Crash profile: abnormal termination before any result. Self-SIGKILL
+    // (not process.abort()): abort() can trigger a multi-second core dump
+    // on Linux runners, which would blur the crash/失联 distinction.
     await sleep(120);
-    process.abort();
+    process.kill(process.pid, 'SIGKILL');
   }
   if (behavior === 'heartbeat-forever') {
     // Hang profile: heartbeats but never produces a result — the execution
