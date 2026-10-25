@@ -1,5 +1,16 @@
 # LumiThink × DSH：语音打断与 Agent 生命周期管理（R1-V 设计合同）
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+保留现有 Runtime Bridge / DSH 真实取消、epoch fencing 和受控 Profile。新 Task Manager 是公开任务及 Artifact 的唯一状态权威；Runtime Bridge 负责执行和停止证据，不拥有第二份公开 Task 状态。任务生成完成与播放完成分离；SSE 断连不取消，CancelTask 请求不等于实际停止。下文为既有内部执行契约与测试证据，涉及旧 Gateway 到 Runtime 的端到端拓扑以新整体方案为目标。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 版本：0.1-draft ｜ 2026-10-13 ｜ **目标设计，非当前已实现/验收能力**  
 > [ADR-002](./adr/0002-voice-runtime-bridge.md) · [系统架构](./ARCHITECTURE.md) · [硬件](./VOICE_HARDWARE.md) · [Roadmap](./ROADMAP.md)
 

@@ -1,0 +1,30 @@
+{
+  "taskId": "task-example",
+  "contextId": "ctx-example",
+  "artifact": {
+    "artifactId": "answer-example",
+    "name": "Admitted answer",
+    "parts": [
+      {
+        "text": "我们开始吧。"
+      }
+    ],
+    "metadata": {
+      "lumithinkContent": {
+        "version": 1,
+        "category": "admitted-answer"
+      }
+    }
+  },
+  "append": true,
+  "lastChunk": true,
+  "metadata": {
+    "lumithinkOutput": {
+      "version": 1,
+      "chunkId": "chunk-2",
+      "startByte": 9,
+      "endByte": 27,
+      "sha256": "3397bd52dffc146c5dd24193bded380a4f9a0c26c3fcf99f397d4bdde59cb4c9"
+    }
+  }
+}

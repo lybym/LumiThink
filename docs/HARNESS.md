@@ -1,5 +1,16 @@
 # LumiThink Harness 合同（HARNESS.md v0 草案）
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+新增 P1 核心门禁：官方独立 A2A JS/Python 客户端 → SQLite 统一 Task Manager → 真实 DSH Worker。覆盖身份/跨家庭拒绝、流与快照、真实取消、重复取消标准语义、首响应丢失、事务故障、重启租约、删除及限额。关键闭环零 SKIP，报告分开标明真实 Worker、合成模型、真实模型和实机；旧评测不能自动证明新协议。Task Manager 唯一状态写入者，Harness 只观测和故障注入。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 版本：v0.1（草案）｜ 日期：2026-10-13 ｜ 状态：**合同草案；其中 §6 评测契约已随 R1-07 交付首版实现**——本文其余章节描述 2.0 Harness 的执行图与接口契约，作为 R1-03 等的实施输入；除 `poc/dsh-child` 的 R0 SDK 证据与 §6 的评测域模块外，本文描述的能力均未实现。  
 > 对应：[PRD §5 Harness 行为契约](./PRD.md) ｜ [ADR-001](./adr/0001-deepseek-harness.md) ｜ [ARCHITECTURE](./ARCHITECTURE.md) ｜ [R0 DSH PoC](./R0_DSH_POC.md) ｜ [TECH_STACK](./TECH_STACK.md)  
 > R1-00 交付说明：本文由 Issue #12 建立 v0；执行图/接口为稳定合同候选，供评审，不代表可用功能。  

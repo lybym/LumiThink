@@ -1,5 +1,16 @@
 # LumiThink 2.0 儿童数据与记忆留存策略（MEMORY_POLICY v0）
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+家庭共享事实与私有会话分层，读取和写入都需服务端检查主体、数据对象及关系。外部 ChildEvidence 权威事实通过只读工具访问；允许带来源的派生摘要缓存，但不制造第二份事实源。撤权禁止继续复用含旧权限数据的 DSH 上下文。删除传播至摘要、向量索引、Task/Outbox、渠道缓存和受影响运行时会话；旧备份恢复不能复活已删内容。既有确认、更正和不自动沉淀规则继续有效。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 版本：v0 ｜ 日期：2026-10-14 ｜ 状态：**随 R1-09（issue #21）交付的最小实现**
 > 对应：[PRD §7 / §10](./PRD.md)（FR-006 / FR-008）｜ [Roadmap R1-09](./ROADMAP.md) ｜ [数据流矩阵](./PRIVACY_DATA_FLOW.md) ｜ [ADR-0004](./adr/0004-child-memory-v0.md) ｜ [ADR-0005](./adr/0005-child-data-lifecycle-v0.md) ｜ [TECH_STACK §3](./TECH_STACK.md)
 > 代码侧源头：`lib/domain/lifecycle/policy.ts`（`DATA_KIND_POLICIES` 保留矩阵 + fail-closed 载荷校验）——**本文件的矩阵必须与该表保持一致；新增数据种类必须同时更新两处并经过审查（issue #21 AC 3）**。

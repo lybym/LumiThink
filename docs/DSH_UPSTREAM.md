@@ -1,5 +1,16 @@
 # DeepSeek Harness 上游版本管理与升级策略
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+区分外部工作 DSH（A2A Client 插件）与 LumiThink 专属内部 DSH（Runtime Bridge）。内部继续复用已交付运行时，P0 复核版本。ryubyte/dsh-a2a 为候选 Client：已观察 sendAndWait 的 Abort 不自动传播远端取消、进程内 context 缓存及 Profile 凭据；P0 固定源码/包和兼容矩阵，P2 修补/复测或换官方 SDK 轻量插件。其功能声明不作为互通通过证据。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 生效日期：2026-10-12 ｜ 状态：已采用（需要 R0 技术验证和后续细化）  
 > 适用：LumiThink DSH Runtime、`lumithink-child` Profile、`lumi-dsh-runtime-bridge` Profile（E2E-02，issue #52）、Cordis 插件、SDK/依赖、会话数据。
 >

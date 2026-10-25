@@ -1,6 +1,17 @@
 # LumiThink 发行说明（Release Notes）
 
-> **v1.0.0-rc.1** ｜ 日期：2026-10-17 ｜ 对应 [Issue #62](https://github.com/lybym/LumiThink/issues/62)（[E2E-12][P0] 首版产品验收门禁）· [RELEASE_GATE](./RELEASE_GATE.md) · [验收注册表](../release/release-candidate.json) · [实机验收 runbook](../deploy/xiaozhi/runbook.md §15)
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+本次仅发布正式设计与实施计划：单 Agent 家庭多用户 A2A、统一 Task Manager、三项第二轮复评细节和 P0/P1 清单。未升级软件版本、依赖、发布注册表或部署配置。下文 1.0.0-rc.1 属于已有候选记录，不代表 A2A 已实现或已发布。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
+> **v1.0.0-rc.1** ｜ 日期：2026-10-17 ｜ 对应 [Issue #62](https://github.com/lybym/LumiThink/issues/62)（[E2E-12][P0] 首版产品验收门禁）· [RELEASE_GATE](./RELEASE_GATE.md) · [验收注册表](../release/release-candidate.json) · [实机验收 runbook](../deploy/xiaozhi/runbook.md)
 >
 > 状态：**发布候选（Release Candidate），不是已发布版本**。本串行流程未创建任何 git Tag 或 GitHub Release；Go 判定与用户显式发版批准见 §5 发布纪律。
 

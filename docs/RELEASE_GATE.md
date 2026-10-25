@@ -1,5 +1,16 @@
 # LumiThink R1 发布门禁（RELEASE_GATE.md v0，issue #22）
 
+## 2026-10-25 A2A 设计基线更新
+
+设计评审通过（Design GO）。P0/P1 获准开展，协议互通、真实取消、设备验收和部署切换仍受各阶段 Gate 约束。
+
+Design GO 仅批准开展 P0/P1，不表示允许上线。P0 Gate 需仓库/运行补丁/版本/回滚可复现；P1 Gate 需真实 DSH + SQLite + 官方独立客户端关键场景零跳过。P2–P5 渠道迁移、实机与发布继续各自验收；P0/P1 前不切换旧 UDS。下文候选注册表与旧 E2E Gate 继续作为历史发行证据，后续 #62 要求实际实现后更新注册表及重新生成证据，不能把本次文档变更当作发布批准。
+
+以 [整体方案](A2A_DESIGN.md)、[Task 契约](TASK_LIFECYCLE.md) 和 [P0/P1 计划](P0_P1_PLAN.md) 为新阶段依据。以下保留既有实现/历史范围说明；冲突处以本节明确的目标约束为准，不能据此宣称代码已完成迁移。
+
+## 既有实现与历史基线
+
+
 > 状态：随 R1-10 交付 ｜ 日期：2026-10-14 ｜ 对应 [Issue #22](https://github.com/lybym/LumiThink/issues/22) · [PRD FR-007](./PRD.md) · [Roadmap R1-10](./ROADMAP.md) · [HARNESS §6](./HARNESS.md) · [TECH_STACK §1/§2/§3](./TECH_STACK.md) · [DSH_UPSTREAM](./DSH_UPSTREAM.md) · [ADR-0005](./adr/0005-child-data-lifecycle-v0.md) · [ADR-0006](./adr/0006-deployment-secrets-backup-v0.md)
 >
 > 本文定义 R1 的**发布门禁**：自动化部分由 `.github/workflows/r1-release-gate.yml` 承担（合成数据、Mock Provider、零真实凭据/真实儿童数据）；staging → 审批 → 发布 → 回退四道**手工门禁**由人执行。非目标：Kubernetes、服务网格、大规模 DevOps 流水线（issue 非目标）。
