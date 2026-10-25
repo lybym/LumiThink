@@ -51,6 +51,7 @@ import { join, resolve } from "node:path";
 
 import { createWiredVoiceGateway, type WiredVoiceGateway } from "../../lib/server/voice-gateway-wiring.ts";
 import { createGatewayModelRoute, type GatewayModelRoute } from "../../lib/server/gateway-model-route.ts";
+import { createGatewayHostShutdown, installGatewayHostShutdown, type GatewayHostShutdown } from "../../lib/server/gateway-host-shutdown.ts";
 import type { MockGenerationScript } from "../../lib/domain/voice/bridge/mock-cordis.ts";
 import type { BridgeAgentPort } from "../../lib/domain/voice/bridge/agent-port.ts";
 import { MockMessagesServer } from "../../poc/dsh-child/src/mock-model.ts";
@@ -84,7 +85,23 @@ interface BindingFile {
   readonly activationDigest: string;
 }
 
+let hostShutdown: GatewayHostShutdown | undefined;
+
 async function main(): Promise<void> {
+  let closeGateway: () => Promise<void> = async () => {};
+  const cleanupResources: (() => Promise<void>)[] = [];
+  let watchdog: NodeJS.Timeout | null = null;
+  let syntheticPump: NodeJS.Timeout | null = null;
+  hostShutdown = createGatewayHostShutdown({
+    closeAdmission: () => { void closeGateway().catch(() => undefined); },
+    cleanup: async () => {
+      if (watchdog !== null) clearTimeout(watchdog);
+      if (syntheticPump !== null) clearInterval(syntheticPump);
+      const results = await Promise.allSettled([closeGateway(), ...cleanupResources.map((stop) => Promise.resolve().then(stop))]);
+      if (results.some((result) => result.status === "rejected")) throw new Error("cleanup_failed");
+    },
+  });
+  installGatewayHostShutdown(hostShutdown);
   const socketPath = requireEnv("LUMITHINK_GATEWAY_SOCKET");
   const transportToken = requireEnv("LUMITHINK_GATEWAY_BRIDGE_TOKEN");
   const authKey = requireEnv("LUMITHINK_GATEWAY_AUTH_KEY");
@@ -114,24 +131,14 @@ async function main(): Promise<void> {
   // base URL via workerEnv (the pinned profile prefers
   // DSH_BRIDGE_MODEL_BASE_URL over the synthetic mock); the vendor credential
   // never leaves the host-side keySource closure.
-  // E2E-08 (issue #58) CRASH CONTAINMENT: Node ≥15 turns an unhandled
-  // rejection into a process-fatal throw — the live window cannot afford a
-  // gateway death per residual async edge. Contain BOTH classes: log
-  // content-free (no prompt text) and CONTINUE; the supervisor's restart
-  // loop remains the backstop for genuine heap/loop corruption.
-  process.on("uncaughtException", (error) => {
-    console.error(`[gateway-host] uncaughtException (contained, continuing): ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
-  });
-  process.on("unhandledRejection", (reason) => {
-    console.error(`[gateway-host] unhandledRejection (contained, continuing): ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`);
-  });
   let modelRoute: GatewayModelRoute;
   try {
     modelRoute = await createGatewayModelRoute(process.env);
-  } catch (error) {
-    console.error(`[gateway-host] model route failed closed: ${error instanceof Error ? error.message : String(error)}`);
-    process.exit(1);
+  } catch {
+    hostShutdown.request(1, "boot_failed");
+    return;
   }
+  cleanupResources.push(() => modelRoute.stop());
   if (modelRoute.mode === "real") {
     console.log(`[gateway-host] model route mode=real provider=${modelRoute.providerId} proxy=loopback`);
   }
@@ -151,6 +158,7 @@ async function main(): Promise<void> {
     dshHome = process.env.LUMITHINK_GATEWAY_HOME ?? mkdtempSync(join(tmpdir(), "lumithink-gw-host-"));
     await materializeBridgeProfileInto(dshHome);
     mock = new MockMessagesServer({ fixedTurnTexts: FIXED_TURN_TEXTS });
+    cleanupResources.push(() => mock!.close());
     const mockBaseUrl = await mock.listen();
     const realPort: RealCordisAgentPort = createRealCordisAgentPort({
       dshHome,
@@ -166,13 +174,13 @@ async function main(): Promise<void> {
     });
     realPort.onFault((info) => {
       console.error(
-        `[gateway-host] agent fault session=${info.sessionKey} code=${info.code} detail=${info.detail} exit=${String(info.exitCode)} message=${info.message ?? ""}`,
+        `[gateway-host] agent fault session=${info.sessionKey} code=${info.code} detail=${info.detail} exit=${String(info.exitCode)}`,
       );
     });
     agentPort = realPort;
   } else if (agentRuntime !== "synthetic") {
-    console.error(`[gateway-host] unknown LUMITHINK_GATEWAY_AGENT value: ${agentRuntime}`);
-    process.exit(1);
+    hostShutdown.request(1, "boot_failed");
+    return;
   }
 
   const wired = createWiredVoiceGateway({
@@ -211,6 +219,8 @@ async function main(): Promise<void> {
       }
     },
   });
+  let gatewayStop: Promise<void> | undefined;
+  closeGateway = () => (gatewayStop ??= wired.stop());
 
   // Content-free turn-level diagnostics (CI evidence): stack events and
   // the gate metrics on settlement — no content fields.
@@ -247,8 +257,6 @@ async function main(): Promise<void> {
   // stderr tail + the DSH home footprint — names/sizes only, never file
   // content, which could carry the session store's transcript).
   let pendingTurn: string | null = null;
-  let watchdog: NodeJS.Timeout | null = null;
-  let syntheticPump: NodeJS.Timeout | null = null;
   wired.stack.stack.client.onEvent((frame) => {
     if (frame.kind !== "event") {
       return;
@@ -275,7 +283,7 @@ async function main(): Promise<void> {
               `[gateway-host] watchdog turn=${pendingTurn} session=${sessionKey} state=${described?.state ?? "<unknown>"} epoch=${String(described?.epoch ?? "<none>")} workerLive=${String(alive)}`,
             );
             if (realPort !== undefined) {
-              console.log(`[gateway-host] watchdog stderrTail session=${sessionKey}:\n${realPort.stderrTailSnapshot(sessionKey)}`);
+              console.log(`[gateway-host] watchdog stderrTailBytes session=${sessionKey} bytes=${Buffer.byteLength(realPort.stderrTailSnapshot(sessionKey), "utf8")}`);
             }
           }
           if (dshHome !== "") {
@@ -324,23 +332,12 @@ async function main(): Promise<void> {
   // typecheck, issue #58).
   const endpointLabel = wired.endpoint.kind === "uds" ? wired.endpoint.path : `\\\\.\\pipe\\${wired.endpoint.name}`;
   console.log(`GATEWAY-HOST READY endpoint=${endpointLabel} agent=${agentRuntime}`);
-  const shutdown = async () => {
-    try {
-      await wired.stop();
-      if (mock !== null) {
-        await mock.close();
-      }
-      await modelRoute.stop();
-    } catch {
-      // Best-effort teardown.
-    }
-    process.exit(0);
-  };
-  process.on("SIGTERM", () => void shutdown());
-  process.on("SIGINT", () => void shutdown());
 }
 
-void main().catch((error: unknown) => {
-  console.error(`[gateway-host] boot failed: ${error instanceof Error ? error.message : String(error)}`);
-  process.exit(1);
+void main().catch(() => {
+  if (hostShutdown !== undefined) hostShutdown.request(1, "boot_failed");
+  else {
+    console.error("[gateway-host] boot_failed");
+    process.exit(1);
+  }
 });

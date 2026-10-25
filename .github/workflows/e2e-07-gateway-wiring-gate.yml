@@ -51,6 +51,7 @@ on:
     paths:
       - 'deploy/xiaozhi/**'
       - 'lib/server/voice-gateway-wiring.ts'
+      - 'lib/server/gateway-host-shutdown.ts'
       - 'lib/server/voice-gateway-internal-transport.ts'
       - 'lib/server/voice-gateway-composition.ts'
       - 'lib/domain/voice/bridge/stream-gate.ts'
@@ -65,6 +66,7 @@ on:
     paths:
       - 'deploy/xiaozhi/**'
       - 'lib/server/voice-gateway-wiring.ts'
+      - 'lib/server/gateway-host-shutdown.ts'
       - 'lib/server/voice-gateway-internal-transport.ts'
       - 'lib/server/voice-gateway-composition.ts'
       - 'lib/domain/voice/bridge/stream-gate.ts'

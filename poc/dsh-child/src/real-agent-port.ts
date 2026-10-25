@@ -164,6 +164,9 @@ export interface RealAgentPortOptions {
   readonly childBootTimeoutMs?: number
   /** Bounded per-request control reply wait (followup/cancel/dispose). Default 15000ms. */
   readonly controlReplyTimeoutMs?: number
+  /** Finite idle reclamation; active attempts and boot/control requests are excluded. */
+  readonly idleWorkerTimeoutMs?: number
+  readonly idleWorkerReapIntervalMs?: number
   /** Extra worker-child environment entries (e.g. the named fault injections). */
   readonly workerEnv?: Readonly<Record<string, string>>
   /** Inject the worker child module path (tests may point at the same file). */
@@ -174,7 +177,7 @@ export interface WorkerFaultInfo {
   readonly sessionKey: string
   readonly code: 'worker_crashed'
   /** Bounded structured reason; never carries prompt or model text. */
-  readonly detail: 'process_exit' | 'boot_timeout' | 'protocol_violation' | 'control_timeout' | 'request_failed'
+  readonly detail: 'process_exit' | 'boot_timeout' | 'protocol_violation' | 'control_timeout' | 'request_failed' | 'idle_reaped'
   readonly exitCode: number | null
   /** Bounded control-error message when the fault came from a failed reply. */
   readonly message?: string
@@ -304,20 +307,27 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
    * identity only). The reaper interval is unref'd so it never holds the
    * process open.
    */
-  const IDLE_REAP_MS = 120_000
+  const idleReapMs = options.idleWorkerTimeoutMs ?? 120_000
+  const idleReapIntervalMs = options.idleWorkerReapIntervalMs ?? 30_000
+  if (![idleReapMs, idleReapIntervalMs].every(value => Number.isFinite(value) && value > 0)) {
+    throw new Error('invalid_idle_worker_limit')
+  }
   const reaper = setInterval(() => {
     const now = Date.now()
     for (const [sessionKey, state] of [...workers.entries()]) {
       if (state.exited || state.child === null) continue
       const handleState = state.handle.state
-      if (handleState.disposed || handleState.crashed) continue
+      if (handleState.disposed || handleState.crashed || !state.ready) continue
+      if (isHandleRunning(handleState) || state.pending.size > 0) continue
       const idleMs = now - state.lastActiveAt
-      if (idleMs <= IDLE_REAP_MS) continue
+      if (idleMs <= idleReapMs) continue
       state.lastActiveAt = now // reap exactly once per idle window
       process.stdout.write(`[real-agent-port] idle worker reaped session=${sessionKey} idleMs=${idleMs}\n`)
-      void state.handle.dispose().catch(() => undefined)
+      // Follow the same fault/quarantine path as a crash, so the Bridge
+      // can rebuild the logical session instead of retaining a dead handle.
+      quarantine(state, 'idle_reaped')
     }
-  }, 30_000)
+  }, idleReapIntervalMs)
   reaper.unref?.()
   /** Fresh DSH session identity per worker rebuild (issue #52 recovery: bind confirmed identity only, never replay). */
   let workerCounter = 0

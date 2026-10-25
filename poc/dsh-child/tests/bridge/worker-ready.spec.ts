@@ -69,3 +69,52 @@ test('stop verification stays bounded while a worker is still booting', async ()
     await port.disposeAll()
   }
 })
+
+test('idle reclamation notifies quarantine once and the same logical session can be rebuilt', async () => {
+  const port = createRealCordisAgentPort({
+    dshHome: 'fake-idle-rebuild-home', mockBaseUrl: 'http://127.0.0.1:9', workerScriptPath,
+    idleWorkerTimeoutMs: 200, idleWorkerReapIntervalMs: 20,
+    workerEnv: { LUMI_FAKE_WORKER_PLAN: JSON.stringify({ followup: ['stream:start', 'stream:chunk', 'stream:end', 'durable'] }) },
+  })
+  const faults: WorkerFaultInfo[] = []
+  port.onFault(info => faults.push(info))
+  try {
+    assert.ok(port.createAgent('ses_idle_rebuild').ok)
+    for (let i = 0; i < 200 && faults.length === 0; i++) await sleep(20)
+    assert.equal(faults.length, 1)
+    assert.equal(faults[0].detail, 'idle_reaped')
+    assert.equal(port.hasLiveWorker('ses_idle_rebuild'), false)
+    const rebuilt = port.createAgent('ses_idle_rebuild')
+    assert.ok(rebuilt.ok)
+    if (!rebuilt.ok) return
+    const frames: string[] = []
+    rebuilt.handle.onStream(frame => frames.push(frame.kind))
+    assert.ok(rebuilt.handle.runPrompt({ turnId: 'trn_idle_rebuild', nonceFingerprint: 'idle-rebuild-test', promptText: 'synthetic' }).ok)
+    for (let i = 0; i < 200 && !frames.includes('end'); i++) await sleep(20)
+    assert.deepEqual(frames, ['start', 'chunk', 'end'])
+    assert.equal(faults.length, 1)
+  } finally { await port.disposeAll() }
+})
+
+test('a silent active attempt is never killed by the idle worker reaper', async () => {
+  const port = createRealCordisAgentPort({
+    dshHome: 'fake-active-reaper-home', mockBaseUrl: 'http://127.0.0.1:9', workerScriptPath,
+    idleWorkerTimeoutMs: 80, idleWorkerReapIntervalMs: 20,
+    workerEnv: { LUMI_FAKE_WORKER_PLAN: JSON.stringify({ bootDelayMs: 120, followup: ['stream:start'] }) },
+  })
+  const faults: WorkerFaultInfo[] = []
+  port.onFault(info => faults.push(info))
+  try {
+    const created = port.createAgent('ses_active_reaper')
+    assert.ok(created.ok)
+    if (!created.ok) return
+    let started = false
+    created.handle.onStream(frame => { if (frame.kind === 'start') started = true })
+    assert.ok(created.handle.runPrompt({ turnId: 'trn_active_reaper', nonceFingerprint: 'active-reaper-test', promptText: 'synthetic' }).ok)
+    for (let i = 0; i < 200 && !started; i++) await sleep(20)
+    assert.equal(started, true)
+    await sleep(250)
+    assert.deepEqual(faults, [])
+    assert.equal(port.hasLiveWorker('ses_active_reaper'), true)
+  } finally { await port.disposeAll() }
+})
