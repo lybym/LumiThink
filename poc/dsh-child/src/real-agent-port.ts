@@ -205,6 +205,7 @@ interface WorkerState {
   dshSessionId: string
   child: ChildProcess | null
   ready: boolean
+  readonly readyWaiters: ((ready: boolean) => void)[]
   exited: boolean
   exitCode: number | null
   disposedByRequest: boolean
@@ -341,12 +342,42 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
   }
 
   /** Send one control request and await its bounded reply. */
-  function request(
+  async function request(
     state: WorkerState,
     op: WorkerRequest['op'],
     extra: Record<string, unknown> = {},
     timeoutMs = controlReplyTimeoutMs,
   ): Promise<{ readonly ok: boolean; readonly code?: string; readonly message?: string }> {
+    // Profile boot may consume stdin before the control reader is mounted.
+    // Queue control commands until ready; their reply deadline starts only
+    // after boot, which already has its own bounded timeout.
+    if (!state.ready) {
+      let bootWaitTimedOut = false
+      const ready = await new Promise<boolean>((resolve) => {
+        if (state.exited || state.child === null) {
+          resolve(false)
+          return
+        }
+        // Stop verification/disposal retain their short deadline even during
+        // boot. Only startup commands may use the full boot window.
+        let timer: NodeJS.Timeout | undefined
+        const onReady = (ready: boolean) => {
+          if (timer !== undefined) clearTimeout(timer)
+          resolve(ready)
+        }
+        state.readyWaiters.push(onReady)
+        if (op !== 'create' && op !== 'followup') {
+          timer = setTimeout(() => {
+            const index = state.readyWaiters.indexOf(onReady)
+            if (index !== -1) state.readyWaiters.splice(index, 1)
+            bootWaitTimedOut = true
+            resolve(false)
+          }, timeoutMs)
+          timer.unref?.()
+        }
+      })
+      if (!ready) return { ok: false, code: bootWaitTimedOut ? 'control_timeout' : 'worker_fault' }
+    }
     const id = state.nextRequestId
     state.nextRequestId += 1
     return new Promise((resolve) => {
@@ -389,6 +420,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
           clearTimeout(state.bootTimer)
           state.bootTimer = null
         }
+        for (const resolve of state.readyWaiters.splice(0)) resolve(true)
         return
       }
       case 'reply': {
@@ -589,6 +621,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
   }
 
   function killWorker(state: WorkerState): void {
+    for (const resolve of state.readyWaiters.splice(0)) resolve(false)
     const child = state.child
     if (child === null) return
     state.child = null
@@ -627,6 +660,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       dshSessionId: sessionKey,
       child: null,
       ready: false,
+      readyWaiters: [],
       exited: false,
       exitCode: null,
       disposedByRequest: false,
@@ -678,6 +712,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       /* spawn failure surfaces through exit/boot-timeout paths */
     })
     child.on('exit', (code) => {
+      for (const resolve of state.readyWaiters.splice(0)) resolve(false)
       state.exited = true
       state.exitCode = code
       if (state.bootTimer !== null) {
