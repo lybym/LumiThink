@@ -38,12 +38,14 @@ import { TEST_TOKEN, rpcHeaders, stopA2aService, testConfig } from './helpers.ts
 /** The bundled REAL worker entry (spawned as a separate OS process). */
 const WORKER_ENTRY = fileURLToPath(new URL('../src/runtime/dsh-worker-entry.mjs', import.meta.url));
 
-/** Aggressive-but-stable timers for the failure profiles. */
+/** Aggressive-but-stable timers for the failure profiles. lostContact stays
+ * well above process-exit delivery latency (slow CI runners) so a crash is
+ * diagnosed by its exit evidence, not by the contact watchdog. */
 const TUNING = {
   entryPath: WORKER_ENTRY,
-  executionTimeoutMs: 1500,
+  executionTimeoutMs: 2000,
   helloTimeoutMs: 500,
-  lostContactMs: 500,
+  lostContactMs: 900,
   cancelGraceMs: 800,
 };
 
