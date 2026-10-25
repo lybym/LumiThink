@@ -14,6 +14,8 @@
  * are provisioned through LUMITHINK_A2A_IDENTITY_BOOTSTRAP (JSON) and are
  * optional.
  */
+import { fileURLToPath } from 'node:url';
+
 export const A2A_VALIDATION_DEFAULT_PORT = 3312;
 export const A2A_LOOPBACK_HOST = '127.0.0.1';
 export const A2A_SUPPORTED_VERSIONS: readonly string[] = ['1.0'];
@@ -62,6 +64,42 @@ export const A2A_RETENTION_DEFAULTS: A2aRetentionConfig = {
 /** Dispatch-lease TTL default (P1-04): 5 minutes for in-process execution. */
 export const A2A_DISPATCH_LEASE_DEFAULT_TTL_MS = 5 * 60 * 1000;
 
+/**
+ * Executor runtime mode (P1-05, issue #87). 'synthetic' (default) keeps the
+ * P1-01 protocol-only executor; 'dsh-worker' wires the REAL DSH worker
+ * subprocess runtime (real spawn/hello/heartbeat/exit process mechanism,
+ * synthetic provider content — real-model verification stays P1-10/#92).
+ */
+export type A2aRuntimeMode = 'synthetic' | 'dsh-worker';
+
+/** Real DSH worker runtime tuning (P1-05). */
+export interface A2aDshWorkerConfig {
+  /** Worker entry script; default: the bundled dsh-worker-entry.mjs. */
+  entryPath: string;
+  /** Whole-execution deadline (kill + timeout evidence). Default 120s. */
+  executionTimeoutMs: number;
+  /** Worker registration deadline (startup failure). Default 10s. */
+  helloTimeoutMs: number;
+  /** Heartbeat silence deadline (失联). Default 15s. */
+  lostContactMs: number;
+  /** Cooperative-stop deadline after a cancel control. Default 5s. */
+  cancelGraceMs: number;
+  /** Extra env for the worker process (validation profiles). */
+  workerEnv?: Record<string, string>;
+}
+
+export const A2A_DSH_WORKER_DEFAULTS: Omit<A2aDshWorkerConfig, 'entryPath'> = {
+  executionTimeoutMs: 120 * 1000,
+  helloTimeoutMs: 10 * 1000,
+  lostContactMs: 15 * 1000,
+  cancelGraceMs: 5 * 1000,
+};
+
+/** Absolute path of the bundled worker entry (lazy: import.meta context). */
+export function defaultDshWorkerEntryPath(): string {
+  return fileURLToPath(new URL('./runtime/dsh-worker-entry.mjs', import.meta.url));
+}
+
 export interface A2aServiceConfig {
   /** Loopback bind port; 0 lets the OS pick an ephemeral port (tests). */
   port: number;
@@ -83,6 +121,10 @@ export interface A2aServiceConfig {
   dispatchLeaseTtlMs: number;
   /** Retention windows: 24h retry / 7d result / ≥30d tombstone (AC 4). */
   retention: A2aRetentionConfig;
+  /** Executor runtime mode (P1-05): 'synthetic' (default) | 'dsh-worker'. */
+  runtimeMode: A2aRuntimeMode;
+  /** Real DSH worker runtime tuning (P1-05; used in dsh-worker mode). */
+  dshWorker: A2aDshWorkerConfig;
 }
 
 export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aServiceConfig {
@@ -175,6 +217,53 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
     );
   }
 
+  // Runtime mode (P1-05): 'synthetic' (default) | 'dsh-worker'. Anything
+  // else refuses to start (fail-closed).
+  const rawRuntimeMode = env.LUMITHINK_A2A_RUNTIME_MODE;
+  let runtimeMode: A2aRuntimeMode = 'synthetic';
+  if (rawRuntimeMode !== undefined && rawRuntimeMode !== '') {
+    if (rawRuntimeMode !== 'synthetic' && rawRuntimeMode !== 'dsh-worker') {
+      throw new Error(
+        `LUMITHINK_A2A_RUNTIME_MODE must be 'synthetic' or 'dsh-worker', got: ${rawRuntimeMode}`,
+      );
+    }
+    runtimeMode = rawRuntimeMode;
+  }
+  const positiveInt = (raw: string | undefined, fallback: number, label: string): number => {
+    if (raw === undefined || raw === '') return fallback;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new Error(`${label} must be a positive number, got: ${raw}`);
+    }
+    return value;
+  };
+  const dshWorker: A2aDshWorkerConfig = {
+    entryPath:
+      env.LUMITHINK_A2A_DSH_WORKER_ENTRY !== undefined && env.LUMITHINK_A2A_DSH_WORKER_ENTRY.trim() !== ''
+        ? env.LUMITHINK_A2A_DSH_WORKER_ENTRY.trim()
+        : defaultDshWorkerEntryPath(),
+    executionTimeoutMs: positiveInt(
+      env.LUMITHINK_A2A_DSH_WORKER_TIMEOUT_MS,
+      A2A_DSH_WORKER_DEFAULTS.executionTimeoutMs,
+      'LUMITHINK_A2A_DSH_WORKER_TIMEOUT_MS',
+    ),
+    helloTimeoutMs: positiveInt(
+      env.LUMITHINK_A2A_DSH_WORKER_HELLO_TIMEOUT_MS,
+      A2A_DSH_WORKER_DEFAULTS.helloTimeoutMs,
+      'LUMITHINK_A2A_DSH_WORKER_HELLO_TIMEOUT_MS',
+    ),
+    lostContactMs: positiveInt(
+      env.LUMITHINK_A2A_DSH_WORKER_LOST_CONTACT_MS,
+      A2A_DSH_WORKER_DEFAULTS.lostContactMs,
+      'LUMITHINK_A2A_DSH_WORKER_LOST_CONTACT_MS',
+    ),
+    cancelGraceMs: positiveInt(
+      env.LUMITHINK_A2A_DSH_WORKER_CANCEL_GRACE_MS,
+      A2A_DSH_WORKER_DEFAULTS.cancelGraceMs,
+      'LUMITHINK_A2A_DSH_WORKER_CANCEL_GRACE_MS',
+    ),
+  };
+
   return {
     port,
     host: A2A_LOOPBACK_HOST,
@@ -186,5 +275,7 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
     fingerprintKey,
     dispatchLeaseTtlMs,
     retention,
+    runtimeMode,
+    dshWorker,
   };
 }
