@@ -81,11 +81,24 @@ function answerArtifact(parts: Part[]): Artifact {
 
 export type LumithinkScenario = 'complete' | 'cancel-test';
 
+/**
+ * Output/tool admission gate consulted by the executor before each public
+ * chunk admission (P1-03, issue #85 AC 3: 撤权对工具提交与输出及时生效).
+ * Implemented by the identity layer over CURRENT server-side state — never
+ * the request-time snapshot.
+ */
+export type AuthorizationGate = (taskId: string) => { allowed: boolean; reason?: string };
+
 export class SyntheticExecutor implements AgentExecutor {
   /** Resolvers for tasks parked in the cancel-test scenario. */
   private readonly awaitingCancel = new Map<string, () => void>();
   private readonly contextByTask = new Map<string, string>();
   cancelInvocations = 0;
+  private readonly authorizationGate?: AuthorizationGate;
+
+  constructor(options: { authorizationGate?: AuthorizationGate } = {}) {
+    this.authorizationGate = options.authorizationGate;
+  }
 
   scenarioOf(requestContext: RequestContext): LumithinkScenario {
     const scenario = requestContext.request?.message?.metadata?.lumithinkScenario;
@@ -114,6 +127,11 @@ export class SyntheticExecutor implements AgentExecutor {
       return;
     }
 
+    // Admission gate BEFORE the first output state transition (AC 3): a
+    // principal revoked between acceptance and execution never reaches the
+    // output path. submitted → canceled is a legal transition.
+    if (!this.admitOutput(taskId, contextId, eventBus)) return;
+
     // Legal lifecycle progression (TASK_LIFECYCLE §3): the persisted state
     // path must always move submitted → working before results, so every
     // TaskStore save lands on a legal transition (P1-02 strict state
@@ -138,6 +156,13 @@ export class SyntheticExecutor implements AgentExecutor {
         metadata: chunkMetadata('chunk-1', CHUNK_1, 0),
       },
     });
+
+    // Admission gate before the second chunk: revocation mid-execution
+    // closes further output admission and settles the task CANCELED
+    // (working → canceled is legal; TASK_LIFECYCLE §8 权限撤销立即关闭
+    // 后续输出准入并触发内部取消).
+    if (!this.admitOutput(taskId, contextId, eventBus)) return;
+
     eventBus.publish({
       kind: 'artifactUpdate',
       data: {
@@ -158,6 +183,29 @@ export class SyntheticExecutor implements AgentExecutor {
         metadata: undefined,
       },
     });
+  }
+
+  /**
+   * Consults the authorization gate; when admission is denied, publishes the
+   * CANCELED settlement and returns false so the caller emits nothing else.
+   * Without a gate (plain synthetic protocol runs) admission always passes.
+   */
+  private admitOutput(
+    taskId: string,
+    contextId: string,
+    eventBus: ExecutionEventBus,
+  ): boolean {
+    if (this.authorizationGate === undefined) return true;
+    const decision = this.authorizationGate(taskId);
+    if (decision.allowed) return true;
+    const canceled: TaskStatusUpdateEvent = {
+      taskId,
+      contextId,
+      status: statusOf(TaskState.TASK_STATE_CANCELED),
+      metadata: undefined,
+    };
+    eventBus.publish({ kind: 'statusUpdate', data: canceled });
+    return false;
   }
 
   async cancelTask(taskId: string, eventBus: ExecutionEventBus): Promise<void> {
