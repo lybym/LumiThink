@@ -49,7 +49,7 @@ import time
 
 from config.logger import setup_logging
 
-from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType, ContentType
+# Native ConnectionHandler.chat owns TTS queue messages.
 
 TAG = __name__
 logger = setup_logging()
@@ -336,6 +336,8 @@ class LLMProvider:
       turn_timeout_s: bounded wait for the gateway turn (default 60).
     """
 
+    supports_cancel_check = True
+
     def __init__(self, config):
         endpoint = config.get("gateway_socket")
         if not endpoint or not isinstance(endpoint, str):
@@ -346,18 +348,6 @@ class LLMProvider:
             raise ValueError(f"lumithink LLM: env {token_env} must carry the internal transport token")
         self._endpoint = endpoint
         self._turn_timeout_s = float(config.get("turn_timeout_s", 60))
-        # E2E-08 (issue #58) sentence admission pacing: minimum wall-clock
-        # interval between two enqueued sentences of one turn. 0 (default) =
-        # unpaced (CI semantics unchanged). The pinned server opens ONE
-        # vendor TTS session per text item (enable_ws_reuse must stay False),
-        # so an unpaced burst opens overlapping vendor sessions and trips the
-        # vendor concurrency guard (observed live: volcano 55000000 on the
-        # SECOND session ~11s into a turn whose 17 admitted sentences arrived
-        # within ~11s). Pacing admissions to speaking rate keeps at most one
-        # vendor session in flight — the same natural pacing the direct LLM
-        # chain gets from token-level streaming.
-        self._pace_min_interval_s = float(config.get("sentence_pace_min_interval_s", 0) or 0)
-        self._pace_audio_s_per_char = float(config.get("sentence_pace_audio_s_per_char", 0.32) or 0.32)
         self._client = _BridgeClient(endpoint, token)
         self._client.attach_provider(self)
         self._control = _ControlWorker()
@@ -369,7 +359,7 @@ class LLMProvider:
     # Upstream LLM provider interface (core/providers/llm/base.py)
     # ------------------------------------------------------------------
 
-    def response(self, session_id, dialogue):
+    def response(self, session_id, dialogue, cancel_check=None):
         """Stream LumiThink's fence-stamped response sentences.
 
         `dialogue` carries the upstream conversation history; ONLY the last
@@ -409,13 +399,15 @@ class LLMProvider:
         deadline = time.time() + self._turn_timeout_s
         try:
             while True:
+                if state.closed or (cancel_check is not None and cancel_check()):
+                    return
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     raise BridgeTransportError("gateway turn timed out")
                 try:
-                    frame = waiter.get(timeout=remaining)
+                    frame = waiter.get(timeout=min(remaining, 0.25))
                 except queue.Empty:
-                    raise BridgeTransportError("gateway turn timed out")
+                    continue
                 kind = frame.get("kind")
                 if kind == "transport_lost":
                     raise BridgeTransportError("bridge transport lost mid-turn")
@@ -429,11 +421,10 @@ class LLMProvider:
                 if kind == "tts_sentence":
                     text = frame.get("text")
                     if isinstance(text, str) and text:
-                        if not self._pace_before_enqueue(state, text):
-                            # Aborted while pacing: stop admitting; the
-                            # server's own abort path owns the device stop.
-                            break
-                        self._enqueue_sentence(state, text)
+                        # Native ConnectionHandler.chat owns FIRST/TEXT/LAST.
+                        # Writing to its TTS queue here as well duplicates the
+                        # sentence and can reset an active encoder/session.
+                        state.sentence_started = True
                         yield text
                     continue
                 if kind == "tts_end":
@@ -455,63 +446,8 @@ class LLMProvider:
         return None
 
     # ------------------------------------------------------------------
-    # TTS queue feeding (the pinned server owns the Opus/device protocol)
+    # TTS termination handling (native chat owns the queue and device protocol)
     # ------------------------------------------------------------------
-
-    def _pace_before_enqueue(self, state, text):
-        """Audio-completion backpressure (E2E-08, issue #58).
-
-        Returns True when admission may proceed, False when the turn was
-        aborted/closed while waiting. Fixed-interval pacing proved
-        insufficient live (each sentence's audio plays longer than the
-        interval, so vendor sessions still overlapped → volcano 55000000).
-        THIS pacing waits until the REAL Opus frames of the PREVIOUS sentence
-        have actually been delivered to the device (lumi_on_audio_frame
-        accounting): estimated frames = ceil(chars * seconds_per_char /
-        frame_duration), with a generous cap so a stalled vendor session
-        cannot deadlock the turn. config `sentence_pace_audio_s_per_char`
-        (default 0.32) tunes the speaking-rate estimate; a floor interval
-        `sentence_pace_min_interval_s` still applies between admissions.
-        """
-        prev_text = getattr(state, "last_enqueued_text", None)
-        if prev_text:
-            s_per_char = float(getattr(self, "_pace_audio_s_per_char", 0.32))
-            frame_s = 0.06
-            needed = max(1, int((len(prev_text) * s_per_char) / frame_s) + 2)
-            base = getattr(state, "pace_base_frames", 0)
-            deadline = time.time() + min(needed * frame_s * 3 + 15.0, 180.0)
-            while (state.audio_frames - base) < needed:
-                if state.closed or state.current_turn is None:
-                    return False
-                if time.time() > deadline:
-                    break
-                time.sleep(0.1)
-        now = time.time()
-        last = getattr(state, "last_enqueue_ts", None)
-        wait_until = (last + self._pace_min_interval_s) if last else now
-        while time.time() < wait_until:
-            if state.closed or state.current_turn is None:
-                return False
-            time.sleep(0.1)
-        state.last_enqueue_ts = time.time()
-        state.pace_base_frames = state.audio_frames
-        state.last_enqueued_text = text
-        return True
-
-    def _enqueue_sentence(self, state, text):
-        conn = state.conn
-        try:
-            first = not state.sentence_started
-            state.sentence_started = True
-            conn.tts.tts_text_queue.put(TTSMessageDTO(
-                sentence_id=getattr(conn, "sentence_id", None) or "",
-                sentence_type=SentenceType.FIRST if first else SentenceType.MIDDLE,
-                content_type=ContentType.TEXT,
-                content_detail=text,
-            ))
-        except Exception:
-            # A TTS-queue fault must never crash the bridge thread.
-            pass
 
     def _enqueue_end(self, state, reason):
         conn = state.conn
@@ -526,14 +462,9 @@ class LLMProvider:
                 state.sentence_started = False
                 state.current_turn = None
                 return
-            if state.sentence_started:
-                conn.tts.tts_text_queue.put(TTSMessageDTO(
-                    sentence_id=getattr(conn, "sentence_id", None) or "",
-                    sentence_type=SentenceType.LAST,
-                    content_type=ContentType.ACTION,
-                ))
+            # Native chat sends LAST after this generator returns. The audio
+            # stop hook still needs current_turn for delivery accounting.
             state.sentence_started = False
-            state.current_turn = None
         except Exception:
             pass
 
@@ -675,6 +606,7 @@ class LLMProvider:
         if state is None:
             return
         self._flush_audio_locked(state, turn_id=state.current_turn)
+        state.current_turn = None
 
     def _account_audio(self, session_id, packet):
         if packet is None:

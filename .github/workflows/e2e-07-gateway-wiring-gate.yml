@@ -106,6 +106,9 @@ jobs:
             deploy/xiaozhi/probe_e2e11.py
           echo "py_compile OK (module, installer, stub, probes)"
 
+      - name: Bridge yields text once and preserves delivery accounting
+        run: python3 tests/deploy/test_gateway_bridge_tts.py
+
       - name: gateway-bridge tier template — bridge LLM only, loopback, token by env name
         shell: bash
         run: |
