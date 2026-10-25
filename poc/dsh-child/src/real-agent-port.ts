@@ -55,6 +55,18 @@ import type {
 } from '../../../lib/domain/voice/bridge/agent-port.ts'
 import { buildChildEnv } from './child-env.ts'
 
+/**
+ * E2E-08 (issue #58): per-PORT-PROCESS boot epoch. The worker's DSH-side
+ * session identity must be fresh per rebuild AND per port boot: when the
+ * gateway host restarts against a PERSISTENT dshHome (operator deployment),
+ * the DSH runtime reloads its persisted sessions and a counter-only `#w<n>`
+ * suffix re-mints identities the persisted store already holds (observed
+ * live: worker_error "session ... already exists" on the first create after
+ * a gateway restart). The boot epoch salts every minted id so identities can
+ * never collide with a previous port process's persisted store.
+ */
+const PORT_BOOT_EPOCH = randomBytes(4).toString('hex')
+
 // ---------------------------------------------------------------------------
 // Profile materialization
 // ---------------------------------------------------------------------------
@@ -152,6 +164,9 @@ export interface RealAgentPortOptions {
   readonly childBootTimeoutMs?: number
   /** Bounded per-request control reply wait (followup/cancel/dispose). Default 15000ms. */
   readonly controlReplyTimeoutMs?: number
+  /** Finite idle reclamation; active attempts and boot/control requests are excluded. */
+  readonly idleWorkerTimeoutMs?: number
+  readonly idleWorkerReapIntervalMs?: number
   /** Extra worker-child environment entries (e.g. the named fault injections). */
   readonly workerEnv?: Readonly<Record<string, string>>
   /** Inject the worker child module path (tests may point at the same file). */
@@ -162,7 +177,7 @@ export interface WorkerFaultInfo {
   readonly sessionKey: string
   readonly code: 'worker_crashed'
   /** Bounded structured reason; never carries prompt or model text. */
-  readonly detail: 'process_exit' | 'boot_timeout' | 'protocol_violation' | 'control_timeout' | 'request_failed'
+  readonly detail: 'process_exit' | 'boot_timeout' | 'protocol_violation' | 'control_timeout' | 'request_failed' | 'idle_reaped'
   readonly exitCode: number | null
   /** Bounded control-error message when the fault came from a failed reply. */
   readonly message?: string
@@ -193,6 +208,7 @@ interface WorkerState {
   dshSessionId: string
   child: ChildProcess | null
   ready: boolean
+  readonly readyWaiters: ((ready: boolean) => void)[]
   exited: boolean
   exitCode: number | null
   disposedByRequest: boolean
@@ -202,6 +218,14 @@ interface WorkerState {
   handle: RealBridgeHandle
   bootTimer: NodeJS.Timeout | null
   protocolViolations: number
+  /**
+   * E2E-08 (issue #58): last activity timestamp (ms). The idle reaper disposes
+   * workers whose session went quiet — one locked DSH runtime per session is a
+   * full runtime process; unreaped idle workers accumulated across turns and
+   * OOM-killed the gateway host (observed live). Touched on spawn, every
+   * control request, every stream/durable frame and every status event.
+   */
+  lastActiveAt: number
 }
 
 /** Full internal (and test-observable) handle state: ids and counters only. */
@@ -273,6 +297,38 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
 
   const workers = new Map<string, WorkerState>()
   const faultListeners: ((info: WorkerFaultInfo) => void)[] = []
+  /**
+   * E2E-08 (issue #58): the idle reaper. Each worker is a full locked DSH
+   * runtime process; unreaped idle workers accumulated across turns and
+   * OOM-killed the gateway host (observed live). A worker whose session went
+   * quiet for IDLE_REAP_MS is disposed through its own graceful dispose path
+   * (dispose + shutdown requests, then SIGKILL backstop); the Bridge's
+   * recovery design rebuilds it on the next turn (fresh process, confirmed
+   * identity only). The reaper interval is unref'd so it never holds the
+   * process open.
+   */
+  const idleReapMs = options.idleWorkerTimeoutMs ?? 120_000
+  const idleReapIntervalMs = options.idleWorkerReapIntervalMs ?? 30_000
+  if (![idleReapMs, idleReapIntervalMs].every(value => Number.isFinite(value) && value > 0)) {
+    throw new Error('invalid_idle_worker_limit')
+  }
+  const reaper = setInterval(() => {
+    const now = Date.now()
+    for (const [sessionKey, state] of [...workers.entries()]) {
+      if (state.exited || state.child === null) continue
+      const handleState = state.handle.state
+      if (handleState.disposed || handleState.crashed || !state.ready) continue
+      if (isHandleRunning(handleState) || state.pending.size > 0) continue
+      const idleMs = now - state.lastActiveAt
+      if (idleMs <= idleReapMs) continue
+      state.lastActiveAt = now // reap exactly once per idle window
+      process.stdout.write(`[real-agent-port] idle worker reaped session=${sessionKey} idleMs=${idleMs}\n`)
+      // Follow the same fault/quarantine path as a crash, so the Bridge
+      // can rebuild the logical session instead of retaining a dead handle.
+      quarantine(state, 'idle_reaped')
+    }
+  }, idleReapIntervalMs)
+  reaper.unref?.()
   /** Fresh DSH session identity per worker rebuild (issue #52 recovery: bind confirmed identity only, never replay). */
   let workerCounter = 0
 
@@ -287,6 +343,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
   }
 
   function sendRequest(state: WorkerState, request: WorkerRequest): void {
+    state.lastActiveAt = Date.now()
     const child = state.child
     if (child === null || child.stdin === null || state.exited) {
       throw new Error('worker_fault')
@@ -295,12 +352,42 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
   }
 
   /** Send one control request and await its bounded reply. */
-  function request(
+  async function request(
     state: WorkerState,
     op: WorkerRequest['op'],
     extra: Record<string, unknown> = {},
     timeoutMs = controlReplyTimeoutMs,
   ): Promise<{ readonly ok: boolean; readonly code?: string; readonly message?: string }> {
+    // Profile boot may consume stdin before the control reader is mounted.
+    // Queue control commands until ready; their reply deadline starts only
+    // after boot, which already has its own bounded timeout.
+    if (!state.ready) {
+      let bootWaitTimedOut = false
+      const ready = await new Promise<boolean>((resolve) => {
+        if (state.exited || state.child === null) {
+          resolve(false)
+          return
+        }
+        // Stop verification/disposal retain their short deadline even during
+        // boot. Only startup commands may use the full boot window.
+        let timer: NodeJS.Timeout | undefined
+        const onReady = (ready: boolean) => {
+          if (timer !== undefined) clearTimeout(timer)
+          resolve(ready)
+        }
+        state.readyWaiters.push(onReady)
+        if (op !== 'create' && op !== 'followup') {
+          timer = setTimeout(() => {
+            const index = state.readyWaiters.indexOf(onReady)
+            if (index !== -1) state.readyWaiters.splice(index, 1)
+            bootWaitTimedOut = true
+            resolve(false)
+          }, timeoutMs)
+          timer.unref?.()
+        }
+      })
+      if (!ready) return { ok: false, code: bootWaitTimedOut ? 'control_timeout' : 'worker_fault' }
+    }
     const id = state.nextRequestId
     state.nextRequestId += 1
     return new Promise((resolve) => {
@@ -321,6 +408,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
   }
 
   function handleWorkerEvent(state: WorkerState, raw: string): void {
+    state.lastActiveAt = Date.now()
     let event: WorkerEvent
     try {
       const parsed: unknown = JSON.parse(raw)
@@ -342,6 +430,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
           clearTimeout(state.bootTimer)
           state.bootTimer = null
         }
+        for (const resolve of state.readyWaiters.splice(0)) resolve(true)
         return
       }
       case 'reply': {
@@ -542,6 +631,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
   }
 
   function killWorker(state: WorkerState): void {
+    for (const resolve of state.readyWaiters.splice(0)) resolve(false)
     const child = state.child
     if (child === null) return
     state.child = null
@@ -580,6 +670,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       dshSessionId: sessionKey,
       child: null,
       ready: false,
+      readyWaiters: [],
       exited: false,
       exitCode: null,
       disposedByRequest: false,
@@ -589,6 +680,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       handle: null as unknown as RealBridgeHandle,
       bootTimer: null,
       protocolViolations: 0,
+      lastActiveAt: Date.now(),
     }
     const handle = createHandle(state, handleState)
     state.handle = handle
@@ -630,6 +722,7 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       /* spawn failure surfaces through exit/boot-timeout paths */
     })
     child.on('exit', (code) => {
+      for (const resolve of state.readyWaiters.splice(0)) resolve(false)
       state.exited = true
       state.exitCode = code
       if (state.bootTimer !== null) {
@@ -813,12 +906,13 @@ export function createRealCordisAgentPort(options: RealAgentPortOptions): RealCo
       // Register the agent inside the child BEFORE any followup can arrive:
       // the worker processes control requests strictly in order, so a
       // runPrompt issued right after this call still handles after `create`.
-      // The DSH-side session identity is FRESH per worker rebuild: a rebuilt
-      // worker must not collide with the persisted identity of the previous
-      // worker's runtime (docs/VOICE_RUNTIME.md §7 — recovery binds the
+      // The DSH-side session identity is FRESH per worker rebuild AND per
+      // port boot (PORT_BOOT_EPOCH above): a rebuilt worker — or a gateway
+      // restart against a persistent dshHome — must never collide with a
+      // persisted identity (docs/VOICE_RUNTIME.md §7 — recovery binds the
       // confirmed logical session only, replays nothing).
       workerCounter += 1
-      const dshSessionId = `${sessionKey}#w${workerCounter}`
+      const dshSessionId = `${sessionKey}#w${workerCounter}e${PORT_BOOT_EPOCH}`
       state.dshSessionId = dshSessionId
       void request(state, 'create', { sessionId: dshSessionId }).then((reply) => {
         if (!reply.ok && !state.handle.state.crashed && !state.handle.state.disposed) {

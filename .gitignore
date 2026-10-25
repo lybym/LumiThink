@@ -1,0 +1,17 @@
+# ---- LumiThink research library runtime data (never commit) -------------
+data/research-library/
+research-library/.tmp-test/
+research-library/.probe.txt
+
+# ---- general hygiene ------------------------------------------------------
+node_modules/
+.env
+.env.*
+*.log
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+.pnpm-store/
+.next/
+*.tsbuildinfo

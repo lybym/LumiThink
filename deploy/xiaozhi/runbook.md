@@ -322,6 +322,22 @@ python3 deploy/xiaozhi/gateway_bridge/install_bridge.py \
 
 ### 11.5 服务端侧可复现实验脚本（与实机记录并行的机器面）
 
+#### 11.5.1 真实模型路由（E2E-08 运营者 opt-in；`lib/server/gateway-model-route.ts`）
+
+real 档网关宿主的模型路由缺省仍是 CI 同款合成 Messages mock。运营者显式提供
+E2E-03 激活记录（`LUMITHINK_MODEL_ROUTE=real` + 全量 `LUMITHINK_REAL_PROVIDER_*`
++ 请求时解析的 `LUMITHINK_MODEL_PROVIDER_KEY`）后，`scripts/xiaozhi/gateway-host.ts`
+经已评审的 `parseRealProviderActivation → buildRealProviderGateway →
+gateway-egress-proxy` 链路把**真实锁定版 DSH worker** 的模型路由指向环回 egress
+proxy（`workerEnv.DSH_BRIDGE_MODEL_BASE_URL`；钉死 profile 优先读取该 env）。
+凭证约束不变：供应商密钥只存在于宿主侧 keySource 闭包，worker 子进程仅持钉死
+占位符密钥；激活记录缺失/畸形 → 构造前 fail-closed（仅报变量名）。
+供应商线协议 = Anthropic Messages 兼容形态（`POST {baseURL}/v1/messages`，
+`x-api-key`）；运营者供应商端点必须提供该形态（如百炼 Anthropic 兼容端点，
+baseURL 为其 `/apps/anthropic` 形态根，适配器自动追加 `/v1/messages`）。
+离线全链路证明：`tests/server/gateway-model-route.spec.ts`（worker→proxy→
+gateway→provider→vendor 双凭证分离 + 401/400 守卫）。
+
 ```bash
 # 真实 DSH worker 应答的 10 连轮（协议模拟设备；同 CI real 档步骤）
 sudo systemctl start xiaozhi-server   # §2 部署；gateway-bridge 档位
@@ -349,6 +365,16 @@ done
 | 2. 冷启动/重连/再配网/断网恢复客观留证 | 服务端重启续接 + 租约/会话语义（既有 CI） | §11.3 步 4 + §11.4 故障恢复记录 |
 | 3. 监护人绑定有效；未绑定/盗用无法接入；无凭据暴露 | 未绑定负例探针（新）+ 鉴权映射套件 + 凭证非 MAC 派生专测 | 实机复核随 §11.4 |
 | 4. 不引入 XVF3800/四麦/新板级；AEC/打断归 E2E-09 | 本 PR 零硬件面改动（文档记录） | AEC 效果实测与打断可靠性归 E2E-09（§12） |
+
+> 实机执行（E2E-08 运营者环境）如实口径：本机部署为**运营者笔记本容器拓扑**
+>（非 §2 systemd 主机）：钉死镜像容器 + 既有运营者覆盖（Volcano V3 真实
+> ASR/TTS 等）之上叠加 §3.7 桥接；设备 OTA 经 LAN 桥（`http://192.168.1.66:8002`
+> → 容器 OTA，NVS 不变，http 形态如实记录）；五个注册 fork patch 经
+> `install_bridge.py` 对**容器实际文件**逐字锚点应用（运营者 connection.py /
+> helloHandle.py 覆盖内的锚点逐字存活，无语义合成）；网关宿主运行于容器内
+> Linux（桥客户端受保护传输仅 AF_UNIX，无 TCP 选项）；§11.5.1 真实模型路由
+> 指向运营者百炼 Anthropic 兼容端点（密钥只存在宿主侧闭包）。以上每项偏离
+> §2/§3 基线的事实随实机证据一并记录，不标 PASS 于未执行项。
 
 ## 12. E2E-09 现有固件 AEC 打断实测（issue #59）：打断/AEC 验收 runbook
 
@@ -585,7 +611,7 @@ LUMITHINK_GATEWAY_AGENT=real node --experimental-strip-types scripts/xiaozhi/gat
 
 ### 14.6 空环境重建、健康检查、受控回滚与生产控制面（DoD 4）
 
-- **空环境重建**：按 §2（小智服务端）与 [deploy/runbook.md §2](../deploy/runbook.md)（LumiThink 主应用）在全新主机完整执行一次，记录每步时间线与验证输出（`GATEWAY-HOST READY`、healthcheck、probe_hello）。
+- **空环境重建**：按 §2（小智服务端）与 [deploy/runbook.md §2](../runbook.md)（LumiThink 主应用）在全新主机完整执行一次，记录每步时间线与验证输出（`GATEWAY-HOST READY`、healthcheck、probe_hello）。
 - **健康检查**：`deploy/xiaozhi/healthcheck.sh` + 主应用 `/api/health` 与 manifest 版本一致性核对（RELEASE_GATE Gate 3 口径）。
 - **受控回滚**：§8（版本切回 + 重渲染 + 重启）；自动化面证据 = `r1-deployment-gate.yml` upgrade-rollback drill artifact（`allPhasesPassed`）；回退前确认目标版本能读当前快照（RELEASE_GATE Gate 4）。
 - **生产控制面实测**：systemd 单元状态抽查（`systemctl status`）、Caddy 访问日志抽查、结构化追踪/审计字段抽查（**脱敏口径同 §7**：只记 id/版本/计数，不记正文）；记录为证据链接。

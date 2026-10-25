@@ -28,6 +28,7 @@ const UP_ATTEMPT_ID = 'up-attempt-e2e03fake'
 const STEP_ID = 't1s1'
 
 interface FakePlan {
+  readonly bootDelayMs?: number
   readonly create?: readonly string[]
   readonly followup?: readonly string[]
   readonly cancel?: readonly string[]
@@ -47,6 +48,7 @@ function parsePlan(raw: string | undefined): FakePlan {
 
 const plan = parsePlan(process.env[PLAN_ENV])
 let sessionId: string | null = null
+let ready = false
 
 function emit(event: WorkerEvent): void {
   process.stdout.write(`${JSON.stringify(event)}\n`)
@@ -99,7 +101,6 @@ function handleRequest(request: WorkerRequest): void {
   switch (request.op) {
     case 'create':
       sessionId = request.sessionId
-      emit({ ev: 'ready', profile: 'fake-bridge-worker', pid: process.pid })
       reply(request.id, true)
       emitAll(plan.create)
       return
@@ -140,6 +141,9 @@ function handleRequest(request: WorkerRequest): void {
 const lineReader = createInterface({ input: process.stdin, terminal: false })
 let requestQueue: Promise<void> = Promise.resolve()
 lineReader.on('line', (line) => {
+  // A profile may have stdin consumers before its control reader is ready.
+  // Deliberately discard early commands to exercise the parent's boot gate.
+  if (!ready) return
   const trimmed = line.trim()
   if (trimmed.length === 0) return
   let request: WorkerRequest
@@ -150,3 +154,7 @@ lineReader.on('line', (line) => {
   }
   requestQueue = requestQueue.then(() => handleRequest(request)).catch(() => undefined)
 })
+setTimeout(() => {
+  ready = true
+  emit({ ev: 'ready', profile: 'fake-bridge-worker', pid: process.pid })
+}, plan.bootDelayMs ?? 0)

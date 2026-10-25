@@ -14,7 +14,7 @@
 #   pipe + token; NO TCP) → LumiThink Voice Gateway Adapter stack →
 #   Orchestrator → REAL Bridge IPC → DSH runtime
 #     ← fence-stamped TTS sentences (Output-Gate-approved text) ←
-#   this module (tts_text_queue) → pinned server TTS engine → Opus → device.
+#   this module (yield text) → native chat TTS queue → TTS engine → Opus → device.
 #
 # FRAME ORDERING GUARANTEE: every gateway-bound frame (device_hello,
 # session_issued, abort, turn_prompt, audio_delivered) is submitted to ONE
@@ -49,7 +49,7 @@ import time
 
 from config.logger import setup_logging
 
-from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType, ContentType
+# Native ConnectionHandler.chat owns TTS queue messages.
 
 TAG = __name__
 logger = setup_logging()
@@ -336,6 +336,8 @@ class LLMProvider:
       turn_timeout_s: bounded wait for the gateway turn (default 60).
     """
 
+    supports_cancel_check = True
+
     def __init__(self, config):
         endpoint = config.get("gateway_socket")
         if not endpoint or not isinstance(endpoint, str):
@@ -357,7 +359,7 @@ class LLMProvider:
     # Upstream LLM provider interface (core/providers/llm/base.py)
     # ------------------------------------------------------------------
 
-    def response(self, session_id, dialogue):
+    def response(self, session_id, dialogue, cancel_check=None):
         """Stream LumiThink's fence-stamped response sentences.
 
         `dialogue` carries the upstream conversation history; ONLY the last
@@ -397,13 +399,15 @@ class LLMProvider:
         deadline = time.time() + self._turn_timeout_s
         try:
             while True:
+                if state.closed or (cancel_check is not None and cancel_check()):
+                    return
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     raise BridgeTransportError("gateway turn timed out")
                 try:
-                    frame = waiter.get(timeout=remaining)
+                    frame = waiter.get(timeout=min(remaining, 0.25))
                 except queue.Empty:
-                    raise BridgeTransportError("gateway turn timed out")
+                    continue
                 kind = frame.get("kind")
                 if kind == "transport_lost":
                     raise BridgeTransportError("bridge transport lost mid-turn")
@@ -417,7 +421,10 @@ class LLMProvider:
                 if kind == "tts_sentence":
                     text = frame.get("text")
                     if isinstance(text, str) and text:
-                        self._enqueue_sentence(state, text)
+                        # Native ConnectionHandler.chat owns FIRST/TEXT/LAST.
+                        # Writing to its TTS queue here as well duplicates the
+                        # sentence and can reset an active encoder/session.
+                        state.sentence_started = True
                         yield text
                     continue
                 if kind == "tts_end":
@@ -439,23 +446,8 @@ class LLMProvider:
         return None
 
     # ------------------------------------------------------------------
-    # TTS queue feeding (the pinned server owns the Opus/device protocol)
+    # TTS termination handling (native chat owns the queue and device protocol)
     # ------------------------------------------------------------------
-
-    def _enqueue_sentence(self, state, text):
-        conn = state.conn
-        try:
-            first = not state.sentence_started
-            state.sentence_started = True
-            conn.tts.tts_text_queue.put(TTSMessageDTO(
-                sentence_id=getattr(conn, "sentence_id", None) or "",
-                sentence_type=SentenceType.FIRST if first else SentenceType.MIDDLE,
-                content_type=ContentType.TEXT,
-                content_detail=text,
-            ))
-        except Exception:
-            # A TTS-queue fault must never crash the bridge thread.
-            pass
 
     def _enqueue_end(self, state, reason):
         conn = state.conn
@@ -470,14 +462,9 @@ class LLMProvider:
                 state.sentence_started = False
                 state.current_turn = None
                 return
-            if state.sentence_started:
-                conn.tts.tts_text_queue.put(TTSMessageDTO(
-                    sentence_id=getattr(conn, "sentence_id", None) or "",
-                    sentence_type=SentenceType.LAST,
-                    content_type=ContentType.ACTION,
-                ))
+            # Native chat sends LAST after this generator returns. The audio
+            # stop hook still needs current_turn for delivery accounting.
             state.sentence_started = False
-            state.current_turn = None
         except Exception:
             pass
 
@@ -619,6 +606,7 @@ class LLMProvider:
         if state is None:
             return
         self._flush_audio_locked(state, turn_id=state.current_turn)
+        state.current_turn = None
 
     def _account_audio(self, session_id, packet):
         if packet is None:

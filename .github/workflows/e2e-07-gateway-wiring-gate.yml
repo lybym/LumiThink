@@ -51,6 +51,7 @@ on:
     paths:
       - 'deploy/xiaozhi/**'
       - 'lib/server/voice-gateway-wiring.ts'
+      - 'lib/server/gateway-host-shutdown.ts'
       - 'lib/server/voice-gateway-internal-transport.ts'
       - 'lib/server/voice-gateway-composition.ts'
       - 'lib/domain/voice/bridge/stream-gate.ts'
@@ -58,12 +59,14 @@ on:
       - 'tests/server/voice-gateway-*.spec.ts'
       - 'tests/domain/voice/bridge/stream-gate-sink.spec.ts'
       - 'poc/dsh-child/src/**'
+      - 'tests/deploy/test_gateway_bridge_tts.py'
       - '.github/workflows/e2e-07-gateway-wiring-gate.yml'
   push:
     branches: [main]
     paths:
       - 'deploy/xiaozhi/**'
       - 'lib/server/voice-gateway-wiring.ts'
+      - 'lib/server/gateway-host-shutdown.ts'
       - 'lib/server/voice-gateway-internal-transport.ts'
       - 'lib/server/voice-gateway-composition.ts'
       - 'lib/domain/voice/bridge/stream-gate.ts'
@@ -71,6 +74,7 @@ on:
       - 'tests/server/voice-gateway-*.spec.ts'
       - 'tests/domain/voice/bridge/stream-gate-sink.spec.ts'
       - 'poc/dsh-child/src/**'
+      - 'tests/deploy/test_gateway_bridge_tts.py'
       - '.github/workflows/e2e-07-gateway-wiring-gate.yml'
   workflow_dispatch:
 
@@ -105,6 +109,9 @@ jobs:
             deploy/xiaozhi/probe_e2e09.py \
             deploy/xiaozhi/probe_e2e11.py
           echo "py_compile OK (module, installer, stub, probes)"
+
+      - name: Bridge yields text once and preserves delivery accounting
+        run: python3 tests/deploy/test_gateway_bridge_tts.py
 
       - name: gateway-bridge tier template — bridge LLM only, loopback, token by env name
         shell: bash

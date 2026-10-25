@@ -24,7 +24,7 @@ P0-01 → P0-02 / P0-03 → P0-04 Gate → P1-01 → P1-02 → P1-03 → P1-04 �
 - [#60](https://github.com/lybym/LumiThink/issues/60) 继续承接 P3–P5 家庭专业场景与真实权限验收。
 - [#61](https://github.com/lybym/LumiThink/issues/61) 承接 P5 可靠性与删除恢复；[#62](https://github.com/lybym/LumiThink/issues/62) 承接 P5 发布决策。
 - 旧 [#50](https://github.com/lybym/LumiThink/issues/50) 总线范围由 A2A 计划替代，保留讨论和历史证据；不硬删除。
-- [PR #76](https://github.com/lybym/LumiThink/pull/76) 与未同步部署补丁需单独审阅，不能随本次文档合并自动进入基线。
+- [PR #76](https://github.com/lybym/LumiThink/pull/76) 的代码候选已由备份分支集成收敛；剩余部署补丁与版本差异见 [集成记录](reviews/2026-10-25-tts-baseline-reconciliation.md)，仍由 P0 核对，代码合并不等于部署 Gate 通过。
 
 ## 验收规则
 

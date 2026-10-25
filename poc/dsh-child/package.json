@@ -17,7 +17,7 @@
     "test:e2e02:gate": "node --experimental-strip-types src/e2e02-gate-cli.ts summarize reports/e2e02-bridge.xml && node --experimental-strip-types src/e2e02-gate-cli.ts check reports/e2e02-bridge.xml",
     "test:e2e02:sanitize": "node --experimental-strip-types src/sanitize-artifact.ts reports/e2e02-bridge.xml reports/e2e02-bridge.sanitized.xml",
     "test:e2e02": "pnpm run test:e2e02:run && pnpm run test:e2e02:gate && pnpm run test:e2e02:sanitize",
-    "test:e2e03:run": "node -e \"fs.mkdirSync('reports',{recursive:true})\" && node --experimental-strip-types --test-isolation=none --test --test-reporter=junit --test-reporter-destination=reports/e2e03-gateway.xml --test-reporter=spec --test-reporter-destination=stdout tests/bridge/e2e03-gateway-route.spec.ts tests/bridge/real-agent-port-failure-guard.spec.ts",
+    "test:e2e03:run": "node -e \"fs.mkdirSync('reports',{recursive:true})\" && node --experimental-strip-types --test-isolation=none --test --test-reporter=junit --test-reporter-destination=reports/e2e03-gateway.xml --test-reporter=spec --test-reporter-destination=stdout tests/bridge/e2e03-gateway-route.spec.ts tests/bridge/real-agent-port-failure-guard.spec.ts tests/bridge/worker-ready.spec.ts",
     "test:e2e03:gate": "node --experimental-strip-types src/e2e03-gate-cli.ts summarize reports/e2e03-gateway.xml && node --experimental-strip-types src/e2e03-gate-cli.ts check reports/e2e03-gateway.xml",
     "test:e2e03:sanitize": "node --experimental-strip-types src/sanitize-artifact.ts reports/e2e03-gateway.xml reports/e2e03-gateway.sanitized.xml",
     "test:e2e03": "pnpm run test:e2e03:run && pnpm run test:e2e03:gate && pnpm run test:e2e03:sanitize",
