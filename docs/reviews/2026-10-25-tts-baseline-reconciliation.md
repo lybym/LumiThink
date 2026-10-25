@@ -44,4 +44,4 @@ launcher 实际在 data/lumithink-runtime/lumithink 启动；顶层备用 gatewa
 
 维护记录报告31项覆盖回归和三项真实TTS接口场景通过；本次只核对结果、源码和哈希，没有重跑或调用真实供应商。当前火山覆盖文件 SHA-256 为 471a726c66a46b0bee606e7aa689597f1c75997e2372dbfb58841a03c36a4723。旧逐文本项独立会话已被后续官方双流重整替代，不能作为当前实现或厂商强制协议结论。
 
-后续：[P0-01 #79](https://github.com/lybym/LumiThink/issues/79) 汇总差异；[P0-02 #80](https://github.com/lybym/LumiThink/issues/80) 锁定版本矩阵；[P0-03 #81](https://github.com/lybym/LumiThink/issues/81) 验证重建及回滚。这些工程任务保持开放，设计仍以 [A2A_DESIGN](../A2A_DESIGN.md) 和 [TASK_LIFECYCLE](../TASK_LIFECYCLE.md) 为准。
+后续：[P0-01 #79](https://github.com/lybym/LumiThink/issues/79) 汇总差异（矩阵见 [P0-01 源码清单冻结矩阵](2026-10-25-p0-01-source-freeze-matrix.md)）；[P0-02 #80](https://github.com/lybym/LumiThink/issues/80) 锁定版本矩阵；[P0-03 #81](https://github.com/lybym/LumiThink/issues/81) 验证重建及回滚。这些工程任务保持开放，设计仍以 [A2A_DESIGN](../A2A_DESIGN.md) 和 [TASK_LIFECYCLE](../TASK_LIFECYCLE.md) 为准。
