@@ -27,6 +27,7 @@
   "exclude": [
     "node_modules",
     "poc",
+    "services",
     "scripts/xiaozhi/gateway-host.ts"
   ]
 }
