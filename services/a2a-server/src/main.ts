@@ -14,7 +14,8 @@ const service = await startA2aService({ config });
 
 console.log(
   `[lumithink-a2a] SYNTHETIC validation service listening on ${service.base} ` +
-    `(P1-01, issue #83; A2A ${config.supportedVersions.join(', ')}; ` +
+    `(P1-01/P1-02, issues #83/#84; A2A ${config.supportedVersions.join(', ')}; ` +
+    `SQLite Task Manager db=${config.dbPath}; ` +
     'synthetic executor only — not a real DSH execution gate)',
 );
 

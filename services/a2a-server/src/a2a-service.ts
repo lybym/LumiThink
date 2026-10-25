@@ -10,8 +10,9 @@
  *   6. jsonRpcParseErrorHandler        — malformed JSON → standard -32700.
  *
  * The SDK handler receives EXACTLY ONE Task Store (see task-manager-port.ts)
- * — the single authoritative write path that P1-02 (#84) will re-implement
- * over the SQLite Task Manager repository.
+ * — since P1-02 (#84) the default is the SQLite Task Manager over the
+ * unified repository (src/task-manager/), the single authoritative write
+ * path. There is no second store and no double write.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -19,7 +20,6 @@ import express from 'express';
 import {
   DefaultExecutionEventBusManager,
   DefaultRequestHandler,
-  InMemoryTaskStore,
   type AgentExecutor,
   type TaskStore,
 } from '@a2a-js/sdk/server';
@@ -29,6 +29,7 @@ import { type A2aServiceConfig } from './config.ts';
 import { buildLumithinkAgentCard } from './lumithink-agent-card.ts';
 import { jsonRpcParseErrorHandler, requireA2aVersion, requireBearerAuth } from './error-map.ts';
 import { SyntheticExecutor } from './synthetic-executor.ts';
+import { SqliteTaskManager } from './task-manager/sqlite-task-manager.ts';
 
 export interface StartA2aServiceOptions {
   config: A2aServiceConfig;
@@ -46,6 +47,8 @@ export interface StartedA2aService {
   server: http.Server;
   agentCard: AgentCard;
   taskStore: TaskStore;
+  /** True when the service created (and owns/closes) the task store. */
+  ownsTaskStore: boolean;
   requestHandler: DefaultRequestHandler;
   executor: AgentExecutor;
   config: A2aServiceConfig;
@@ -57,9 +60,18 @@ export async function startA2aService(
   options: StartA2aServiceOptions,
 ): Promise<StartedA2aService> {
   const { config } = options;
-  // P1-01 stand-in store; P1-02 (#84) replaces it with the SQLite Task
-  // Manager adapter over the unified repository (task-manager-port.ts).
-  const taskStore = options.taskStore ?? new InMemoryTaskStore();
+  // P1-02 (#84): the default store is the SQLite Task Manager — the single
+  // authoritative write path over the unified repository (task-manager/
+  // sqlite-task-manager.ts). There is NO second store: when a caller passes
+  // its own TaskStore, that store replaces the default entirely (never both).
+  let ownsTaskStore = false;
+  let taskStore: TaskStore;
+  if (options.taskStore !== undefined) {
+    taskStore = options.taskStore;
+  } else {
+    taskStore = new SqliteTaskManager({ dbPath: config.dbPath });
+    ownsTaskStore = true;
+  }
   const executor = options.executor ?? new SyntheticExecutor();
   // The handler keeps a reference to this card object; URL fields are
   // finalized in place once the loopback port is bound (P0-02 pattern).
@@ -98,7 +110,7 @@ export async function startA2aService(
     url: base,
   }));
 
-  return { base, server, agentCard, taskStore, requestHandler, executor, config, closed };
+  return { base, server, agentCard, taskStore, ownsTaskStore, requestHandler, executor, config, closed };
 }
 
 export async function stopA2aService(service: StartedA2aService): Promise<void> {
@@ -113,4 +125,10 @@ export async function stopA2aService(service: StartedA2aService): Promise<void> 
     });
   }
   await service.closed;
+  // Close the store the service owns (SQLite Task Manager database) AFTER
+  // the listener is down — the store must never be closed while the handler
+  // can still reach it.
+  if (service.ownsTaskStore && service.taskStore instanceof SqliteTaskManager) {
+    service.taskStore.close();
+  }
 }

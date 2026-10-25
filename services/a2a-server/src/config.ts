@@ -13,6 +13,14 @@
 export const A2A_VALIDATION_DEFAULT_PORT = 3312;
 export const A2A_LOOPBACK_HOST = '127.0.0.1';
 export const A2A_SUPPORTED_VERSIONS: readonly string[] = ['1.0'];
+/**
+ * Default SQLite Task Manager database (P1-02, issue #84). ':memory:' keeps
+ * the standalone validation run stateless and CI-clean (no file writes);
+ * durable validation deployments set LUMITHINK_A2A_VALIDATION_DB to a file
+ * path. This is NOT DATABASE_URL — the A2A server gate keeps that variable
+ * (and every provider credential) unset by contract.
+ */
+export const A2A_VALIDATION_DEFAULT_DB_PATH = ':memory:';
 
 export interface A2aServiceConfig {
   /** Loopback bind port; 0 lets the OS pick an ephemeral port (tests). */
@@ -23,6 +31,8 @@ export interface A2aServiceConfig {
   bearerToken: string;
   /** Declared A2A protocol versions; only '1.0' (R7: never accept 0.3). */
   supportedVersions: readonly string[];
+  /** SQLite Task Manager database path (issue #84); ':memory:' default. */
+  dbPath: string;
 }
 
 export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aServiceConfig {
@@ -43,5 +53,9 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
         'the A2A validation service refuses to start unauthenticated (fail-closed).',
     );
   }
-  return { port, host: A2A_LOOPBACK_HOST, bearerToken, supportedVersions: A2A_SUPPORTED_VERSIONS };
+  const rawDbPath = env.LUMITHINK_A2A_VALIDATION_DB;
+  const dbPath = rawDbPath !== undefined && rawDbPath.trim() !== ''
+    ? rawDbPath.trim()
+    : A2A_VALIDATION_DEFAULT_DB_PATH;
+  return { port, host: A2A_LOOPBACK_HOST, bearerToken, supportedVersions: A2A_SUPPORTED_VERSIONS, dbPath };
 }
