@@ -178,7 +178,7 @@
 ### 8.2 独立性判定（对照 [TASK_LIFECYCLE 恢复契约](../TASK_LIFECYCLE.md)）
 
 - **现状**：台账随快照走（快照内嵌墓碑段）+ 一次性 subject 级重放补偿（宁可过删）+ 旧档恢复强制重放标记。该组合在"恢复旧档"场景下**实测不复活已删数据**（§5），但**台账尚不是独立于可回退快照的持久存储**——若快照文件整体丢失且无归档，墓碑与之一并丢失。
-- **结论**：符合 ADR-0005/R1-08 语义；与 P0-03 验收词"台账独立于可回退快照"的完全形态尚有差距。**完全独立的台账存储（快照外 append-only 持久化）为 P1-08/#88 的实现项**，本 Issue 如实登记，不宣称已达成（PENDING_ARCH → 负责人 #88；Gate 复核 #82）。
+- **结论**：符合 ADR-0005/R1-08 语义；与 P0-03 验收词"台账独立于可回退快照"的完全形态尚有差距。**完全独立的台账存储（快照外 append-only 持久化）为 P1-08/#90 的实现项**，本 Issue 如实登记，不宣称已达成（PENDING_ARCH → 负责人 #90，联动 #88；Gate 复核 #82）。
 
 ### 8.3 恢复开放前清理步骤（固定顺序；缺一不可开放服务）
 
@@ -224,7 +224,7 @@
 | 4 | Bridge 重注册补丁（#79 §2 补丁 8）四要素验证 | **PENDING_VERIFICATION**（D3，阻断 P0 Gate） | 运营者提供部署侧补丁证据；#81 后续 |
 | 5 | 部署 Worker 回收统一配置（D2：120 s vs Infinity） | **PENDING_DECISION**（判定权 #82） | #82 |
 | 6 | v0.9.8 TTS 双流重整可重建交付（D5） | **PENDING_DELIVERY** | #80/#81/#82 链条 |
-| 7 | 删除台账完全独立于快照的持久存储 | **PENDING_ARCH**（现状=快照内嵌+一次性重放，§8.2） | #88（P1-08 实现）；#82 复核 |
+| 7 | 删除台账完全独立于快照的持久存储 | **PENDING_ARCH**（现状=快照内嵌+一次性重放，§8.2） | #90（P1-08 实现，联动 #88）；#82 复核 |
 | 8 | 日预算/磁盘预警实测修订值 | 初值已给（§7），**PENDING_MEASUREMENT** | #91（P1-09）；生产值运营者 |
 | 9 | A2A 验证服务实际监听（3312 端口） | **PENDING**（P1-01/#83 实现；本期仅预留端口/配置/说明，不声称可运行） | #83 |
 | 10 | 本 PR 的 CI 取证 | **COMPLETED（内容 commit `f1da8bb7` 口径）**：push/pull_request 触发异常不产生 runs，以 workflow_dispatch 对全部 6 个 workflow（e2e-04/e2e-07/r0/r1-baseline/r1-deployment/r1-release）派发该 head SHA，check-runs **19/19 success/completed**（run 例：[40177804023](https://github.com/lybym/LumiThink/actions/runs/40177804023)，含 `Linux deployment smoke` 与 `Upgrade/rollback drill` ——即 §10#1 沙箱缺失的构建/启动/进程级烟测在 ubuntu 全部通过）；本 PR 每个 push 的 head SHA 均按同法取证，最终 head 结果见 PR Checks | #81（本 PR 内完成） |
@@ -258,5 +258,5 @@ node --experimental-strip-types p0-03-restore-drill.ts init|erase|final|stop
 ## 13. 覆盖声明
 
 - **仓库侧已完成**：隔离环境定义（端口/数据卷/账户/启动说明，[deploy/validation/](../../deploy/validation/)）；冻结基线隔离重建与一致性核验（SHA-256、typecheck、全量回归、a2a-compat）；脱敏启动/停止证据；真实备份/恢复语义的隔离实跑（含旧档恢复不复活、一次性重放、停机冲刷）；回滚/备份范围/版本校验值矩阵；资源预算逐项初值；删除/撤权台账保管与恢复开放前清理契约；CI 等价取证（6 workflow × head SHA，check-runs 全绿——构建/启动/进程级烟测由 ubuntu runner 补齐本机沙箱缺口）。
-- **PENDING（不得宣称完成）**：§10 全部条目；部署侧（WSLc/实机）重建与实机验证、版本选型收敛（D1/D2/D3/D5）、台账完全独立化（#88）、A2A 服务监听（#83）、日预算实测（#91）。
+- **PENDING（不得宣称完成）**：§10 全部条目；部署侧（WSLc/实机）重建与实机验证、版本选型收敛（D1/D2/D3/D5）、台账完全独立化（#90，联动 #88）、A2A 服务监听（#83）、日预算实测（#91）。
 - 本任务不批准正式发布，不切换现有 UDS，不触碰真实儿童数据/音频/声纹/凭据；所有公开 Issue/PR/CI 内容均为合成数据与结构化事实。
