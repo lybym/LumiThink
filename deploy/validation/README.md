@@ -71,7 +71,7 @@ ss -ltnp | grep 3311        # 必须只出现在 127.0.0.1:3311
 sudo systemctl stop lumithink-validation
 ```
 
-A2A 验证服务本体（3312）**当前不存在监听进程**——P1-01/#83 交付后才在本环境以独立 systemd 单元或独立进程启动；在那之前任何"验证服务已可运行"的表述都不成立。
+A2A 验证服务本体（3312）自 P1-01/#83 起已有仓库交付的独立服务入口（`services/a2a-server`，见 [docs/adr/0013](../../docs/adr/0013-a2a-server-isolated-package.md) 与该包 README），仅绑 `127.0.0.1:3312`，需操作者以 `LUMITHINK_A2A_VALIDATION_TOKEN`（≥16 字符合成凭据，见 `validation.env.example`）显式启动：`pnpm --dir services/a2a-server run start`。**默认仍无监听进程**；本环境是否启动属验证动作，且该服务为合成执行器口径，不改变"未做真实执行 Gate 验收"的边界。
 
 ## 6. 备份 / 恢复 / 回滚（复用既有工具，仅路径不同）
 
