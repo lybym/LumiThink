@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node --experimental-strip-types src/main.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --test-isolation=none tests/official-client-roundtrip.spec.ts tests/protocol-errors.spec.ts tests/stream-resilience.spec.ts tests/service-contract.spec.ts tests/service-entry.spec.ts"
+    "test": "node --test --test-isolation=none tests/official-client-roundtrip.spec.ts tests/protocol-errors.spec.ts tests/stream-resilience.spec.ts tests/service-contract.spec.ts tests/service-entry.spec.ts tests/task-manager-state-machine.spec.ts tests/task-manager-repository.spec.ts tests/task-manager-sdk-bridge.spec.ts"
   },
   "dependencies": {
     "@a2a-js/sdk": "1.3.0",

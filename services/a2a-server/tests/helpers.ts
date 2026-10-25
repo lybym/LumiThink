@@ -18,6 +18,7 @@ export function testConfig(overrides: Partial<A2aServiceConfig> = {}): A2aServic
     host: '127.0.0.1',
     bearerToken: TEST_TOKEN,
     supportedVersions: ['1.0'],
+    dbPath: ':memory:',
     ...overrides,
   };
 }

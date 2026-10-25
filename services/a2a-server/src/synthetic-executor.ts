@@ -114,6 +114,19 @@ export class SyntheticExecutor implements AgentExecutor {
       return;
     }
 
+    // Legal lifecycle progression (TASK_LIFECYCLE §3): the persisted state
+    // path must always move submitted → working before results, so every
+    // TaskStore save lands on a legal transition (P1-02 strict state
+    // machine, issue #84).
+    eventBus.publish({
+      kind: 'statusUpdate',
+      data: {
+        taskId,
+        contextId,
+        status: statusOf(TaskState.TASK_STATE_WORKING),
+        metadata: undefined,
+      },
+    });
     eventBus.publish({
       kind: 'artifactUpdate',
       data: {
