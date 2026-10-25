@@ -40,13 +40,13 @@ pnpm --dir services/a2a-server run start
 
 | 组件 | 内容 |
 | --- | --- |
-| `src/identity/schema.ts` | 独立身份库版本化 schema v1（households/users/memberships/relationships/clients/credentials(仅摘要)/grants/task_bindings/audit + 全局 `revocation_epoch`）；加性 DDL 单事务迁移；未知未来版本拒开（fail-closed）。**Task Manager schema 不动** |
-| `src/identity/identity-store.ts` | 目录播种（严格 bootstrap 校验，fail-closed）、凭据摘要查找、成员关系/监护关系查询、短期授权校验、任务归属绑定（受理时先绑定后落库）、撤销原语（精确 bump epoch）、最小审计 |
-| `src/identity/authorizer.ts` | 双层解析（client + principal/visitor/candidate）、epoch 校验决策缓存（撤销即失效，条目寿命不超过凭据/授权到期）、executor 输出准入门（按当前状态复核） |
-| `src/identity/authorization-policy.ts` | 集中授权函数：同家庭共享事实按关系+操作决定；候选声纹仅共享设备低敏感允许清单；P1 冻结写操作与原始对话读取为拒绝 |
+| `src/identity/schema.ts` | 独立身份库版本化 schema **v2**（households/users/memberships/relationships/clients/credentials(仅摘要)/grants/task_bindings(含受理凭据、提升授权、主体层级归因)/audit + 全局 `revocation_epoch`）；加性 DDL 单事务迁移；未知未来版本拒开（fail-closed）。**Task Manager schema 不动** |
+| `src/identity/identity-store.ts` | 目录播种（严格 bootstrap 校验，含设备客户端 grant 家庭一致性）、凭据摘要查找、成员关系/监护关系查询、短期授权校验、任务归属绑定（受理时先绑定后落库，记录归因）、撤销原语（精确 bump epoch）、最小审计 |
+| `src/identity/authorizer.ts` | 双层解析（client + principal/visitor/candidate）、epoch 校验决策缓存（撤销即失效，条目寿命不超过凭据/授权到期）、executor 输出准入门（按绑定归因全链复核：凭据→客户端→主体→grant→集中策略） |
+| `src/identity/authorization-policy.ts` | 集中授权函数（经准入门接入请求路径）：同家庭共享事实按关系+操作决定；候选声纹仅共享设备低敏感允许清单；P1 冻结写操作与原始对话读取为拒绝 |
 | `src/identity/express-auth.ts` | `requireTwoTierAuth`（401/403 线级语义）、`requireContextAccess`（会话续接守卫）、SDK user 桥、授权 TaskStore 装饰器（绑定/ACL/list 过滤）、StreamRegistry（撤销关闭长流）、IdentityController 门面 |
 
-线级语义（全部标准错误，不新增 A2A 状态/方法）：未知/撤销/过期凭据 → HTTP 401 + `-32000` AUTHENTICATION_REQUIRED（与 P1-01 形状一致）；客户端有效但主体失效或 grant 被拒 → HTTP 403 + `-32000` PERMISSION_DENIED；跨主体任务访问 → SDK 标准 `-32001` TaskNotFound（真实原因入审计）；他人 contextId 续接 → `-32602` + ErrorInfo `CONTEXT_ACCESS_DENIED`。撤销（凭据/成员关系/授权）对缓存、SSE 长流、工具提交与旧上下文即时生效；审计仅含决策事实，不含令牌与正文。设计依据 [ADR-0014](../../docs/adr/0014-a2a-identity-authorization.md)。
+线级语义（全部标准错误，不新增 A2A 状态/方法）：未知/撤销/过期凭据 → HTTP 401 + `-32000` AUTHENTICATION_REQUIRED（与 P1-01 形状一致）；客户端有效但主体失效或 grant 被拒 → HTTP 403 + `-32000` PERMISSION_DENIED；跨主体任务访问 → SDK 标准 `-32001` TaskNotFound（真实原因入审计）；他人 contextId 续接 → `-32602` + ErrorInfo `CONTEXT_ACCESS_DENIED`。撤销（凭据/成员关系/授权）对缓存、SSE 长流、**工具提交（准入门按绑定归因复核完整受理链，Step 05 Review P1 修复）**与旧上下文即时生效；审计仅含决策事实，不含令牌与正文。设计依据 [ADR-0014](../../docs/adr/0014-a2a-identity-authorization.md)。
 
 ## 测试
 

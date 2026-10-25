@@ -8,17 +8,19 @@
 
 P1-03（#85）在 `services/a2a-server/src/identity/` 建立独立身份与集中授权模块，作为 DSH、飞书、设备授权共用的同一可信入口（P1 全部使用合成身份验证）：
 
-1. **独立身份存储**：身份层拥有自己的 SQLite 数据库（`LUMITHINK_A2A_IDENTITY_DB`，缺省 `:memory:`），自带版本化迁移（`lumithink_a2a_identity_meta.schema_version`，当前 v1）与未知未来版本拒开的 fail-closed 契约。**Task Manager schema（P1-02，v1）保持字节不动**——任务归属记录在身份库的 `a2a_identity_task_bindings`，而非任务库；两个模块零 schema 耦合。
+1. **独立身份存储**：身份层拥有自己的 SQLite 数据库（`LUMITHINK_A2A_IDENTITY_DB`，缺省 `:memory:`），自带版本化迁移（`lumithink_a2a_identity_meta.schema_version`，当前 v2）与未知未来版本拒开的 fail-closed 契约。**Task Manager schema（P1-02，v1）保持字节不动**——任务归属记录在身份库的 `a2a_identity_task_bindings`，而非任务库；两个模块零 schema 耦合。v2（Step 05 Review 修复）为任务归属追加受理凭据（`credential_id`）、提升授权（`grant_id`）与主体层级（`principal_kind`）三个归因列，供输出准入门做全链复核；纯加性 ALTER TABLE，v1 遗留行的 NULL 归因被准入门 fail-closed 拒绝（`task_not_attributable`）。
 2. **双层身份、单凭据**：一个 Bearer 凭据同时绑定 Client Identity（已登记客户端：`dsh_profile` / `feishu_adapter` / `xiaozhi_device`）与 Principal Identity（已验证用户 / 受限访问者）；服务端只存 SHA-256 摘要。`xiaozhi_device` 客户端必须绑定家庭（设备仅认证家庭），且其凭据只能是 `client_only`（不得携带已验证用户）。
 3. **集中授权函数**：`authorization-policy.ts` 的 `authorizeOperation` 是同家庭共享事实“按关系与操作决定”的唯一决策点；输入全部为服务端解析值（AuthContext、成员角色、监护关系），函数签名中不存在任何可由消息内容注入的身份参数——消息内 `userId/householdId/role`、A2A `tenant`/`contextId` 在结构上无法伪造授权。
 4. **强制作业点**（全部位于 SDK handler 之前或之外，失败不建 Task）：
    - `requireTwoTierAuth`：凭据解析（未知/撤销/过期 → HTTP 401 + `-32000` AUTHENTICATION_REQUIRED；客户端有效但主体失效（成员关系撤销等）/grant 被拒 → HTTP 403 + `-32000` PERMISSION_DENIED）；
    - `requireContextAccess`：`SendMessage`/`SendStreamingMessage` 携带已绑定他人的 `contextId` 续接 → `-32602` + ErrorInfo `CONTEXT_ACCESS_DENIED`；
    - `authorizingTaskStore` 装饰器：受理时先写任务归属绑定再落库（fail-closed 顺序），`load` 按归属校验（拒绝 → 返回 undefined，由锁定 SDK 产生标准 `-32001` TaskNotFound——对调用者而言任务不存在；真实原因入审计），`list` 过滤为调用者授权范围内任务；
-   - Synthetic executor 的 `authorizationGate`：每次输出准入前按服务端**当前**状态复核（权限撤销 → 停止正文准入并结算 CANCELED）。
+   - **executor 输出准入门（`assertTaskStillAuthorized`）按绑定归因对完整受理链做当前状态复核**（Step 05 Review P1 修复）：受理凭据（撤销/过期 → 拒绝）→ 客户端（停用 → 拒绝）→ 已验证主体（用户停用/成员关系撤销 → 拒绝）→ 提升授权（撤销/过期 → 拒绝）→ 集中策略（交付操作为 `chat.general`；grant 提升任务另按 scope 复核）。凭据与 grant 撤销由此即时关闭工具提交，不再只依赖 StreamRegistry 断流兜底；未绑定窗口仅覆盖本请求受理中任务（未绑定任务对任何人不可读）。
+   - Synthetic executor 的 `authorizationGate`：每次输出准入前调用上述门，拒绝即停止正文并结算 CANCELED。
+   - **策略接线规则**：当前服务面唯一交付操作是准入聊天正文（`chat.general`），已由准入门经 `authorizeOperation`/`authorizeGrantScopedOperation` 强制；未来任何领域操作（学习事实、计划、偏好等）新增调用点时，必须经同一对函数完成授权（grant 主体必须经 scope 复核），不得旁路。
 5. **撤销一致性（epoch）**：身份库维护全局 `revocation_epoch`；凭据/成员关系/短期授权撤销及目录播种各精确 +1（无变更不 bump）。Authorizer 的决策缓存以 epoch 校验，且缓存条目寿命不超过其编码的凭据/授权到期时间——撤销对缓存、SSE 长流（StreamRegistry 按 credential/principal/grant 关闭连接）、工具提交（executor gate）与旧上下文续接即时生效，无 TTL 窗口。
 6. **最小审计**：`a2a_identity_audit` 仅记录决策事实（action/decision/reason、credential/client/principal/household/task/context 标识、时间）；不落令牌（含摘要）、不落消息正文、不落儿童数据。
-7. **短期授权**：`a2a_identity_grants` 承载设备会话确认（`session_verified`）与声纹候选（`voiceprint_candidate`）两类短期授权，均带 scope（冻结 `AUTH_OPERATIONS` 子集）、绝对到期时间与会话绑定；请求经 `X-Lumithink-Session-Grant` 头引用，服务端校验存在性/期限/撤销/客户端绑定/会话绑定，且 bound_principal 凭据携带该头一律拒绝（协议异常 fail-closed）。候选授权永不携带已验证用户，私有数据操作在策略层全部拒绝。
+7. **短期授权**：`a2a_identity_grants` 承载设备会话确认（`session_verified`）与声纹候选（`voiceprint_candidate`）两类短期授权，均带 scope（冻结 `AUTH_OPERATIONS` 子集）、绝对到期时间与会话绑定；请求经 `X-Lumithink-Session-Grant` + `X-Lumithink-Session-Binding` 头引用，服务端校验存在性/期限/撤销/客户端绑定/会话绑定（缺绑定头按不匹配拒绝），且 bound_principal 凭据携带该头一律拒绝（协议异常 fail-closed）。候选授权永不携带已验证用户，私有数据操作在策略层全部拒绝。bootstrap 另校验家庭绑定设备客户端的 grant 家庭一致性（绑定 hh-alpha 的设备不得携带 hh-beta 的授权）。
 
 ## 理由
 
@@ -26,6 +28,7 @@ P1-03（#85）在 `services/a2a-server/src/identity/` 建立独立身份与集�
 - Task/Context ACL 放在 TaskStore 装饰器 + 中间件双层，是因为 SDK 对“仅携带 contextId 的续接消息”不查询任务存储——仅装饰器会漏；仅中间件则覆盖不了 SDK 内部 `load` 路径。两层叠加且失败语义一致。
 - `load` 拒绝返回 undefined（对调用者呈现 TaskNotFound）遵循设计 §4.1“逐条校验引用归属，不靠 ID 保密”：授权不依赖 ID 保密，但跨主体访问不承诺存在性；真实原因由审计承载。
 - epoch 缓存失效替代 TTL：设计 §5.3 要求“每次请求检查凭据及绑定状态”，纯 TTL 缓存存在撤销窗口；epoch 方案把一致性成本压到每次一次整数比较。
+- 候选续接收紧（Step 05 Review P2-3）：声纹候选仅可续接同设备的 visitor 会话或自身候选会话（同设备）；**即使 candidateUserId 与某已验证用户相同，也不得续接该用户的会话绑定**——设计 §6.2/§6.3：匹配不是已验证身份，身份层级切换走新身份/新任务，不中途替换既有任务主体。已验证用户可接管自己的候选会话（已验证 ≥ 候选）。
 
 ## 边界与后续
 

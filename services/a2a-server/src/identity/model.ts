@@ -123,11 +123,17 @@ export interface TaskBinding {
   taskId: string;
   contextId: string;
   householdId: string;
-  /** Verified user principal; null for device visitor tasks (still household-scoped). */
+  /** Verified user or candidate id; null for pure visitor tasks. */
   principalUserId: string | null;
+  /** Acceptance tier of the recorded principal (schema v2). */
+  principalKind: 'user' | 'candidate' | 'visitor';
   clientId: string;
   /** Visitor tasks are continued only by the same device client. */
   clientKind: ClientKind;
+  /** Credential that accepted the task (schema v2) — re-validated by the output gate. */
+  credentialId: string | null;
+  /** Elevating grant for session_verified/candidate tasks (schema v2). */
+  grantId: string | null;
   createdAtMs: number;
 }
 

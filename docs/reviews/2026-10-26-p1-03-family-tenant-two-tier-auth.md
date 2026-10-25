@@ -43,7 +43,7 @@ pnpm --dir services/a2a-server run typecheck   # tsc --noEmit → 0 errors
 pnpm --dir services/a2a-server run test        # node --test --test-isolation=none
 ```
 
-结果（2026-10-26，Windows 本机，Node 24.x）：**84 tests / 84 pass / 0 fail**（含既有 51 + 新增 33... 以 CI 最终记录为准），连续 3 次运行稳定。CI 承载：`.github/workflows/p1-a2a-server-gate.yml`（paths 过滤，本 PR 命中 `services/a2a-server/**`）。
+结果（2026-10-26，Windows 本机，Node 24.x）：**90 tests / 90 pass / 0 fail**（含既有 51 + 新增 39：policy 9 + authorizer 10 + service-acl 11 + store 9；Step 05 修复后数字），多次运行稳定。CI 承载：`.github/workflows/p1-a2a-server-gate.yml`（paths 过滤，本 PR 命中 `services/a2a-server/**`）。
 
 ## 5. 设计取舍（实现层决策，均不改变冻结设计）
 
@@ -52,11 +52,14 @@ pnpm --dir services/a2a-server run test        # node --test --test-isolation=no
 3. **bound_principal 凭据携带 grant 头 → 403**（fail-closed）：这类凭据已带验证主体，会话授权头属协议异常，不做静默忽略。
 4. **executor 门对未绑定窗口放行**（`task_not_bound_yet`）：绑定由同请求管线在任务事件处理时写入，竞态窗口内放行仅影响本次已认证请求自身的首个输出准入，且未绑定任务对任何人不可读——只有正向撤权证据才拒绝，避免竞态误取消（曾以 3 连跑回归锁定）。
 5. **决策缓存 epoch 校验 + 到期截断**：撤销一致性优先于缓存收益；缓存含允许与拒绝两种决策，种子/撤销均失效。
-6. **ListTasks 过滤页丢弃续页 token**：授权过滤页的已知限制（文档化，P1 不做分页重排）。
+6. **ListTasks 过滤页丢弃续页 token**：授权过滤页的已知限制（文档化 + 测试钉死防回归，P1 不做分页重排）。
+7. **Step 05 Review P1 修复（准入门全链复核）**：任务归属绑定记录受理凭据/提升授权/主体层级（身份 schema v2 加性迁移），executor 输出准入门按绑定归因复核完整受理链——凭据与 grant 撤销即时关闭工具提交（此前仅成员关系/用户级撤销关闭，凭据/grant 撤销只由 StreamRegistry 断流兜底），并接入集中策略（交付操作 = `chat.general`，grant 主体经 scope 复核）。回归负例：凭据撤销 × bound_user/visitor 在飞任务、grant 撤销 × 提升任务、scope 越界准入拒绝。
+8. **Step 05 Review P2 修复**：bootstrap 校验家庭绑定设备客户端的 grant 家庭一致性（跨家庭 grant 拒绝启动）；候选续接收紧为仅同设备 visitor/自身候选会话——即使 candidateUserId 与某已验证用户相同也不得续接其会话绑定（design §6.2/§6.3，测试钉死）。
+9. **v1 遗留行 fail-closed**：pre-v2 绑定行（仅存在于本 PR 合入前的临时 store）归因为 NULL，准入门以 `task_not_attributable` 拒绝；有 v1→v2 重迁移测试覆盖。
 
 ## 6. 迁移与回滚风险（AC 4 专项）
 
-- 身份库 schema v1 全加性（CREATE TABLE/INDEX），无破坏语句；单事务迁移 + `lumithink_a2a_identity_meta.schema_version`；未知未来版本拒开（测试覆盖）。
+- 身份库 schema v1→v2 全加性（v2 为三个 ALTER TABLE ADD COLUMN + 两个索引），无破坏语句；单事务迁移 + `lumithink_a2a_identity_meta.schema_version`；未知未来版本拒开、v1→v2 重迁移有测试覆盖。
 - 应用级降级不支持：回滚 = 恢复升级前的数据库文件备份（deploy/validation 属 P0 Gate 维度 C=GO 的备份/恢复流程），绝不编辑行。
 - 任务库无迁移（P1-02 v1 不变）；`:memory:` 缺省保持 CI 无文件写入；持久部署显式设置 `LUMITHINK_A2A_IDENTITY_DB`。
 
@@ -64,9 +67,9 @@ pnpm --dir services/a2a-server run test        # node --test --test-isolation=no
 
 1. **受理跨库写**：身份绑定与任务落库分属两个 SQLite 文件，非跨库事务；崩溃窗口可产生“有任务行无绑定”或反之——前者 fail-closed（任务对所有人不可读），后者为孤儿绑定（无任务行，不可读，可清理）。跨重启一致性与首响应丢失恢复归 P1-04/#86。
 2. **SSE 关闭为断连语义**：撤销即刻断流，客户端表现为连接终止；基于 Outbox 的优雅续传/恢复水位归 P1-06/#88。
-3. **授权仅覆盖传输与任务边界**：领域工具（学习事实等）尚未接入（P3+），`authorizeOperation` 已就位但业务调用点随后续任务落地；本 Issue 的“共享事实”证据为策略矩阵测试 + 任务/续接 ACL。
+3. **领域工具尚未接入**：学习事实/计划/偏好等业务操作归 P3+；当前服务面唯一交付操作（准入聊天正文）已由准入门经 `authorizeOperation`/`authorizeGrantScopedOperation` 强制（含 grant scope 复核），新增领域调用点必须走同一对函数（ADR-0014 接线规则）；本 Issue 的“共享事实”证据为策略矩阵测试 + 任务/续接/准入 ACL。
 4. **合成身份口径**：全部 households/users/credentials/grants 为验证数据；凭据分发/绑定/解绑流程（用户操作面）、飞书事件入口、设备会话确认 UX、声纹服务分别归 P3/P2/P4。
-5. **会话绑定头为合成约定**：`X-Lumithink-Session-Grant` 是验证服务的应用头（非 A2A 标准），仅服务端校验 grant 归属；真实设备连接代际接入在 P4 验证。
+5. **会话绑定头为合成约定**：`X-Lumithink-Session-Grant` / `X-Lumithink-Session-Binding` 是验证服务的应用头（非 A2A 标准），仅服务端校验 grant 归属与会话代际；真实设备连接代际接入在 P4 验证。
 6. **审计为最小集**：满足“记录最小审计信息”；查询 API 仅供测试/诊断，管理面不在本 Issue。
 
 ## 8. 诚实边界声明

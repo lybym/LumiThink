@@ -21,6 +21,23 @@ import type { AuthContext } from '../src/identity/model.ts';
 
 const TOKEN = 'synthetic-validation-token-0123456789abcdef';
 
+/**
+ * Removes a temp dir holding closed SQLite file DBs. On Windows the -wal/
+ * -shm handles can stay briefly locked by the OS indexer right after close()
+ * and rmSync throws EPERM even past its internal retries; a temp dir is
+ * disposable, so the last-resort failure is tolerated instead of flaking CI.
+ */
+function removeTempDir(dir: string): void {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+      return;
+    } catch {
+      // retry after a short wait; tolerate the final failure (temp dir only)
+    }
+  }
+}
+
 function bootstrapWithToken(token: string): IdentityBootstrap {
   const bootstrap = defaultValidationBootstrap(token);
   return bootstrap;
@@ -44,7 +61,7 @@ function guardianAuth(overrides: Partial<AuthContext> = {}): AuthContext {
   };
 }
 
-test('identity migration creates schema v1, records the version, and reopens idempotently', () => {
+test('identity migration creates schema v2, records the version, and reopens idempotently', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'a2a-identity-store-'));
   try {
     const dbPath = path.join(dir, 'identity.sqlite3');
@@ -52,7 +69,7 @@ test('identity migration creates schema v1, records the version, and reopens ide
     store.applyBootstrap(bootstrapWithToken(TOKEN));
     store.close();
 
-    // Reopen on the same file: migration is a no-op, version stays 1.
+    // Reopen on the same file: migration is a no-op, version stays 2.
     const reopened = new IdentityStore({ dbPath });
     assert.equal(reopened.revocationEpoch >= 1, true, 'seeding bumped the epoch');
     reopened.close();
@@ -62,9 +79,52 @@ test('identity migration creates schema v1, records the version, and reopens ide
       .prepare("SELECT value FROM lumithink_a2a_identity_meta WHERE key = 'schema_version'")
       .get() as { value: string };
     assert.equal(Number(version.value), A2A_IDENTITY_SCHEMA_VERSION);
+    const columns = (
+      raw.prepare("PRAGMA table_info(a2a_identity_task_bindings)").all() as { name: string }[]
+    ).map((column) => column.name);
+    for (const column of ['credential_id', 'grant_id', 'principal_kind']) {
+      assert.ok(columns.includes(column), `v2 column ${column} must exist`);
+    }
     raw.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    removeTempDir(dir);
+  }
+});
+
+test('v1 → v2 upgrade path: pre-v2 rows re-migrate additively and are gated fail-closed', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'a2a-identity-store-'));
+  try {
+    const dbPath = path.join(dir, 'identity.sqlite3');
+    const store = new IdentityStore({ dbPath });
+    store.applyBootstrap(bootstrapWithToken(TOKEN));
+    const guardian = guardianAuth();
+    store.bindTask({ taskId: 'task-v1-legacy', contextId: 'ctx-v1-legacy', auth: guardian });
+    store.close();
+
+    // Simulate a v1 store: drop the v2 indexes and columns, rewind the marker.
+    // (The columns are referenced by the v2 indexes — drop those first.)
+    const raw = new DatabaseSync(dbPath);
+    raw.exec('DROP INDEX IF EXISTS idx_a2a_identity_task_bindings_credential');
+    raw.exec('DROP INDEX IF EXISTS idx_a2a_identity_task_bindings_grant');
+    raw.exec('ALTER TABLE a2a_identity_task_bindings DROP COLUMN credential_id');
+    raw.exec('ALTER TABLE a2a_identity_task_bindings DROP COLUMN grant_id');
+    raw.exec('ALTER TABLE a2a_identity_task_bindings DROP COLUMN principal_kind');
+    raw
+      .prepare(
+        "UPDATE lumithink_a2a_identity_meta SET value = '1' WHERE key = 'schema_version'",
+      )
+      .run();
+    raw.close();
+
+    // Reopen: additive v2 migration runs again; the legacy row has NULL attribution.
+    const reopened = new IdentityStore({ dbPath });
+    const legacy = reopened.taskBinding('task-v1-legacy');
+    assert.ok(legacy);
+    assert.equal(legacy?.credentialId, null);
+    assert.equal(legacy?.principalKind, 'user', 'NOT NULL DEFAULT applies the user kind');
+    reopened.close();
+  } finally {
+    removeTempDir(dir);
   }
 });
 
@@ -84,7 +144,7 @@ test('fail-closed: a NEWER identity schema version refuses to open', () => {
     raw.close();
     assert.throws(() => new IdentityStore({ dbPath }), /NEWER than this build supports/);
   } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    removeTempDir(dir);
   }
 });
 
@@ -109,7 +169,7 @@ test('credentials are stored ONLY as SHA-256 digests — plaintext never on disk
     );
     store.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    removeTempDir(dir);
   }
 });
 
@@ -212,6 +272,38 @@ test('bootstrap validation fails closed on invalid directories', () => {
       ],
     };
     assert.throws(() => store.applyBootstrap(badScope), /non-empty AUTH_OPERATIONS subset/);
+
+    // Cross-household device grant (P2-2): a household-bound xiaozhi_device
+    // client can never carry a grant for ANOTHER household (设备仅认证家庭).
+    const crossHouseholdGrant: IdentityBootstrap = {
+      ...base,
+      households: [...base.households, { householdId: 'hh-other', displayName: 'Other' }],
+      clients: [
+        ...base.clients,
+        {
+          clientId: 'dev-1',
+          kind: 'xiaozhi_device',
+          displayName: 'Device',
+          householdId: 'hh-synthetic-01',
+        },
+      ],
+      grants: [
+        {
+          grantId: 'g-cross',
+          clientId: 'dev-1',
+          householdId: 'hh-other',
+          kind: 'session_verified',
+          userId: 'user-guardian-synthetic',
+          sessionBinding: 'conn-1',
+          scope: ['chat.general'],
+          expiresAtMs: Date.now() + 60_000,
+        },
+      ],
+    };
+    assert.throws(
+      () => store.applyBootstrap(crossHouseholdGrant),
+      /does not match the device client's bound household/,
+    );
 
     // parseIdentityBootstrap rejects unknown fields.
     assert.throws(
@@ -349,6 +441,97 @@ test('task binding ACL: household isolation, principal isolation, candidate ceil
       true,
       'same-device candidate continues the device conversation',
     );
+  } finally {
+    store.close();
+  }
+});
+
+test('candidate continuation tiers pinned: own device conversations yes, verified-user bindings never (P2-3)', () => {
+  const store = new IdentityStore({ dbPath: ':memory:' });
+  try {
+    store.applyBootstrap(bootstrapWithToken(TOKEN));
+
+    // Candidate-bound task on device dev-1.
+    const candidate = guardianAuth({
+      credentialId: 'cred-dev-1',
+      clientId: 'dev-1',
+      clientKind: 'xiaozhi_device',
+      principal: {
+        kind: 'voiceprint_candidate',
+        candidateUserId: 'user-child-synthetic',
+        assurance: 'voiceprint_candidate',
+        grantId: 'g-1',
+      },
+    });
+    store.bindTask({ taskId: 'task-cand', contextId: 'ctx-cand', auth: candidate });
+    assert.equal(store.taskBinding('task-cand')?.principalKind, 'candidate');
+    assert.equal(
+      store.checkTaskAccess('task-cand', candidate).allowed,
+      true,
+      'same device + same candidate continues the candidate conversation',
+    );
+    const otherDeviceCandidate = guardianAuth({
+      credentialId: 'cred-dev-2',
+      clientId: 'dev-2',
+      clientKind: 'xiaozhi_device',
+      principal: {
+        kind: 'voiceprint_candidate',
+        candidateUserId: 'user-child-synthetic',
+        assurance: 'voiceprint_candidate',
+        grantId: 'g-1',
+      },
+    });
+    assert.equal(
+      store.checkTaskAccess('task-cand', otherDeviceCandidate).allowed,
+      false,
+      'another device never continues the conversation',
+    );
+    const verifiedChild = guardianAuth({
+      clientId: 'validation-harness',
+      principal: {
+        kind: 'session_verified',
+        userId: 'user-child-synthetic',
+        role: 'child',
+        assurance: 'session_verified',
+        grantId: 'g-2',
+      },
+    });
+    assert.equal(
+      store.checkTaskAccess('task-cand', verifiedChild).allowed,
+      true,
+      'the verified user may take over their own candidate conversation',
+    );
+
+    // session_verified-bound task (principalKind 'user'): a candidate whose
+    // candidateUserId EQUALS the verified user, on the SAME device, can never
+    // continue it — 匹配不是已验证身份 (design §6.2/§6.3, Step 05 P2-3).
+    const sessionVerified = guardianAuth({
+      credentialId: 'cred-dev-1',
+      clientId: 'dev-1',
+      clientKind: 'xiaozhi_device',
+      principal: {
+        kind: 'session_verified',
+        userId: 'user-guardian-synthetic',
+        role: 'guardian',
+        assurance: 'session_verified',
+        grantId: 'g-2',
+      },
+    });
+    store.bindTask({ taskId: 'task-verified', contextId: 'ctx-verified', auth: sessionVerified });
+    const guardianCandidate = guardianAuth({
+      credentialId: 'cred-dev-1',
+      clientId: 'dev-1',
+      clientKind: 'xiaozhi_device',
+      principal: {
+        kind: 'voiceprint_candidate',
+        candidateUserId: 'user-guardian-synthetic',
+        assurance: 'voiceprint_candidate',
+        grantId: 'g-3',
+      },
+    });
+    const decision = store.checkTaskAccess('task-verified', guardianCandidate);
+    assert.equal(decision.allowed, false, 'a candidate never continues a verified-user binding');
+    assert.equal(decision.reason, 'principal_mismatch');
   } finally {
     store.close();
   }

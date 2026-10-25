@@ -251,13 +251,104 @@ test('executor admission gate re-checks CURRENT state and denies on membership r
     });
 
     store.bindTask({ taskId: 'task-live', contextId: 'ctx-live', auth: auth.auth });
-    assert.deepEqual(authorizer.assertTaskStillAuthorized('task-live'), { allowed: true });
+    const liveDecision = authorizer.assertTaskStillAuthorized('task-live');
+    assert.equal(liveDecision.allowed, true, 'the full chain allows an active bound-user task');
+    assert.equal(liveDecision.reason, 'member_chat', 'the centralized policy wired into the gate');
 
     // Membership revoked AFTER acceptance → admission closes.
     store.revokeMembership('hh-synthetic-01', 'user-guardian-synthetic');
     const decision = authorizer.assertTaskStillAuthorized('task-live');
     assert.equal(decision.allowed, false);
     assert.equal(decision.reason, 'principal_membership_revoked');
+  } finally {
+    store.close();
+  }
+});
+
+test('gate P1 fix: CREDENTIAL revocation closes in-flight tool submission (bound_user and visitor tasks)', () => {
+  const { store, authorizer } = harness();
+  try {
+    // Bound-user task accepted by cred-validation-harness.
+    const boundAuth = authorizer.resolve(TOKEN);
+    assert.equal(boundAuth.kind, 'authorized');
+    if (boundAuth.kind !== 'authorized') return;
+    store.bindTask({ taskId: 'task-cred-user', contextId: 'ctx-cred-user', auth: boundAuth.auth });
+    assert.equal(authorizer.assertTaskStillAuthorized('task-cred-user').allowed, true);
+
+    assert.equal(store.revokeCredential('cred-validation-harness'), true);
+    const afterRevoke = authorizer.assertTaskStillAuthorized('task-cred-user');
+    assert.equal(afterRevoke.allowed, false, 'credential revocation must close the admission gate');
+    assert.equal(afterRevoke.reason, 'credential_revoked');
+
+    // Visitor task accepted by the device credential — same rule.
+    const visitorAuth = authorizer.resolve(DEVICE_TOKEN);
+    assert.equal(visitorAuth.kind, 'authorized');
+    if (visitorAuth.kind !== 'authorized') return;
+    store.bindTask({ taskId: 'task-cred-visitor', contextId: 'ctx-cred-visitor', auth: visitorAuth.auth });
+    assert.equal(authorizer.assertTaskStillAuthorized('task-cred-visitor').allowed, true);
+    assert.equal(store.revokeCredential('cred-device-1'), true);
+    const visitorAfter = authorizer.assertTaskStillAuthorized('task-cred-visitor');
+    assert.equal(visitorAfter.allowed, false);
+    assert.equal(visitorAfter.reason, 'credential_revoked');
+  } finally {
+    store.close();
+  }
+});
+
+test('gate P1 fix: GRANT revocation/expiry closes in-flight tool submission for elevated tasks', () => {
+  const { store, authorizer } = harness();
+  try {
+    const elevated = authorizer.resolve(DEVICE_TOKEN, 'grant-session-1', 'conn-gen-1');
+    assert.equal(elevated.kind, 'authorized');
+    if (elevated.kind !== 'authorized') return;
+    store.bindTask({ taskId: 'task-grant', contextId: 'ctx-grant', auth: elevated.auth });
+    assert.equal(authorizer.assertTaskStillAuthorized('task-grant').allowed, true);
+
+    assert.equal(store.revokeGrant('grant-session-1'), true);
+    const afterRevoke = authorizer.assertTaskStillAuthorized('task-grant');
+    assert.equal(afterRevoke.allowed, false, 'grant revocation must close the admission gate');
+    assert.equal(afterRevoke.reason, 'grant_revoked');
+
+    // Grant-bound bindings also die with the ACCEPTING credential.
+    const rebound = authorizer.resolve(DEVICE_TOKEN);
+    assert.equal(rebound.kind, 'authorized');
+    if (rebound.kind !== 'authorized') return;
+    store.bindTask({ taskId: 'task-visitor-2', contextId: 'ctx-visitor-2', auth: rebound.auth });
+    assert.equal(store.revokeCredential('cred-device-1'), true);
+    assert.equal(authorizer.assertTaskStillAuthorized('task-visitor-2').allowed, false);
+  } finally {
+    store.close();
+  }
+});
+
+test('gate policy wiring: an operation outside the grant scope is denied at admission (P2-1 anchor)', () => {
+  const nowMs = 1_780_000_000_000;
+  const store = new IdentityStore({ dbPath: ':memory:', now: () => nowMs });
+  try {
+    store.applyBootstrap({
+      ...richBootstrap(nowMs),
+      grants: [
+        ...richBootstrap(nowMs).grants,
+        {
+          grantId: 'grant-narrow',
+          clientId: 'xiaozhi-device-1',
+          householdId: 'hh-synthetic-01',
+          kind: 'session_verified',
+          userId: 'user-guardian-synthetic',
+          sessionBinding: 'conn-gen-1',
+          scope: ['learning.fact.read'],
+          expiresAtMs: nowMs + 300_000,
+        },
+      ],
+    });
+    const authorizer = new Authorizer({ store, now: () => nowMs });
+    const elevated = authorizer.resolve(DEVICE_TOKEN, 'grant-narrow', 'conn-gen-1');
+    assert.equal(elevated.kind, 'authorized');
+    if (elevated.kind !== 'authorized') return;
+    store.bindTask({ taskId: 'task-narrow', contextId: 'ctx-narrow', auth: elevated.auth });
+    const decision = authorizer.assertTaskStillAuthorized('task-narrow');
+    assert.equal(decision.allowed, false, 'chat output delivery is chat.general — outside this grant');
+    assert.equal(decision.reason, 'operation_outside_grant_scope');
   } finally {
     store.close();
   }

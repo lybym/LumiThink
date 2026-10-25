@@ -331,6 +331,31 @@ test('AC2: ListTasks is filtered to the caller\'s own authorized tasks', async (
   }
 });
 
+test('ListTasks filtered page drops the continuation token (review test gap pin)', async () => {
+  const service = await startAclService();
+  try {
+    await createTask(service, TOKEN_A, 'msg-page-a1');
+    await createTask(service, TOKEN_A, 'msg-page-a2');
+    await createTask(service, TOKEN_B, 'msg-page-b1');
+
+    // guardian-b's page contains guardian-a's tasks; after filtering, the
+    // continuation token MUST be dropped — a token computed over the
+    // unfiltered page would leak foreign rows across pages.
+    const listed = await rpc(service.base, 1, 'ListTasks', { pageSize: 10 }, { token: TOKEN_B });
+    const result = listed.body['result'] as { tasks: { id: string }[]; nextPageToken: string };
+    assert.equal(result.tasks.length, 1, 'only own tasks survive the filter');
+    assert.equal(result.nextPageToken, '', 'a filtered page drops the token');
+
+    // An unfiltered full page keeps its token (normal pagination unaffected).
+    const mine = await rpc(service.base, 2, 'ListTasks', { pageSize: 1 }, { token: TOKEN_A });
+    const mineResult = mine.body['result'] as { tasks: { id: string }[]; nextPageToken: string };
+    assert.equal(mineResult.tasks.length, 1);
+    assert.notEqual(mineResult.nextPageToken, '', 'unfiltered pagination keeps its token');
+  } finally {
+    await stopA2aService(service);
+  }
+});
+
 test('AC3: revoking a credential closes its live SSE stream and denies the next request immediately', async () => {
   const service = await startAclService();
   try {

@@ -337,7 +337,8 @@ export class IdentityStore {
       const nowMs = this.now();
       const seenHouseholds = new Set<string>();
       const seenUsers = new Set<string>();
-      const seenClients = new Set<string>();
+      /** client_id → kind + bound household (device household consistency, P2-2). */
+      const seenClients = new Map<string, { kind: ClientKind; householdId: string | undefined }>();
       const seenCredentials = new Set<string>();
       const seenTokens = new Set<string>();
       const seenGrants = new Set<string>();
@@ -427,7 +428,7 @@ export class IdentityStore {
         if (seenClients.has(client.clientId)) {
           throw new IdentityError('invalid_input', `Duplicate client: ${client.clientId}`);
         }
-        seenClients.add(client.clientId);
+        seenClients.set(client.clientId, { kind: client.kind, householdId: client.householdId });
         if (client.householdId !== undefined) {
           if (client.kind !== 'xiaozhi_device') {
             throw new IdentityError(
@@ -520,6 +521,21 @@ export class IdentityStore {
         }
         if (!seenHouseholds.has(grant.householdId)) {
           throw new IdentityError('invalid_input', `Unknown grant household: ${grant.householdId}`);
+        }
+        // 设备仅认证家庭 (AC 4, P2-2): a grant for a household-bound device
+        // client must target THAT household — a hh-alpha device can never
+        // carry a hh-beta session/candidate elevation.
+        const grantClient = seenClients.get(grant.clientId);
+        if (
+          grantClient !== undefined &&
+          grantClient.kind === 'xiaozhi_device' &&
+          grantClient.householdId !== grant.householdId
+        ) {
+          throw new IdentityError(
+            'invalid_input',
+            `grant ${grant.grantId} household ${grant.householdId} does not match the device client's ` +
+              `bound household ${grantClient.householdId}`,
+          );
         }
         if (!Number.isFinite(grant.expiresAtMs) || grant.expiresAtMs <= nowMs) {
           throw new IdentityError('invalid_input', `grant ${grant.grantId} expiresAtMs must be in the future`);
@@ -680,21 +696,29 @@ export class IdentityStore {
   // Task bindings & ACL
   // -------------------------------------------------------------------------
 
-  taskBinding(taskId: string): TaskBinding | undefined {
-    this.assertOpen();
-    const row = this.db
-      .prepare('SELECT * FROM a2a_identity_task_bindings WHERE task_id = ?')
-      .get(taskId) as Record<string, unknown> | undefined;
+  /** Shared row mapper for a2a_identity_task_bindings (schema v2 columns). */
+  private taskBindingRowOf(row: Record<string, unknown> | undefined): TaskBinding | undefined {
     if (!row) return undefined;
     return {
       taskId: row['task_id'] as string,
       contextId: row['context_id'] as string,
       householdId: row['household_id'] as string,
       principalUserId: row['principal_user_id'] as string | null,
+      principalKind: (row['principal_kind'] as TaskBinding['principalKind'] | undefined) ?? 'user',
       clientId: row['client_id'] as string,
       clientKind: row['client_kind'] as ClientKind,
+      credentialId: (row['credential_id'] as string | null | undefined) ?? null,
+      grantId: (row['grant_id'] as string | null | undefined) ?? null,
       createdAtMs: row['created_at_ms'] as number,
     };
+  }
+
+  taskBinding(taskId: string): TaskBinding | undefined {
+    this.assertOpen();
+    const row = this.db
+      .prepare('SELECT * FROM a2a_identity_task_bindings WHERE task_id = ?')
+      .get(taskId) as Record<string, unknown> | undefined;
+    return this.taskBindingRowOf(row);
   }
 
   taskBindingsForContext(contextId: string): TaskBinding[] {
@@ -702,22 +726,20 @@ export class IdentityStore {
     const rows = this.db
       .prepare('SELECT * FROM a2a_identity_task_bindings WHERE context_id = ? ORDER BY created_at_ms')
       .all(contextId) as Record<string, unknown>[];
-    return rows.map((row) => ({
-      taskId: row['task_id'] as string,
-      contextId: row['context_id'] as string,
-      householdId: row['household_id'] as string,
-      principalUserId: row['principal_user_id'] as string | null,
-      clientId: row['client_id'] as string,
-      clientKind: row['client_kind'] as ClientKind,
-      createdAtMs: row['created_at_ms'] as number,
-    }));
+    return rows
+      .map((row) => this.taskBindingRowOf(row))
+      .filter((binding): binding is TaskBinding => binding !== undefined);
   }
 
   /**
-   * Owner identity of an AuthContext for binding-match purposes: verified
-   * users match by (household, userId); device visitors/candidates match by
-   * (household, client) — a voiceprint candidate NEVER matches a task owned
-   * by a verified user (候选不提升私有数据权限).
+   * Owner identity of an AuthContext for binding-match purposes.
+   * Verified users match by (household, userId) — they may take over their
+   * own candidate-bound conversations (verified ≥ candidate). Voiceprint
+   * candidates continue ONLY same-device visitor-owned or candidate-owned
+   * conversations (low-sensitivity tier); they NEVER continue a binding
+   * created by a verified user, even when the candidate id equals that user
+   * (design §6.2/§6.3: 匹配不是已验证身份，说话人/身份层级切换 → 新任务).
+   * Visitors continue only same-device visitor-owned conversations.
    */
   private bindingOwnerMatches(binding: TaskBinding, auth: AuthContext): boolean {
     if (binding.householdId !== auth.householdId) return false;
@@ -727,22 +749,21 @@ export class IdentityStore {
         : null;
     const candidateUserId =
       auth.principal.kind === 'voiceprint_candidate' ? auth.principal.candidateUserId : null;
-    if (binding.principalUserId !== null) {
-      if (verifiedUserId !== null && verifiedUserId === binding.principalUserId) return true;
-      // Same-device re-identification of the same candidate may continue the
-      // device-level conversation (design §6.2 low-sensitivity tier).
-      if (
-        candidateUserId !== null &&
-        candidateUserId === binding.principalUserId &&
-        binding.clientKind === 'xiaozhi_device' &&
-        binding.clientId === auth.clientId
-      ) {
-        return true;
-      }
-      return false;
+    if (verifiedUserId !== null) {
+      return verifiedUserId === binding.principalUserId;
     }
-    // Visitor-owned task: continued only by the same device client.
-    return binding.clientId === auth.clientId;
+    if (candidateUserId !== null) {
+      if (binding.principalKind === 'visitor') {
+        return binding.clientId === auth.clientId;
+      }
+      return (
+        binding.principalKind === 'candidate' &&
+        binding.principalUserId === candidateUserId &&
+        binding.clientId === auth.clientId
+      );
+    }
+    // Visitor principal: same-device visitor-owned conversations only.
+    return binding.principalKind === 'visitor' && binding.clientId === auth.clientId;
   }
 
   /**
@@ -765,6 +786,16 @@ export class IdentityStore {
         : auth.principal.kind === 'voiceprint_candidate'
           ? auth.principal.candidateUserId
           : null;
+    const principalKind: TaskBinding['principalKind'] =
+      auth.principal.kind === 'bound_user' || auth.principal.kind === 'session_verified'
+        ? 'user'
+        : auth.principal.kind === 'voiceprint_candidate'
+          ? 'candidate'
+          : 'visitor';
+    const grantId =
+      auth.principal.kind === 'session_verified' || auth.principal.kind === 'voiceprint_candidate'
+        ? auth.principal.grantId
+        : null;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const existing = this.taskBinding(taskId);
@@ -782,9 +813,20 @@ export class IdentityStore {
       }
       this.db
         .prepare(
-          'INSERT OR IGNORE INTO a2a_identity_task_bindings (task_id, context_id, household_id, principal_user_id, client_id, client_kind, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          'INSERT OR IGNORE INTO a2a_identity_task_bindings (task_id, context_id, household_id, principal_user_id, principal_kind, client_id, client_kind, credential_id, grant_id, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         )
-        .run(taskId, contextId, auth.householdId, principalUserId, auth.clientId, auth.clientKind, this.now());
+        .run(
+          taskId,
+          contextId,
+          auth.householdId,
+          principalUserId,
+          principalKind,
+          auth.clientId,
+          auth.clientKind,
+          auth.credentialId,
+          grantId,
+          this.now(),
+        );
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');

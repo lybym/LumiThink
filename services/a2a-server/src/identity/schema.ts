@@ -29,7 +29,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { IdentityError } from './model.ts';
 
-export const A2A_IDENTITY_SCHEMA_VERSION = 1;
+export const A2A_IDENTITY_SCHEMA_VERSION = 2;
 
 /** Meta keys. */
 export const IDENTITY_META_SCHEMA_VERSION = 'schema_version';
@@ -164,7 +164,31 @@ const IDENTITY_MIGRATION_V1: IdentityMigration = {
   `,
 };
 
-const IDENTITY_MIGRATIONS: readonly IdentityMigration[] = [IDENTITY_MIGRATION_V1];
+/**
+ * v2 (issue #85 Step 05 review fix): task bindings record the ACCEPTING
+ * credential, the elevating grant (when any) and the principal kind, so the
+ * executor output-admission gate can re-validate the FULL acceptance chain
+ * (credential → client → user/membership → grant → policy) against CURRENT
+ * state — credential/grant revocation now closes tool submission, not only
+ * the transport stream. Purely additive ALTER TABLE; pre-v2 rows (which can
+ * only exist in throwaway pre-release stores) get NULL attribution and are
+ * denied fail-closed by the gate.
+ */
+const IDENTITY_MIGRATION_V2: IdentityMigration = {
+  version: 2,
+  ddl: `
+    ALTER TABLE a2a_identity_task_bindings ADD COLUMN credential_id TEXT;
+    ALTER TABLE a2a_identity_task_bindings ADD COLUMN grant_id TEXT;
+    ALTER TABLE a2a_identity_task_bindings ADD COLUMN principal_kind TEXT NOT NULL DEFAULT 'user'
+      CHECK (principal_kind IN ('user','candidate','visitor'));
+    CREATE INDEX IF NOT EXISTS idx_a2a_identity_task_bindings_credential
+      ON a2a_identity_task_bindings(credential_id);
+    CREATE INDEX IF NOT EXISTS idx_a2a_identity_task_bindings_grant
+      ON a2a_identity_task_bindings(grant_id);
+  `,
+};
+
+const IDENTITY_MIGRATIONS: readonly IdentityMigration[] = [IDENTITY_MIGRATION_V1, IDENTITY_MIGRATION_V2];
 
 const IDENTITY_META_TABLE_DDL = `
   CREATE TABLE IF NOT EXISTS lumithink_a2a_identity_meta (

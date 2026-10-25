@@ -24,6 +24,7 @@ import type {
   GrantRecord,
   Operation,
 } from './model.ts';
+import { authorizeGrantScopedOperation, authorizeOperation } from './authorization-policy.ts';
 import { sha256Hex } from './schema.ts';
 import type { IdentityStore } from './identity-store.ts';
 
@@ -285,40 +286,122 @@ export class Authorizer {
   }
 
   /**
-   * Executor admission gate (工具提交 / 输出准入): re-checks the CURRENT
-   * authorization state of the task's owner. Never uses the request-time
-   * snapshot — revocation must take effect mid-execution (AC 3).
+   * Executor admission gate (工具提交 / 输出准入): re-checks the COMPLETE
+   * acceptance chain against CURRENT server-side state — never the
+   * request-time snapshot (AC 3, Step 05 review P1 fix):
+   *   accepting credential (revoked/expired → deny) → client (disabled →
+   *   deny) → verified principal (user disabled / membership revoked →
+   *   deny) → elevating grant (revoked/expired → deny) → centralized policy
+   *   for the delivered operation ('chat.general'; grant-elevated tasks
+   *   additionally re-check grant scope).
+   *
+   * The gate consults the binding's recorded attribution (credential_id /
+   * grant_id / principal_kind, identity schema v2). A bound row without
+   * attribution (pre-v2 row) denies fail-closed; a row not yet written (the
+   * in-flight acceptance window of the very request being served) allows —
+   * an unbound task is unreadable for everyone afterwards (load denies
+   * task_not_bound), so only positive revocation evidence denies here.
    */
   assertTaskStillAuthorized(taskId: string): { allowed: boolean; reason?: string } {
     const binding = this.store.taskBinding(taskId);
     if (!binding) {
-      // The ownership binding is written by the same acceptance pipeline
-      // (decorator save) the moment the task event is processed. A task with
-      // no binding yet is BY DEFINITION the in-flight task of an already
-      // authenticated request, and an unbound task is unreadable for
-      // everyone afterwards (load denies task_not_bound). Only positive
-      // revocation evidence denies here — never the not-yet-bound window.
       return { allowed: true, reason: 'task_not_bound_yet' };
     }
-    // Bound-principal tasks: re-validate the owning user's credential-free
-    // authorization state — membership must STILL be active and the user
-    // active. Credential revocation closes the transport streams separately;
-    // membership/user revocation closes the business authorization.
-    if (binding.principalUserId !== null) {
+    const nowMs = this.now();
+
+    // 1. The accepting credential must STILL be active — credential
+    //    revocation closes tool submission, not only the transport stream.
+    if (!binding.credentialId) {
+      return { allowed: false, reason: 'task_not_attributable' };
+    }
+    const credential = this.store.findCredentialById(binding.credentialId);
+    if (!credential || credential.status === 'revoked' || credential.revokedAtMs !== null) {
+      return { allowed: false, reason: 'credential_revoked' };
+    }
+    if (
+      credential.status === 'expired' ||
+      (credential.expiresAtMs !== null && credential.expiresAtMs <= nowMs)
+    ) {
+      return { allowed: false, reason: 'credential_expired' };
+    }
+
+    // 2. The accepting client must still be registered and active.
+    const client = this.store.findClient(binding.clientId);
+    if (!client || client.status !== 'active') {
+      return { allowed: false, reason: 'client_disabled' };
+    }
+
+    // 3. Verified-principal bindings: the user and the household membership
+    //    must STILL be active.
+    if (binding.principalKind === 'user' && binding.principalUserId !== null) {
       if (this.store.userDisabled(binding.principalUserId)) {
         return { allowed: false, reason: 'principal_disabled' };
       }
       if (!this.store.activeMembership(binding.householdId, binding.principalUserId)) {
         return { allowed: false, reason: 'principal_membership_revoked' };
       }
-      return { allowed: true };
     }
-    // Visitor/candidate tasks: the owning client must still be active.
-    const client = this.store.findClient(binding.clientId);
-    if (!client || client.status !== 'active') {
-      return { allowed: false, reason: 'client_disabled' };
+
+    // 4. Grant-elevated bindings: the grant must STILL be active.
+    let grantScope: readonly Operation[] | null = null;
+    if (binding.grantId) {
+      const grant = this.store.findGrant(binding.grantId);
+      if (!grant) return { allowed: false, reason: 'grant_unknown' };
+      if (grant.status === 'revoked' || grant.revokedAtMs !== null) {
+        return { allowed: false, reason: 'grant_revoked' };
+      }
+      if (grant.status === 'expired' || grant.expiresAtMs <= nowMs) {
+        return { allowed: false, reason: 'grant_expired' };
+      }
+      grantScope = grant.scope;
     }
-    return { allowed: true };
+
+    // 5. Centralized policy (Step 05 review P2-1 wiring): the only output the
+    //    synthetic executor delivers is an admitted chat answer, so the
+    //    delivered operation is 'chat.general'; grant-elevated tasks are
+    //    additionally re-checked against the grant scope. Any future domain
+    //    operation MUST route through authorizeOperation /
+    //    authorizeGrantScopedOperation the same way (ADR-0014).
+    const policyAuth: AuthContext = {
+      credentialId: binding.credentialId,
+      clientId: binding.clientId,
+      clientKind: binding.clientKind,
+      householdId: binding.householdId,
+      principal:
+        binding.principalKind === 'user' && binding.principalUserId !== null
+          ? {
+              kind: 'bound_user',
+              userId: binding.principalUserId,
+              role:
+                this.store.activeMembership(binding.householdId, binding.principalUserId)?.role ??
+                'member',
+              assurance: 'credential_bound',
+            }
+          : binding.principalKind === 'candidate' &&
+              binding.principalUserId !== null &&
+              binding.grantId !== null
+            ? {
+                kind: 'voiceprint_candidate',
+                candidateUserId: binding.principalUserId,
+                assurance: 'voiceprint_candidate',
+                grantId: binding.grantId,
+              }
+            : { kind: 'visitor', assurance: 'unverified_visitor' },
+      revocationEpoch: this.store.revocationEpoch,
+      resolvedAtMs: nowMs,
+    };
+    const policyInput = {
+      auth: policyAuth,
+      operation: 'chat.general' as Operation,
+      targetHouseholdId: binding.householdId,
+      targetSubjectUserId: binding.principalUserId ?? undefined,
+    };
+    const decision = grantScope
+      ? authorizeGrantScopedOperation(policyInput, grantScope)
+      : authorizeOperation(policyInput);
+    return decision.allowed
+      ? { allowed: true, reason: decision.reason }
+      : { allowed: false, reason: decision.reason };
   }
 }
 
