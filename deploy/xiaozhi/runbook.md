@@ -611,7 +611,7 @@ LUMITHINK_GATEWAY_AGENT=real node --experimental-strip-types scripts/xiaozhi/gat
 
 ### 14.6 空环境重建、健康检查、受控回滚与生产控制面（DoD 4）
 
-- **空环境重建**：按 §2（小智服务端）与 [deploy/runbook.md §2](../deploy/runbook.md)（LumiThink 主应用）在全新主机完整执行一次，记录每步时间线与验证输出（`GATEWAY-HOST READY`、healthcheck、probe_hello）。
+- **空环境重建**：按 §2（小智服务端）与 [deploy/runbook.md §2](../runbook.md)（LumiThink 主应用）在全新主机完整执行一次，记录每步时间线与验证输出（`GATEWAY-HOST READY`、healthcheck、probe_hello）。
 - **健康检查**：`deploy/xiaozhi/healthcheck.sh` + 主应用 `/api/health` 与 manifest 版本一致性核对（RELEASE_GATE Gate 3 口径）。
 - **受控回滚**：§8（版本切回 + 重渲染 + 重启）；自动化面证据 = `r1-deployment-gate.yml` upgrade-rollback drill artifact（`allPhasesPassed`）；回退前确认目标版本能读当前快照（RELEASE_GATE Gate 4）。
 - **生产控制面实测**：systemd 单元状态抽查（`systemctl status`）、Caddy 访问日志抽查、结构化追踪/审计字段抽查（**脱敏口径同 §7**：只记 id/版本/计数，不记正文）；记录为证据链接。
