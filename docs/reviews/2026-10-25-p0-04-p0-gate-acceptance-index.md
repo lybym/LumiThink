@@ -39,7 +39,7 @@
 | 关键内容 | 隔离环境定义（回环端口 3311/3312 预留、数据卷、`lumithink-validation` 受限账户规格、启停说明）；冻结基线隔离重建（9/9 关键文件 SHA-256 MATCH、`tsc --noEmit` 0、回归 986 tests / 978 pass / 0 fail / 8 skip）；脱敏启动/停止证据（组合级 4 boot + SIGTERM 停机冲刷）；备份范围与 AES-256-GCM 加密核对（T0 归档 `ea76563266c86f84` 全程不变）；隔离恢复演练（旧档恢复不复活已删数据、一次性重放、标记自清）；回滚矩阵；资源预算初值（无一默认无限）；删除/撤权台账保管与恢复开放前六步；CI 等价取证（6 workflow × head SHA，check-runs 19/19 success/completed，run 例 [40177804023](https://github.com/lybym/LumiThink/actions/runs/40177804023)） |
 | 定位/复核命令 | 该记录 §12 全部命令；关键校验值：`Get-FileHash -Algorithm SHA256`（对照 §9 表） |
 | 本轮 Gate 复核 | §2：抽查 `deploy/backup.sh` / `restore.sh` / `healthcheck.sh` / `start.sh` / `scripts/snapshot-cli.ts` / `version.env` 六项 SHA-256，与 #81 §9 逐一 MATCH；§5：`tsc --noEmit` 重跑 exit 0 |
-| 局限 | §10 PENDING 全部保留：应用进程级本机启动（CI 承载）、xiaozhi 隔离目录完整重建（部署侧 Python 3.10）、D3 四要素验证、D2 统一配置、D5 重建交付、台账完全独立化（PENDING_ARCH → #88）、日预算/磁盘实测修订（→ #91）、A2A 服务 3312 监听（→ #83） |
+| 局限 | §10 PENDING 全部保留：应用进程级本机启动（CI 承载）、xiaozhi 隔离目录完整重建（部署侧 Python 3.10）、D3 四要素验证、D2 统一配置、D5 重建交付、台账完全独立化（PENDING_ARCH → #90，联动 #88）、日预算/磁盘实测修订（→ #91）、A2A 服务 3312 监听（→ #83） |
 
 ### 1.4 关键复现阻断项清单（诚实披露；AC1 判定输入）
 
@@ -113,7 +113,7 @@ node --experimental-strip-types --test-isolation=none --test tests/domain/voice/
 | --- | --- | --- | --- |
 | **A. 仓库冻结基线复现**（源码冻结、兼容锁定、隔离重建） | **GO** | 本轮 §5 抽样重跑全绿（竞态 5/5、守护/合同 31/31、compat 2/2、`tsc` 0）；#81 §2 重建（9/9 SHA、回归 986/978/8）；#80 §6 命令可重放；CI 19/19 check-runs（#97 run [40177804023](https://github.com/lybym/LumiThink/actions/runs/40177804023)）；本 PR head CI 等价取证（§5） | 无未关闭复现阻断项 |
 | **B. 部署基线收敛**（xiaozhi 版本选型/迁移、回收配置统一、Bridge 重注册验证、TTS 重建交付） | **NO-GO** | D1/D2/D3/D5 全部 PENDING（#79 §3 台账；§1.4）；本轮零实机操作、无新增部署侧证据 | 开启条件：① D1 选型收敛且迁移验证（installer/覆盖注册表/协议扩展点/回滚一并核对）；② D2 取得部署侧长闲置/容量/多用户证据后统一配置并留恢复证据；③ D3 四要素（凭据、会话归属、重复网关重启、幂等重试）验证通过；④ D5 形成仓库可重建交付（上游夹具+维护测试+安装入口）。责任链：#80（兼容面已冻结）→ #81 后续 → 运营者 |
-| **C. 隔离验证环境 / 备份 / 回滚 / 资源初值**（验证基线口径） | **GO** | #81 §5 隔离恢复演练实跑（旧档恢复不复活已删数据、重放恰好一次、标记自清）；§6 回滚矩阵齐备；§7 资源初值无一默认无限（`validation.env.example`）；[deploy/validation/README](../../deploy/validation/README.md) 命令可执行 | PENDING 照列不阻断 P1 合成验证：应用进程级本机启动（CI 承载）、部署侧重建、台账完全独立化（PENDING_ARCH → #88）、实测修订（→ #91）、A2A 监听（→ #83） |
+| **C. 隔离验证环境 / 备份 / 回滚 / 资源初值**（验证基线口径） | **GO** | #81 §5 隔离恢复演练实跑（旧档恢复不复活已删数据、重放恰好一次、标记自清）；§6 回滚矩阵齐备；§7 资源初值无一默认无限（`validation.env.example`）；[deploy/validation/README](../../deploy/validation/README.md) 命令可执行 | PENDING 照列不阻断 P1 合成验证：应用进程级本机启动（CI 承载）、部署侧重建、台账完全独立化（PENDING_ARCH → #90，联动 #88）、实测修订（→ #91）、A2A 监听（→ #83） |
 | **D. 正式实机验收**（hello 正式态、打断门限、真实儿童数据） | **NO-GO（未执行）** | #79 §4 三态复核：正式实机验收未执行；runbook §11.3/§11.4、§12 待运营者物理面 | 开启条件：运营者按 runbook 执行并留证（3×断电重连、唤醒+10 轮成人语音、≥100 次播报中打断试验、门限冻结）；未执行前不得标注任何实机 PASS |
 
 **总判定**：
@@ -155,7 +155,7 @@ node --experimental-strip-types --test-isolation=none --test tests/domain/voice/
 | D4 运行目录未采纳致命退出/日志最小化；D6–D9 已记录项 | #79 §3 | 迁移验证 PENDING / 不阻断本轮 | #81 后续迁移验证 |
 | 部署侧 Python 3.10 SDK 互通复验 | #80 §7 | PENDING_VERIFICATION | #81 后续；#82 Gate 已复核登记（本文 §2） |
 | P0-02 适配风险 R1–R9 | #80 §5 | 已登记 | R4/R5/R6/R7 → #83/#84/#88；R1–R3 → P2 |
-| 删除/撤权台账完全独立于快照 | #81 §8.2 | PENDING_ARCH（现状=快照内嵌+一次性重放） | [#88](https://github.com/lybym/LumiThink/issues/88)（P1-08） |
+| 删除/撤权台账完全独立于快照 | #81 §8.2 | PENDING_ARCH（现状=快照内嵌+一次性重放） | [#90](https://github.com/lybym/LumiThink/issues/90)（P1-08）；联动 [#88](https://github.com/lybym/LumiThink/issues/88)（P1-06 输出与 Outbox） |
 | 资源预算实测修订（日预算/磁盘/吞吐） | #81 §7 | 初值已冻结，PENDING_MEASUREMENT | [#91](https://github.com/lybym/LumiThink/issues/91)（P1-09）；生产值运营者 |
 | A2A 验证服务 3312 监听 | #81 §10.9 | PENDING（预留） | [#83](https://github.com/lybym/LumiThink/issues/83)（P1-01） |
 | 应用进程级本机（非沙箱）启动证据 | #81 §10.2 | CI 承载；本机 PENDING_VERIFICATION | 运营者非沙箱复跑 |
