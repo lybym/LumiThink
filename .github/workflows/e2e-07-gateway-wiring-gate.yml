@@ -58,6 +58,7 @@ on:
       - 'tests/server/voice-gateway-*.spec.ts'
       - 'tests/domain/voice/bridge/stream-gate-sink.spec.ts'
       - 'poc/dsh-child/src/**'
+      - 'tests/deploy/test_gateway_bridge_tts.py'
       - '.github/workflows/e2e-07-gateway-wiring-gate.yml'
   push:
     branches: [main]
@@ -71,6 +72,7 @@ on:
       - 'tests/server/voice-gateway-*.spec.ts'
       - 'tests/domain/voice/bridge/stream-gate-sink.spec.ts'
       - 'poc/dsh-child/src/**'
+      - 'tests/deploy/test_gateway_bridge_tts.py'
       - '.github/workflows/e2e-07-gateway-wiring-gate.yml'
   workflow_dispatch:
 

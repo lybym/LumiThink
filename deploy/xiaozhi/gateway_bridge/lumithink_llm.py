@@ -14,7 +14,7 @@
 #   pipe + token; NO TCP) → LumiThink Voice Gateway Adapter stack →
 #   Orchestrator → REAL Bridge IPC → DSH runtime
 #     ← fence-stamped TTS sentences (Output-Gate-approved text) ←
-#   this module (tts_text_queue) → pinned server TTS engine → Opus → device.
+#   this module (yield text) → native chat TTS queue → TTS engine → Opus → device.
 #
 # FRAME ORDERING GUARANTEE: every gateway-bound frame (device_hello,
 # session_issued, abort, turn_prompt, audio_delivered) is submitted to ONE

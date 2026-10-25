@@ -1,0 +1,31 @@
+{
+  "id": "task-example",
+  "contextId": "ctx-example",
+  "status": {
+    "state": "TASK_STATE_COMPLETED"
+  },
+  "artifacts": [
+    {
+      "artifactId": "answer-example",
+      "name": "Admitted answer",
+      "parts": [
+        {
+          "text": "你好。我们开始吧。"
+        }
+      ],
+      "metadata": {
+        "lumithinkContent": {
+          "version": 1,
+          "category": "admitted-answer"
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "lumithinkResult": {
+      "version": 1,
+      "outputSuppressedAfterCancel": false,
+      "answerComplete": true
+    }
+  }
+}
