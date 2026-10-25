@@ -12,11 +12,16 @@ import { startA2aService, stopA2aService } from './a2a-service.ts';
 const config = loadA2aServiceConfig(process.env);
 const service = await startA2aService({ config });
 
+const runtimeNote =
+  config.runtimeMode === 'dsh-worker'
+    ? 'DSH-WORKER real subprocess runtime (synthetic provider content — ' +
+      'real-model verification remains P1-10/#92)'
+    : 'SYNTHETIC executor only — not a real DSH execution gate';
 console.log(
-  `[lumithink-a2a] SYNTHETIC validation service listening on ${service.base} ` +
-    `(P1-01/P1-02/P1-03, issues #83/#84/#85; A2A ${config.supportedVersions.join(', ')}; ` +
+  `[lumithink-a2a] validation service listening on ${service.base} ` +
+    `(P1-01..P1-05, issues #83/#84/#85/#86/#87; A2A ${config.supportedVersions.join(', ')}; ` +
     `SQLite Task Manager db=${config.dbPath}; identity store db=${config.identityDbPath}; ` +
-    'two-tier Client/Principal identity active; synthetic executor only — not a real DSH execution gate)',
+    `two-tier Client/Principal identity active; runtime=${config.runtimeMode}: ${runtimeNote})`,
 );
 
 const shutdown = (signal: string) => {

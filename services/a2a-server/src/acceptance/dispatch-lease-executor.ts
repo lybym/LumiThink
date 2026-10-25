@@ -42,6 +42,35 @@ import type { SqliteTaskManager } from '../task-manager/sqlite-task-manager.ts';
 
 export type QuotaGate = (taskId: string) => { allowed: boolean; reason?: string };
 
+/**
+ * The dispatch-lease claim keys, handed to lease-aware inner executors
+ * (P1-05, issue #87): the real DSH worker runtime needs the exact
+ * attribution keys to register the worker, admit output and settle the
+ * execution row.
+ */
+export interface DispatchLeaseInfo {
+  taskId: string;
+  contextId: string;
+  executionId: string;
+  turnSeq: number;
+  epoch: number;
+  leaseId: string;
+  leaseExpiresAtMs: number;
+}
+
+/**
+ * Inner executors that want the dispatch-lease claim keys implement this
+ * (P1-05): the decorator calls executeWithLease instead of execute after a
+ * successful claim. Executors without it (SYNTHETIC) keep the plain path.
+ */
+export interface LeaseAwareExecutor extends AgentExecutor {
+  executeWithLease(
+    requestContext: RequestContext,
+    eventBus: ExecutionEventBus,
+    lease: DispatchLeaseInfo,
+  ): Promise<void>;
+}
+
 export interface LeaseDispatchExecutorOptions {
   inner: AgentExecutor;
   /**
@@ -86,51 +115,78 @@ export function leaseDispatchExecutor(options: LeaseDispatchExecutorOptions): Ag
         return;
       }
       const { taskId, contextId } = requestContext;
+      let claimed: DispatchLeaseInfo | null = null;
 
-      // 1. Quota re-check BEFORE the claim (rejected tasks never take a slot).
-      if (options.quotaGate) {
-        const quota = options.quotaGate(taskId);
-        if (!quota.allowed) {
-          eventBus.publish(statusUpdate(taskId, contextId, TaskState.TASK_STATE_REJECTED));
+      try {
+        // 1. Quota re-check BEFORE the claim (rejected tasks never take a slot).
+        if (options.quotaGate) {
+          const quota = options.quotaGate(taskId);
+          if (!quota.allowed) {
+            eventBus.publish(statusUpdate(taskId, contextId, TaskState.TASK_STATE_REJECTED));
+            return;
+          }
+        }
+
+        // 2. Transactional dispatch lease (cancel-vs-dispatch race resolves
+        //    here: only one side wins the conditional update).
+        const executionId = randomUUID();
+        const leaseId = randomUUID();
+        const leaseExpiresAtMs = now() + options.leaseTtlMs;
+        const claim = taskManager.claimExecution({
+          taskId,
+          executionId,
+          leaseId,
+          leaseExpiresAtMs,
+          workerId: 'runtime-pending',
+        });
+        if (claim.outcome === 'stale') {
+          // Claimed elsewhere / already past submitted: the owning flow (the
+          // winning dispatch or the cancel settlement) owns the outcome; this
+          // execution emits nothing (AC 1: 一个 Task 只有一个有效执行).
           return;
         }
-      }
-
-      // 2. Transactional dispatch lease (cancel-vs-dispatch race resolves
-      //    here: only one side wins the conditional update).
-      const claim = taskManager.claimExecution({
-        taskId,
-        executionId: randomUUID(),
-        leaseId: randomUUID(),
-        leaseExpiresAtMs: now() + options.leaseTtlMs,
-        workerId: 'in-process',
-      });
-      if (claim.outcome === 'stale') {
-        // Claimed elsewhere / already past submitted: the owning flow (the
-        // winning dispatch or the cancel settlement) owns the outcome; this
-        // execution emits nothing (AC 1: 一个 Task 只有一个有效执行).
-        return;
-      }
-      if (claim.outcome === 'canceled_pre_dispatch') {
-        // Cancel intent persisted before dispatch: settle CANCELED here —
-        // submitted → canceled is legal (§3) — and never start the Worker.
-        eventBus.publish(statusUpdate(taskId, contextId, TaskState.TASK_STATE_CANCELED));
-        return;
-      }
-
-      // 3. Authorization re-check on CURRENT state after the claim.
-      if (options.authorizationGate) {
-        const decision = options.authorizationGate(taskId);
-        if (!decision.allowed) {
-          // working → canceled is legal (§3); P1-03 semantic: revocation
-          // settles CANCELED with no body.
+        if (claim.outcome === 'canceled_pre_dispatch') {
+          // Cancel intent persisted before dispatch: settle CANCELED here —
+          // submitted → canceled is legal (§3) — and never start the Worker.
           eventBus.publish(statusUpdate(taskId, contextId, TaskState.TASK_STATE_CANCELED));
           return;
         }
+        claimed = { taskId, contextId, executionId, turnSeq: claim.turnSeq, epoch: claim.epoch, leaseId, leaseExpiresAtMs };
+
+        // 3. Authorization re-check on CURRENT state after the claim.
+        if (options.authorizationGate) {
+          const decision = options.authorizationGate(taskId);
+          if (!decision.allowed) {
+            // working → canceled is legal (§3); P1-03 semantic: revocation
+            // settles CANCELED with no body.
+            eventBus.publish(statusUpdate(taskId, contextId, TaskState.TASK_STATE_CANCELED));
+            return;
+          }
+        }
+
+        // 4. Actual Worker run — lease-aware executors (real DSH runtime,
+        //    P1-05) receive the claim keys; plain executors keep execute().
+        const leaseAware = inner as Partial<LeaseAwareExecutor>;
+        if (typeof leaseAware.executeWithLease === 'function') {
+          await leaseAware.executeWithLease(requestContext, eventBus, claimed);
+        } else {
+          await inner.execute(requestContext, eventBus);
+        }
+      } catch (error) {
+        // Executor error → the SDK settles FAILED; the execution row must
+        // not stay open behind it (settlement path, review #103 P2-2).
+        if (claimed !== null) {
+          settleFromTaskState(taskManager, claimed, 'executor_error');
+        }
+        throw error;
       }
 
-      // 4. Actual Worker run (SYNTHETIC in P1; DSH Runtime Bridge P1-05).
-      await inner.execute(requestContext, eventBus);
+      // Settlement FALLBACK for inner executors without their own settlement
+      // path (SYNTHETIC): the live dispatch path ALWAYS closes its execution
+      // row now (review #103 P2-2: 执行行永不结算 → 补执行行结算路径). Lease-
+      // aware executors settle themselves with process evidence; this call
+      // then observes already_settled (idempotent, first wins).
+      settleFromTaskState(taskManager, claimed);
     },
 
     async cancelTask(taskId: string, eventBus: ExecutionEventBus): Promise<void> {
@@ -139,8 +195,47 @@ export function leaseDispatchExecutor(options: LeaseDispatchExecutorOptions): Ag
         // commit BEFORE any remote cancel dispatch. Repeated cancels are
         // already-recorded / already-terminal without new side effects.
         taskManager.recordCancelIntent({ taskId, reason: 'cancel_requested' });
+        // P1-05: fence the ACTIVE execution row (stop_requested) so the
+        // real stop evidence settles against a recorded stop request.
+        taskManager.markExecutionStopRequested({ taskId, reason: 'cancel_requested' });
       }
       await inner.cancelTask(taskId, eventBus);
     },
   };
+}
+
+/**
+ * Closes the claimed execution row from the DISPATCH side, mirroring the
+ * authoritative task state after the inner executor returned. No-op when
+ * the row is already settled (lease-aware executors settle themselves).
+ */
+function settleFromTaskState(
+  taskManager: SqliteTaskManager,
+  claimed: DispatchLeaseInfo,
+  errorReason?: string,
+): void {
+  try {
+    const detail = taskManager.getTaskDetail(claimed.taskId);
+    const state = detail.currentState;
+    const outcome =
+      errorReason === 'executor_error'
+        ? ({ outcome: 'failed', reason: 'executor_error' } as const)
+        : state === 'completed'
+          ? ({ outcome: 'completed' } as const)
+          : state === 'canceled'
+            ? ({ outcome: 'canceled' } as const)
+            : state === 'failed'
+              ? ({ outcome: 'failed' } as const)
+              : ({ outcome: 'stopped', reason: `executor_finished_${state}` } as const);
+    taskManager.settleExecution({
+      taskId: claimed.taskId,
+      executionId: claimed.executionId,
+      turnSeq: claimed.turnSeq,
+      epoch: claimed.epoch,
+      leaseId: claimed.leaseId,
+      result: outcome,
+    });
+  } catch {
+    // Diagnostics-only bookkeeping must never mask the executor result.
+  }
 }

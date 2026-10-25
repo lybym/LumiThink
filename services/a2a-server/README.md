@@ -1,6 +1,6 @@
-# @lumithink/a2a-server — LumiThink A2A 验证服务（P1-01/P1-02/P1-03/P1-04，issue #83/#84/#85/#86）
+# @lumithink/a2a-server — LumiThink A2A 验证服务（P1-01…P1-05，issue #83/#84/#85/#86/#87）
 
-独立服务入口：官方 `@a2a-js/sdk@1.3.0` 服务端 + Agent Card + JSON-RPC over HTTPS/SSE + 标准错误映射 + Task-only 业务适配边界。**全部为合成口径**：合成执行器仅验证协议与传输，不代表真实 DSH 执行（真实执行 Gate 归 P1-10/#92）。
+独立服务入口：官方 `@a2a-js/sdk@1.3.0` 服务端 + Agent Card + JSON-RPC over HTTPS/SSE + 标准错误映射 + Task-only 业务适配边界。执行运行时双模式：`synthetic`（缺省，协议/传输验证）与 `dsh-worker`（P1-05：真实 DSH 子进程机制 + 合成供应商内容；真实模型另验，Gate 归 P1-10/#92）。
 
 P1-02（issue #84）交付 SQLite 统一仓储 + Task Manager 状态机 + 事务 Outbox（`src/task-manager/`）：SDK handler 只接一个权威 store（`SqliteTaskManager`），不再使用 InMemory stand-in；旧 Prisma schema 保持冻结，无 SDK Store 双写。
 
@@ -65,6 +65,20 @@ pnpm --dir services/a2a-server run start
 
 自定义 TaskStore 接线时（`startA2aService({ taskStore })`）受理门与派发租约整体旁路——两语义都是仓储所有权语义，不做半套接线。设计依据 [ADR-0015](../../docs/adr/0015-a2a-idempotent-acceptance-dispatch-lease.md)。
 
+## 真实 DSH Worker 运行时与执行租约（P1-05，issue #87）
+
+`LUMITHINK_A2A_RUNTIME_MODE=dsh-worker` 启用真实子进程执行（缺省 `synthetic` 不变）：
+
+| 组件 | 内容 |
+| --- | --- |
+| `src/runtime/worker-protocol.ts` | Runtime Bridge 行级 JSON 契约 v1（hello/ready/output/heartbeat/result + start/cancel；`internal-executor` 之外的 kind 一律拒注册——外部工作 DSH 是客户端，不是被派发执行器） |
+| `src/runtime/dsh-worker-entry.mjs` | 真实子进程入口（注册、心跳、输出、退出码；行为剖面供测试驱动崩溃/启动失败/失联/挂起/迟到输出） |
+| `src/runtime/dsh-worker-runtime.ts` | spawn + hello fail-closed 校验 + taskId 会话表 + 四类 watchdog（hello 超时/失联/执行截止/取消宽限）+ kill/退出证据 + `dispose()` |
+| `src/runtime/dsh-worker-executor.ts` | 租约键透传执行器：`registerExecutionWorker`（归属落行）→ 输出经 `admitChunk`（归属/租约/准入）→ 终结 `settleExecution`（原始证据与公开结算分离） |
+| 仓储新原语 | `settleExecution`（幂等、lease 出示；执行行结算路径 = review #103 P2-2 收口）、`registerExecutionWorker`、`markExecutionStopRequested`；`getTaskDetail` 暴露 body-free 执行诊断 |
+
+配置：`LUMITHINK_A2A_DSH_WORKER_ENTRY`（缺省内置入口）、`LUMITHINK_A2A_DSH_WORKER_TIMEOUT_MS`（缺省 120s）、`..._HELLO_TIMEOUT_MS`（10s）、`..._LOST_CONTACT_MS`（15s）、`..._CANCEL_GRACE_MS`（5s）。`dsh-worker` 模式要求 SQLite Task Manager（自定义 Task Store 拒绝启动，fail-closed）。`state='abandoned'` 保留给 P1-08 恢复扫描。设计依据 [ADR-0016](../../docs/adr/0016-a2a-dsh-worker-runtime-lease.md)。
+
 ## 测试
 
 ```powershell
@@ -97,7 +111,7 @@ CI 承载：`.github/workflows/p1-a2a-server-gate.yml`（ubuntu，frozen install
 
 ## 边界（本包不做）
 
-- 不接真实 DSH Runtime / Runtime Bridge / 模型；执行器为 `src/synthetic-executor.ts`（显式 SYNTHETIC 标注）。真实 Worker 注册/租约核对/重启恢复扫描归 P1-05/#87 与 P1-08/#90（派发租约的执行记录已为其保留归属键）。
+- 不接真实模型/生产 Runtime：`dsh-worker` 模式的进程机制为真（真实子进程、租约、超时与退出证据），供应商内容为合成（真实模型另验，P1-10/#92 Gate）。中断执行的重启恢复扫描、删除台账、清理编排归 P1-08/#90（`state='abandoned'` 是其保留态）。
 - 不做 OpenAI-compatible 入口；不拆 Companion/Learning（单 Agent `lumithink`）。
 - 幂等受理/派发租约已接入 handler 受理链（P1-04/#86）；仍归后续 Issue：分片级输出 Outbox 交付契约与重连水位（P1-06/#88）、CancelTask 完整语义族与真实取消证据（P1-07/#89）、启动扫描/删除台账/清理编排（P1-08/#90——`purgeTaskBody` 与墓碑时间戳是其仓储原语）、真实资源限额与背压（P1-09/#91——配额门挂钩已预留，缺省放行）。
 - 身份层不含渠道身份入口本体：飞书事件验证、DSH Profile 凭据分发流程、设备会话确认 UX、声纹识别服务分别归 P3/P2/P4（本 Issue 只冻结共用解析/授权/撤销/审计接口，见 ADR-0014）；授权决策缓存按 epoch 失效，无 TTL 撤销窗口。

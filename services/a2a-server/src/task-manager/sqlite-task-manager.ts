@@ -180,7 +180,15 @@ export interface AdmitChunkParams {
 }
 
 export type AdmitChunkResult =
-  | { outcome: 'admitted'; chunkSeq: number; chunkId: string }
+  | {
+      outcome: 'admitted';
+      chunkSeq: number;
+      chunkId: string;
+      /** Admitted byte range + digest (evidence for chunk metadata). */
+      startByte: number;
+      endByte: number;
+      sha256: string;
+    }
   /** Redelivery of an already-admitted chunk keeps the original (§6.1). */
   | { outcome: 'duplicate'; chunkSeq: number; chunkId: string }
   | {
@@ -204,6 +212,76 @@ export type RecordCancelIntentResult =
   /** 重复取消不重复副作用 (§7.1.2). */
   | { outcome: 'already-recorded'; currentState: A2aTaskState }
   | { outcome: 'already-terminal'; currentState: A2aTaskState };
+
+/**
+ * Minimal, body-free execution settlement evidence (P1-05, issue #87 AC 4).
+ * Carries ONLY stable ids, reason codes, process exit evidence and
+ * timestamps — never message body, working material or credentials.
+ */
+export interface ExecutionSettlement {
+  outcome:
+    | 'completed'
+    | 'failed'
+    | 'canceled'
+    | 'stopped'
+    | 'timeout'
+    | 'lost_contact'
+    | 'startup_failed'
+    | 'crashed';
+  /** Stable reason code (e.g. 'worker_exit_nonzero', 'output_admission_closed'). */
+  reason?: string;
+  exitCode?: number | null;
+  signal?: string | null;
+  workerId?: string | null;
+  pid?: number | null;
+  startedAtMs?: number | null;
+  endedAtMs?: number | null;
+}
+
+export interface SettleExecutionParams {
+  taskId: string;
+  executionId: string;
+  turnSeq: number;
+  epoch: number;
+  /** The lease holder must present its lease (same rule as admitChunk). */
+  leaseId: string;
+  result: ExecutionSettlement;
+}
+
+export type SettleExecutionResult =
+  | { outcome: 'settled' }
+  /** Idempotent close: the row was already settled/abandoned (first wins). */
+  | { outcome: 'already_settled'; state: 'settled' | 'abandoned' }
+  | {
+      outcome: 'rejected';
+      reason: 'execution_attribution' | 'lease_invalid' | 'invalid_result';
+    };
+
+export interface RegisterExecutionWorkerParams {
+  taskId: string;
+  executionId: string;
+  leaseId: string;
+  /** Self-reported worker registration id (hello), e.g. 'dshw-<pid>-<rand>'. */
+  workerId: string;
+}
+
+export type RegisterExecutionWorkerResult =
+  | { outcome: 'registered' }
+  | {
+      outcome: 'rejected';
+      reason: 'execution_attribution' | 'lease_invalid' | 'execution_settled';
+    };
+
+export interface MarkExecutionStopRequestedParams {
+  taskId: string;
+  /** Stable stop reason code; diagnostics only. */
+  reason?: string;
+}
+
+export type MarkExecutionStopRequestedResult =
+  | { outcome: 'marked'; executionId: string }
+  /** No active (registered/running) execution row: nothing to fence. */
+  | { outcome: 'no_active_execution' };
 
 export interface PurgeTaskBodyResult {
   outcome: 'purged';
@@ -259,6 +337,8 @@ export interface TaskDetail {
       workerId: string | null;
       createdAtMs: number;
       settledAtMs: number | null;
+      /** Body-free settlement evidence (P1-05 AC 4: 最小诊断可排障). */
+      result: ExecutionSettlement | null;
     }[];
   }[];
 }
@@ -872,7 +952,14 @@ export class SqliteTaskManager implements TaskStore {
       );
       this.checkFailurePoint('afterOutboxWrite');
       this.checkFailurePoint('beforeCommit');
-      return { outcome: 'admitted', chunkSeq, chunkId };
+      return {
+        outcome: 'admitted',
+        chunkSeq,
+        chunkId,
+        startByte,
+        endByte,
+        sha256: digest,
+      };
     });
   }
 
@@ -914,6 +1001,124 @@ export class SqliteTaskManager implements TaskStore {
       this.checkFailurePoint('afterOutboxWrite');
       this.checkFailurePoint('beforeCommit');
       return { outcome: 'recorded', currentState: state, stateVersion: row.state_version };
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Execution-row lifecycle settlement (P1-05, issue #87; review #103 P2-2)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Closes ONE execution row with body-free evidence — the settlement path
+   * review #103 (P1-04) required: before P1-05 NO write path ever set
+   * state='settled'/settled_at_ms, so the live path left permanent
+   * 'registered' rows behind.
+   *
+   * Contract (TASK_LIFECYCLE §2/§4.2):
+   *   - Attribution: the caller must match task/turn/epoch AND present the
+   *     lease the dispatch claim granted (lease-holder rule, review #101 ⑤).
+   *   - Lease EXPIRY is intentionally NOT enforced here: expiry guards
+   *     public OUTPUT admission (admitChunk); settlement is the holder
+   *     closing its own bookkeeping record and must stay possible after a
+   *     legitimately long run.
+   *   - Idempotent close: first settlement wins; a second call observes
+   *     already_settled. state='abandoned' is reserved for the P1-08
+   *     recovery scan (executions this process can no longer account for).
+   *   - Separation from public Task settlement (issue #87 AC 3): this
+   *     records the RAW execution result on the execution row; the public
+   *     Task state moves only through the conditional-update transition
+   *     discipline (transitionTask / claimExecution / SDK bridge).
+   *
+   * result_json carries ONLY stable ids/reason codes/exit evidence — never
+   * message body, working material or credentials (issue #87 AC 4).
+   */
+  settleExecution(params: SettleExecutionParams): SettleExecutionResult {
+    if (params.leaseId === undefined || params.leaseId === '') {
+      return { outcome: 'rejected', reason: 'lease_invalid' };
+    }
+    if (params.result === undefined || params.result === null) {
+      return { outcome: 'rejected', reason: 'invalid_result' };
+    }
+    return this.withWriteTransaction(() => {
+      const exec = this.db
+        .prepare('SELECT * FROM a2a_executions WHERE execution_id = ? AND task_id = ?')
+        .get(params.executionId, params.taskId) as
+        | { turn_seq: number; epoch: number; lease_id: string | null; state: string }
+        | undefined;
+      if (!exec || exec.turn_seq !== params.turnSeq || exec.epoch !== params.epoch) {
+        return { outcome: 'rejected', reason: 'execution_attribution' as const };
+      }
+      if (exec.state === 'settled' || exec.state === 'abandoned') {
+        return { outcome: 'already_settled' as const, state: exec.state as 'settled' | 'abandoned' };
+      }
+      if (exec.lease_id !== null && params.leaseId !== exec.lease_id) {
+        return { outcome: 'rejected', reason: 'lease_invalid' as const };
+      }
+      const nowMs = this.now();
+      this.db
+        .prepare(
+          "UPDATE a2a_executions SET state = 'settled', settled_at_ms = ?, result_json = ? " +
+            'WHERE execution_id = ? AND task_id = ?',
+        )
+        .run(nowMs, JSON.stringify(params.result), params.executionId, params.taskId);
+      this.checkFailurePoint('beforeCommit');
+      return { outcome: 'settled' };
+    });
+  }
+
+  /**
+   * Worker registration (issue #87 AC 2: Worker 归属/租约/会话映射可核对):
+   * the runtime records the WORKER's self-reported registration id on the
+   * execution row once the subprocess hello is verified, so the persisted
+   * row, the lease and the runtime session map can be cross-checked.
+   */
+  registerExecutionWorker(params: RegisterExecutionWorkerParams): RegisterExecutionWorkerResult {
+    if (typeof params.workerId !== 'string' || params.workerId.trim().length === 0) {
+      return { outcome: 'rejected', reason: 'execution_attribution' };
+    }
+    return this.withWriteTransaction(() => {
+      const exec = this.db
+        .prepare('SELECT * FROM a2a_executions WHERE execution_id = ? AND task_id = ?')
+        .get(params.executionId, params.taskId) as
+        | { turn_seq: number; epoch: number; lease_id: string | null; state: string }
+        | undefined;
+      if (!exec) {
+        return { outcome: 'rejected', reason: 'execution_attribution' as const };
+      }
+      if (exec.state === 'settled' || exec.state === 'abandoned') {
+        return { outcome: 'rejected', reason: 'execution_settled' as const };
+      }
+      if (exec.lease_id !== null && params.leaseId !== exec.lease_id) {
+        return { outcome: 'rejected', reason: 'lease_invalid' as const };
+      }
+      this.db
+        .prepare('UPDATE a2a_executions SET worker_id = ? WHERE execution_id = ? AND task_id = ?')
+        .run(params.workerId, params.executionId, params.taskId);
+      return { outcome: 'registered' };
+    });
+  }
+
+  /**
+   * Fences the ACTIVE execution row when a cancel dispatch goes out
+   * (state → 'stop_requested'): the persisted stop-request marker that the
+   * real stop evidence (worker exit / kill) settles against. Repeated cancels
+   * and cancels with no active execution are no-ops (重复取消无新副作用).
+   */
+  markExecutionStopRequested(
+    params: MarkExecutionStopRequestedParams,
+  ): MarkExecutionStopRequestedResult {
+    return this.withWriteTransaction(() => {
+      const exec = this.db
+        .prepare(
+          "SELECT execution_id FROM a2a_executions WHERE task_id = ? AND state IN ('registered','running') " +
+            'ORDER BY created_at_ms DESC LIMIT 1',
+        )
+        .get(params.taskId) as { execution_id: string } | undefined;
+      if (!exec) return { outcome: 'no_active_execution' };
+      this.db
+        .prepare("UPDATE a2a_executions SET state = 'stop_requested' WHERE execution_id = ?")
+        .run(exec.execution_id);
+      return { outcome: 'marked', executionId: exec.execution_id };
     });
   }
 
@@ -1153,6 +1358,7 @@ export class SqliteTaskManager implements TaskStore {
         workerId: (exec['worker_id'] as string | null) ?? null,
         createdAtMs: exec['created_at_ms'] as number,
         settledAtMs: (exec['settled_at_ms'] as number | null) ?? null,
+        result: parseJsonOrNull<ExecutionSettlement>(exec['result_json'] as string | null) ?? null,
       })),
     }));
     return {

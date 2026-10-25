@@ -25,6 +25,16 @@ export function testConfig(overrides: Partial<A2aServiceConfig> = {}): A2aServic
     fingerprintKey: 'test-fingerprint-hmac-key',
     dispatchLeaseTtlMs: 5 * 60 * 1000,
     retention: { retryWindowMs: 24 * 3600 * 1000, resultRetentionMs: 7 * 24 * 3600 * 1000, tombstoneRetentionMs: 30 * 24 * 3600 * 1000 },
+    // P1-05 (issue #87): default tests keep the SYNTHETIC runtime; the
+    // dsh-worker specs override runtimeMode + dshWorker tuning wholesale.
+    runtimeMode: 'synthetic',
+    dshWorker: {
+      entryPath: '',
+      executionTimeoutMs: 120 * 1000,
+      helloTimeoutMs: 10 * 1000,
+      lostContactMs: 15 * 1000,
+      cancelGraceMs: 5 * 1000,
+    },
     ...overrides,
   };
 }

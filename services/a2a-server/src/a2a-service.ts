@@ -60,6 +60,8 @@ import { SyntheticExecutor } from './synthetic-executor.ts';
 import { SqliteTaskManager } from './task-manager/sqlite-task-manager.ts';
 import { requireIdempotentAcceptance } from './acceptance/acceptance-gate.ts';
 import { leaseDispatchExecutor, type QuotaGate } from './acceptance/dispatch-lease-executor.ts';
+import { DshWorkerRuntime } from './runtime/dsh-worker-runtime.ts';
+import { DshWorkerExecutor } from './runtime/dsh-worker-executor.ts';
 import {
   IdentityController,
   StreamRegistry,
@@ -115,6 +117,11 @@ export interface StartedA2aService {
   identity: IdentityController;
   /** True when the service created (and owns/closes) the identity store. */
   ownsIdentity: boolean;
+  /**
+   * Real DSH worker runtime (P1-05) — present only in dsh-worker mode.
+   * stopA2aService disposes it (kills every live worker process).
+   */
+  runtime?: DshWorkerRuntime;
   /** Resolves when the server has fully closed (after close()). */
   closed: Promise<void>;
 }
@@ -169,9 +176,40 @@ export async function startA2aService(
   const sqliteTaskManager =
     authoritativeStore instanceof SqliteTaskManager ? authoritativeStore : undefined;
   const guardedTaskStore = authorizingTaskStore(authoritativeStore, { store: identity.store });
-  const innerExecutor =
-    options.executor ??
-    new SyntheticExecutor({ authorizationGate: (taskId) => identity.executorGate(taskId) });
+  // P1-05 (#87): dsh-worker mode wires the REAL DSH worker subprocess
+  // runtime as the inner executor. The runtime-lease semantics are
+  // repository-owned (attribution/settlement), so this mode REQUIRES the
+  // SQLite Task Manager (fail-closed with a custom Task Store) and cannot
+  // be combined with an explicit executor override.
+  let runtime: DshWorkerRuntime | undefined;
+  let innerExecutor: AgentExecutor;
+  if (config.runtimeMode === 'dsh-worker') {
+    if (sqliteTaskManager === undefined) {
+      throw new Error(
+        'runtime mode dsh-worker requires the SQLite Task Manager (runtime lease, ' +
+          'execution attribution and settlement are repository semantics); ' +
+          'a custom Task Store cannot dispatch real workers',
+      );
+    }
+    if (options.executor !== undefined) {
+      throw new Error(
+        'runtime mode dsh-worker builds its own executor; do not pass executor explicitly',
+      );
+    }
+    runtime = new DshWorkerRuntime({
+      workerEntryPath: config.dshWorker.entryPath,
+      executionTimeoutMs: config.dshWorker.executionTimeoutMs,
+      helloTimeoutMs: config.dshWorker.helloTimeoutMs,
+      lostContactMs: config.dshWorker.lostContactMs,
+      cancelGraceMs: config.dshWorker.cancelGraceMs,
+      workerEnv: config.dshWorker.workerEnv,
+    });
+    innerExecutor = new DshWorkerExecutor({ runtime, taskManager: sqliteTaskManager });
+  } else {
+    innerExecutor =
+      options.executor ??
+      new SyntheticExecutor({ authorizationGate: (taskId) => identity.executorGate(taskId) });
+  }
   const executor = leaseDispatchExecutor({
     inner: innerExecutor,
     taskManager: sqliteTaskManager,
@@ -248,6 +286,7 @@ export async function startA2aService(
     config,
     identity,
     ownsIdentity,
+    runtime,
     closed,
   };
 }
@@ -264,6 +303,11 @@ export async function stopA2aService(service: StartedA2aService): Promise<void> 
     });
   }
   await service.closed;
+  // Real worker processes (P1-05) are torn down BEFORE the stores close —
+  // no orphan process survives service shutdown.
+  if (service.runtime !== undefined) {
+    await service.runtime.dispose();
+  }
   // Close the stores the service owns AFTER the listener is down — a store
   // must never be closed while the handler can still reach it.
   if (service.ownsTaskStore && service.taskStore instanceof SqliteTaskManager) {
