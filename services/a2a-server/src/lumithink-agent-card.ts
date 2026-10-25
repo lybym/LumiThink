@@ -30,8 +30,10 @@ const bearerScheme: SecurityScheme = {
     $case: 'httpAuthSecurityScheme',
     value: {
       description:
-        'Synthetic validation bearer credential (LUMITHINK_A2A_VALIDATION_TOKEN); ' +
-        'real two-tier Client/Principal identity arrives with P1-03 (issue #85).',
+        'Registered bearer credential binding BOTH identity tiers server-side: the calling ' +
+        'client (Client Identity) and the verified user or restricted visitor it acts for ' +
+        '(Principal Identity). One credential per client binding; no stacked auth headers. ' +
+        'See docs/A2A_DESIGN.md §5.2 and ADR-0014.',
       scheme: 'bearer',
       bearerFormat: 'opaque',
     } satisfies HTTPAuthSecurityScheme,
@@ -42,8 +44,10 @@ export function buildLumithinkAgentCard(base: string): AgentCard {
   return {
     name: LUMITHINK_AGENT_NAME,
     description:
-      'LumiThink single family agent — A2A validation service skeleton (P1-01, issue #83). ' +
-      'SYNTHETIC executor only: protocol/transport verification, not a real DSH execution gate.',
+      'LumiThink single family agent — A2A validation service (P1-01 #83 skeleton, P1-02 #84 ' +
+      'SQLite Task Manager, P1-03 #85 two-tier Client/Principal identity & household ' +
+      'authorization). SYNTHETIC executor only: protocol/transport verification, not a real ' +
+      'DSH execution gate.',
     version: LUMITHINK_A2A_SERVER_VERSION,
     provider: undefined,
     capabilities: {

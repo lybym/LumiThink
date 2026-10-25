@@ -19,6 +19,7 @@ export function testConfig(overrides: Partial<A2aServiceConfig> = {}): A2aServic
     bearerToken: TEST_TOKEN,
     supportedVersions: ['1.0'],
     dbPath: ':memory:',
+    identityDbPath: ':memory:',
     ...overrides,
   };
 }
@@ -30,15 +31,20 @@ export interface StartedTest extends StartedA2aService {
 /**
  * Starts a test service. Pass `taskStore` to observe the single-store wiring
  * (the SDK handler must be the ONLY writer through that instance).
+ * Pass `identityBootstrap` to provision a custom synthetic directory
+ * (P1-03): households/users/memberships/relationships/clients/credentials/
+ * grants.
  */
 export async function startTest(options: {
   taskStore?: TaskStore;
   configOverrides?: Partial<A2aServiceConfig>;
+  identityBootstrap?: import('../src/identity/identity-store.ts').IdentityBootstrap;
 } = {}): Promise<StartedTest> {
   const service = await startA2aService({
     config: testConfig(options.configOverrides),
     taskStore: options.taskStore,
     executor: new SyntheticExecutor(),
+    identityBootstrap: options.identityBootstrap,
   });
   return service as StartedTest;
 }

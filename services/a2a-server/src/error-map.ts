@@ -9,9 +9,11 @@
  *  - Authentication failure → HTTP 401 + JSON-RPC error body with
  *    code -32000 (JSON-RPC implementation-defined server error) and a
  *    google.rpc.ErrorInfo reason `AUTHENTICATION_REQUIRED` in the
- *    application domain `lumithink.a2a`. This is the P1-01 synthetic
- *    validation gate; the authoritative two-tier identity mapping is
- *    P1-03 (issue #85).
+ *    application domain `lumithink.a2a`. Since P1-03 (issue #85) this shape
+ *    is produced by the two-tier identity middleware
+ *    (src/identity/express-auth.ts, requireTwoTierAuth), which replaced the
+ *    original single-token bearer gate; the same file owns the
+ *    PERMISSION_DENIED (403) and CONTEXT_ACCESS_DENIED (-32602) shapes.
  *  - JSON body parse failure → JSON-RPC -32700 ParseError (standard).
  *  - Task-not-found (-32001), TaskNotCancelable (-32002), terminal
  *    SubscribeToTask (-32004) and invalid-params (-32602) are produced by
@@ -22,7 +24,6 @@
  * only successful acceptance creates tasks; auth/param failures return
  * standard errors).
  */
-import { createHash, timingSafeEqual } from 'node:crypto';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 const ERROR_INFO_TYPE = 'type.googleapis.com/google.rpc.ErrorInfo';
@@ -93,47 +94,6 @@ export function requireA2aVersion(options: {
     }
     next();
   };
-}
-
-/**
- * Synthetic bearer gate for the validation service. Discovery
- * (/.well-known/agent-card.json) stays unauthenticated per spec; every
- * JSON-RPC POST requires a valid bearer credential. Failure returns the
- * standard-shaped JSON-RPC error above and NEVER creates a task.
- */
-export function requireBearerAuth(options: { bearerToken: string }): RequestHandler {
-  const expected = options.bearerToken;
-  return (req: Request, res: Response, next: NextFunction): void => {
-    if (req.method !== 'POST') {
-      next();
-      return;
-    }
-    const header = req.headers.authorization;
-    const presented =
-      typeof header === 'string' && header.startsWith('Bearer ')
-        ? header.slice('Bearer '.length).trim()
-        : '';
-    if (presented.length === 0 || !timingSafeTokenEquals(presented, expected)) {
-      res.status(401).json(
-        jsonRpcErrorBody(
-          requestIdOf(req),
-          AUTHENTICATION_REQUIRED_CODE,
-          'Authentication required: a valid bearer credential is required for A2A JSON-RPC ' +
-            'methods (P1-01 synthetic validation gate; P1-03/#85 owns the real two-tier identity).',
-          errorInfo('AUTHENTICATION_REQUIRED', 'lumithink.a2a'),
-        ),
-      );
-      return;
-    }
-    next();
-  };
-}
-
-/** Constant-time comparison, length-independent via SHA-256 digests. */
-export function timingSafeTokenEquals(presented: string, expected: string): boolean {
-  const a = createHash('sha256').update(presented, 'utf8').digest();
-  const b = createHash('sha256').update(expected, 'utf8').digest();
-  return timingSafeEqual(a, b);
 }
 
 /**
