@@ -1,0 +1,99 @@
+name: P1 A2A server gate
+
+# P1-01 (issue #83): the standalone A2A validation service
+# (services/a2a-server, fully isolated package — docs/adr/0013) must
+# frozen-install, typecheck and pass its protocol suite on a clean Linux
+# runner: official @a2a-js/sdk client round-trip (Agent Card discovery,
+# blocking/streaming send, GetTask, CancelTask), standard error mapping
+# (fixtures 05–12 semantics), SSE-disconnect-never-cancels, Task-only
+# policy, auth/param failures never create tasks. Synthetic data only;
+# loopback only; no DATABASE_URL and no provider credentials by design.
+#
+# The root-level static guard (tests/server/a2a-server-skeleton.spec.ts)
+# is covered by the r1-baseline-gate suite; this workflow owns the
+# executable protocol evidence of the isolated package.
+on:
+  pull_request:
+    paths:
+      - 'services/a2a-server/**'
+      - '.github/workflows/p1-a2a-server-gate.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'services/a2a-server/**'
+      - '.github/workflows/p1-a2a-server-gate.yml'
+  workflow_dispatch:
+
+# Minimal token: the gate only needs to read the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: p1-a2a-server-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Same pinned toolchain as the R0/R1 gates (isolated package installs with
+  # its own lockfile; lockfileVersion 9.0 is compatible with this pnpm pin).
+  NODE_VERSION: '24.21.0'
+  PNPM_VERSION: '10.34.7'
+  CI: 'true'
+
+jobs:
+  a2a-server:
+    name: A2A validation service (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install exact pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Install exact Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Assert the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_node="$(node --version)"
+          actual_pnpm="$(pnpm --version)"
+          echo "node=${actual_node} pnpm=${actual_pnpm}"
+          [ "${actual_node}" = "v${NODE_VERSION}" ]
+          [ "${actual_pnpm}" = "${PNPM_VERSION}" ]
+
+      - name: Prove the clean-environment contract (no real credentials/data)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL must stay unset in the A2A server gate"
+            exit 1
+          fi
+          for key in DEEPSEEK_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY; do
+            if [ -n "${!key:-}" ]; then
+              echo "::error::${key} must stay unset in the A2A server gate"
+              exit 1
+            fi
+          done
+          echo "clean environment confirmed"
+
+      - name: Frozen-lockfile install (isolated package)
+        working-directory: services/a2a-server
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (isolated tsconfig)
+        working-directory: services/a2a-server
+        run: pnpm run typecheck
+
+      - name: Protocol suite (official SDK client round-trip, errors, SSE, contracts)
+        working-directory: services/a2a-server
+        run: pnpm test
