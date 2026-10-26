@@ -109,19 +109,31 @@ async function run() {
   }
 
   // Output-producing profiles: complete / stop-on-cancel / flood-after-cancel
-  // / complete-after-cancel (P1-07 完成竞争) / never-stops (P1-07 非协作).
+  // / complete-after-cancel (P1-07 完成竞争) / never-stops (P1-07 非协作) /
+  // conflict-output-then-complete (P1-08 异常围栏完成).
   if (
     behavior === 'complete' ||
     behavior === 'stop-on-cancel' ||
     behavior === 'flood-after-cancel' ||
     behavior === 'complete-after-cancel' ||
-    behavior === 'never-stops'
+    behavior === 'never-stops' ||
+    behavior === 'conflict-output-then-complete'
   ) {
     void (async () => {
       send({ type: 'output', chunkId: 'answer#chunk-1', text: '你好。', lastChunk: false });
       await sleep(150);
       if (behavior === 'complete') {
         send({ type: 'output', chunkId: 'answer#chunk-2', text: '我们开始吧。', lastChunk: true });
+        send({ type: 'result', outcome: 'completed' });
+        stopHeartbeats();
+        process.exit(0);
+      }
+      if (behavior === 'conflict-output-then-complete') {
+        // P1-08 (review #106 r1 P2-1): same chunkId, DIFFERENT content — the
+        // repository rejects the redelivery (chunk_content_mismatch), the
+        // run is fenced, and the worker then reports a NORMAL completion.
+        // The public settlement must become an explicit FAILED.
+        send({ type: 'output', chunkId: 'answer#chunk-1', text: '被篡改的重放。', lastChunk: false });
         send({ type: 'result', outcome: 'completed' });
         stopHeartbeats();
         process.exit(0);

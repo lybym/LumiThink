@@ -34,6 +34,13 @@ import {
 const WATCHDOG_TICK_MS = 50;
 /** stderr tail cap (bytes) — diagnostics only, never body material. */
 const STDERR_TAIL_BYTES = 8 * 1024;
+/**
+ * Bounded wait for a killed child's close event before forced-stop evidence
+ * is delivered (P1-08/#90, review #106 r1 P2-2): upgrades the evidence from
+ * "kill dispatched" to "death observed" (signal='SIGKILL' captured from the
+ * close event) without ever making finalize unbounded.
+ */
+const KILL_EVIDENCE_CLOSE_WAIT_MS = 2000;
 
 export interface DshWorkerRuntimeOptions {
   /** Worker entry script (bundled dsh-worker-entry.mjs). */
@@ -114,6 +121,8 @@ export class DshWorkerRuntime {
   private readonly options: DshWorkerRuntimeOptions;
   private readonly now: () => number;
   private readonly sessions = new Map<string, Session>();
+  /** Pending forced-stop evidence deliveries (dispose waits for them). */
+  private readonly pendingEvidence = new Set<Promise<void>>();
   private disposed = false;
 
   constructor(options: DshWorkerRuntimeOptions) {
@@ -267,6 +276,10 @@ export class DshWorkerRuntime {
           }),
       ),
     );
+    // P2-2 evidence deliveries settle the execution rows asynchronously
+    // (bounded); await them so every settlement lands BEFORE the stores
+    // close (stopA2aService disposes the runtime first).
+    await Promise.all([...this.pendingEvidence]);
   }
 
   // -------------------------------------------------------------------------
@@ -363,13 +376,44 @@ export class DshWorkerRuntime {
     if (this.sessions.get(session.request.taskId) === session) {
       this.sessions.delete(session.request.taskId);
     }
+    const child = session.child;
     const evidence: WorkerExitEvidence = {
-      exitCode: exit?.exitCode ?? session.child.exitCode ?? null,
-      signal: exit?.signal ?? session.child.signalCode ?? null,
+      exitCode: exit?.exitCode ?? child.exitCode ?? null,
+      signal: exit?.signal ?? child.signalCode ?? null,
       killedByRuntime: cause !== 'worker_exit' && cause !== 'spawn_error',
       stderrTail: session.stderrTail,
     };
-    session.handlers.onFinalized(evidence, cause);
+    const childAlreadyClosed = child.exitCode !== null || child.signalCode !== null;
+    // P1-08/#90 (review #106 r1 P2-2): on every forced-stop path the SIGKILL
+    // was JUST dispatched — the child has not closed yet, so the raw child
+    // fields are still null and the evidence row would carry only
+    // killedByRuntime=true. Wait (bounded) for the close event and refresh
+    // the evidence, so the recorded stop proof becomes the OBSERVED death
+    // (signal='SIGKILL', exit code) instead of the kill dispatch. The wait
+    // is tracked so dispose() can await pending settlements before the
+    // stores close. 'worker_exit' evidence arrives from the close event
+    // itself; 'spawn_error' never had a child; already-closed children have
+    // their final fields — all three deliver immediately.
+    if (cause === 'worker_exit' || cause === 'spawn_error' || childAlreadyClosed) {
+      session.handlers.onFinalized(evidence, cause);
+      return;
+    }
+    const delivery = new Promise<void>((resolve) => {
+      const guard = setTimeout(resolve, KILL_EVIDENCE_CLOSE_WAIT_MS);
+      child.once('close', () => {
+        clearTimeout(guard);
+        resolve();
+      });
+    }).then(() => {
+      evidence.exitCode = child.exitCode ?? evidence.exitCode;
+      evidence.signal = child.signalCode ?? evidence.signal;
+      session.handlers.onFinalized(evidence, cause);
+    });
+    this.pendingEvidence.add(delivery);
+    void delivery.then(
+      () => this.pendingEvidence.delete(delivery),
+      () => this.pendingEvidence.delete(delivery),
+    );
   }
 }
 

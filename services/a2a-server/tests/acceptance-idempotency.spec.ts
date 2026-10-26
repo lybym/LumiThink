@@ -401,11 +401,11 @@ test('AC4: purge tombstones the key, removes all body, and neither replay nor re
   }
 });
 
-test('schema v2 is applied by the composed service (ledger tombstone timestamp present)', async () => {
+test('current schema is applied by the composed service (v2 tombstone timestamp + v3 purge marker)', async () => {
   const service = await startTest();
   try {
     const manager = service.taskStore as SqliteTaskManager;
-    assert.equal(manager.schemaVersion, 2);
+    assert.equal(manager.schemaVersion, 3);
   } finally {
     await stopA2aService(service);
   }

@@ -33,6 +33,14 @@ export const A2A_VALIDATION_DEFAULT_DB_PATH = ':memory:';
  * CI-clean. Durable deployments set LUMITHINK_A2A_IDENTITY_DB.
  */
 export const A2A_IDENTITY_DEFAULT_DB_PATH = ':memory:';
+/**
+ * Independent deletion-ledger database (P1-08, issue #90; TASK_LIFECYCLE §9:
+ * 删除台账独立于可回滚快照保存). ':memory:' keeps standalone/CI runs
+ * stateless; durable deployments MUST set LUMITHINK_A2A_DELETION_LEDGER_DB
+ * to a real file — an in-memory ledger cannot survive a crash, which would
+ * leave a restored old Task-DB snapshot unguarded against resurrection.
+ */
+export const A2A_DELETION_LEDGER_DEFAULT_DB_PATH = ':memory:';
 
 /**
  * HMAC key for versioned request fingerprints (P1-04, issue #86;
@@ -115,6 +123,12 @@ export interface A2aServiceConfig {
   dbPath: string;
   /** Identity store database path (issue #85); ':memory:' default. */
   identityDbPath: string;
+  /**
+   * Independent deletion-ledger database path (issue #90); ':memory:'
+   * default. Durable deployments set a file path so recorded deletions
+   * replay against restored snapshots before the service opens.
+   */
+  deletionLedgerDbPath: string;
   /** Optional JSON bootstrap for additional synthetic clients/credentials/grants. */
   identityBootstrapJson?: string;
   /** HMAC key for versioned request fingerprints (P1-04, issue #86). */
@@ -156,6 +170,11 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
     rawIdentityDbPath !== undefined && rawIdentityDbPath.trim() !== ''
       ? rawIdentityDbPath.trim()
       : A2A_IDENTITY_DEFAULT_DB_PATH;
+  const rawLedgerDbPath = env.LUMITHINK_A2A_DELETION_LEDGER_DB;
+  const deletionLedgerDbPath =
+    rawLedgerDbPath !== undefined && rawLedgerDbPath.trim() !== ''
+      ? rawLedgerDbPath.trim()
+      : A2A_DELETION_LEDGER_DEFAULT_DB_PATH;
   const rawBootstrap = env.LUMITHINK_A2A_IDENTITY_BOOTSTRAP;
   const identityBootstrapJson =
     rawBootstrap !== undefined && rawBootstrap.trim() !== '' ? rawBootstrap : undefined;
@@ -298,6 +317,7 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
     supportedVersions: A2A_SUPPORTED_VERSIONS,
     dbPath,
     identityDbPath,
+    deletionLedgerDbPath,
     identityBootstrapJson,
     fingerprintKey,
     dispatchLeaseTtlMs,

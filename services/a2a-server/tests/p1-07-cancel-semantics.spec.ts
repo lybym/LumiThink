@@ -316,8 +316,13 @@ test('AC3: 完成竞争 — 取消后真实完成 → COMPLETED + lumithinkResul
     const exec = soleExecution(manager, taskId);
     assert.equal(exec.state, 'settled');
     assert.equal(exec.result?.outcome, 'completed', '执行行如实记录真实完成');
-    assert.equal(exec.result?.reason, 'output_admission_closed',
-      '执行行同时记录正文被抑制的原因（审计分离, §7.2）');
+    // P1-08/#90 (review #106 r1 P2-4 closure): the FENCE reason is recorded
+    // on its own `fencedReason` field — `reason` keeps the settle-path reason
+    // (undefined for a clean worker-reported completion), so the two can
+    // never overwrite each other.
+    assert.equal(exec.result?.fencedReason, 'output_admission_closed',
+      '执行行以独立字段记录正文围栏原因（结算原因与围栏原因分离）');
+    assert.equal(exec.result?.reason, undefined);
 
     // 重复取消 on the completed-suppressed task repeats the standard
     // semantics without inventing states (covered with fixtures in AC4 run).

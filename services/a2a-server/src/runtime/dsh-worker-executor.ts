@@ -353,7 +353,11 @@ export class DshWorkerExecutor implements AgentExecutor {
       endedAtMs,
     };
     if (input.admissionBlocked) {
-      settlement.reason = input.admissionBlockReason ?? 'output_admission_blocked';
+      // P2-4 (review #106 r1): the FENCE reason lives on its own field —
+      // `reason` keeps the settle-path reason (e.g. cancel_grace_expired),
+      // so a compound failure never loses either half and the P1-08
+      // recovery scan can re-derive the honest settlement from the row.
+      settlement.fencedReason = input.admissionBlockReason ?? 'output_admission_blocked';
     }
 
     // --- public Task settlement (only when justified) ---------------------
@@ -364,7 +368,10 @@ export class DshWorkerExecutor implements AgentExecutor {
       cause !== 'disposed'
     ) {
       const desired = this.desiredPublicState(input, outcome);
-      if (desired === TaskState.TASK_STATE_COMPLETED) {
+      if (desired === null) {
+        // 'stopped': the service-shutdown/cancel path owns the settlement —
+        // the executor publishes NOTHING over it.
+      } else if (desired.state === TaskState.TASK_STATE_COMPLETED) {
         // Completion semantics (P1-07, issue #89 — TASK_LIFECYCLE §7.2,
         // fixtures 03/04): EVERY real completion carries the versioned
         // lumithinkResult flags on the terminal event — the locked SDK
@@ -389,13 +396,18 @@ export class DshWorkerExecutor implements AgentExecutor {
             },
           }),
         );
-      } else if (desired === TaskState.TASK_STATE_CANCELED) {
+      } else if (desired.state === TaskState.TASK_STATE_CANCELED) {
         input.eventBus.publish(statusUpdate(input.taskId, input.contextId, TaskState.TASK_STATE_CANCELED));
-      } else if (desired === TaskState.TASK_STATE_FAILED) {
-        input.eventBus.publish(statusUpdate(input.taskId, input.contextId, TaskState.TASK_STATE_FAILED));
+      } else if (desired.state === TaskState.TASK_STATE_FAILED) {
+        input.eventBus.publish(
+          statusUpdate(input.taskId, input.contextId, TaskState.TASK_STATE_FAILED, {
+            // P2-1 (review #106 r1): an anomaly-fenced completion settles
+            // FAILED with a readable explanation — never a silent hang in
+            // working and never a fabricated full answer.
+            message: desired.message === undefined ? undefined : [textPart(desired.message)],
+          }),
+        );
       }
-      // desired === null → a fenced anomaly owned elsewhere: the executor
-      // publishes NOTHING over it (admission/cancel path owns the outcome).
     }
 
     this.taskManager.settleExecution({
@@ -429,26 +441,34 @@ export class DshWorkerExecutor implements AgentExecutor {
       taskStillWorking: () => boolean;
     },
     outcome: ExecutionSettlement['outcome'],
-  ): TaskState | null {
+  ): { state: TaskState; message?: string } | null {
     if (outcome === 'completed') {
       if (!input.admissionBlocked) {
-        return TaskState.TASK_STATE_COMPLETED;
+        return { state: TaskState.TASK_STATE_COMPLETED };
       }
       // Completion racing a cancel intent (P1-07, §7.2): the body remaining
       // after the cancel was fenced by the admission state — the execution
       // itself REALLY finished, so the task settles COMPLETED with the
       // suppressed-answer flags (executor publishes them), never CANCELED.
       if (input.admissionBlockReason === 'output_admission_closed') {
-        return TaskState.TASK_STATE_COMPLETED;
+        return { state: TaskState.TASK_STATE_COMPLETED };
       }
-      // Any OTHER fence reason (protocol anomaly) stays unpublished here.
-      return null;
+      // P2-1 (review #106 r1 closure): ANY OTHER fence reason is a protocol
+      // anomaly (chunk_content_mismatch / chunk_write_conflict) — the worker
+      // self-reported completion, but the body integrity cannot be vouched
+      // for. An explicit FAILED (with a readable explanation) replaces the
+      // former silent hang: a completed-but-fenced task must never stay
+      // working forever, and it must never be presented as a full answer.
+      return {
+        state: TaskState.TASK_STATE_FAILED,
+        message: '执行已完成，但其输出因协议异常被拒绝，任务按失败结算。',
+      };
     }
     if (outcome === 'canceled') {
-      return TaskState.TASK_STATE_CANCELED;
+      return { state: TaskState.TASK_STATE_CANCELED };
     }
     if (outcome === 'failed' || outcome === 'crashed' || outcome === 'lost_contact' || outcome === 'timeout' || outcome === 'startup_failed') {
-      return TaskState.TASK_STATE_FAILED;
+      return { state: TaskState.TASK_STATE_FAILED };
     }
     // 'stopped': the service-shutdown/cancel path owns the settlement — do
     // not publish over it here.

@@ -29,6 +29,12 @@ export type TaskManagerErrorCode =
   | 'write_lock_busy'
   /** Store opened against an unknown future schema version (fail-closed). */
   | 'schema_version_not_supported'
+  /**
+   * Snapshot save refused for a PURGED task (schema v3 `purged_at_ms`,
+   * P1-08/#90 — review #103 r1 P2-3 closure): a stale SDK snapshot must
+   * never resurrect deleted body through the bridge save path.
+   */
+  | 'task_purged'
   /** Input contract violation (bad ids, missing fields). */
   | 'invalid_input';
 

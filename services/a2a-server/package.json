@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node --experimental-strip-types src/main.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --test-isolation=none tests/acceptance-idempotency.spec.ts tests/request-key.spec.ts tests/config-retention.spec.ts tests/official-client-roundtrip.spec.ts tests/protocol-errors.spec.ts tests/stream-resilience.spec.ts tests/service-contract.spec.ts tests/service-entry.spec.ts tests/task-manager-state-machine.spec.ts tests/task-manager-repository.spec.ts tests/task-manager-sdk-bridge.spec.ts tests/dsh-worker-runtime.spec.ts tests/p1-07-cancel-semantics.spec.ts tests/identity-store.spec.ts tests/identity-authorizer.spec.ts tests/identity-authorization-policy.spec.ts tests/identity-service-acl.spec.ts"
+    "test": "node --test --test-isolation=none tests/acceptance-idempotency.spec.ts tests/request-key.spec.ts tests/config-retention.spec.ts tests/official-client-roundtrip.spec.ts tests/protocol-errors.spec.ts tests/stream-resilience.spec.ts tests/service-contract.spec.ts tests/service-entry.spec.ts tests/task-manager-state-machine.spec.ts tests/task-manager-repository.spec.ts tests/task-manager-sdk-bridge.spec.ts tests/dsh-worker-runtime.spec.ts tests/p1-07-cancel-semantics.spec.ts tests/p1-08-restart-recovery-deletion.spec.ts tests/identity-store.spec.ts tests/identity-authorizer.spec.ts tests/identity-authorization-policy.spec.ts tests/identity-service-acl.spec.ts"
   },
   "dependencies": {
     "@a2a-js/sdk": "1.3.0",

@@ -884,9 +884,15 @@ test('purgeTaskBody deletes all body, tombstones ledger keys, and replays/retrie
     assert.equal(mgr.stats().executions, 1, 'no new execution behind the tombstone');
 
     // SDK-bridge save of the purged (empty) snapshot cannot resurrect body.
+    // Schema v3 (P1-08/#90, review #103 r1 P2-3 closure): the save is
+    // REFUSED outright — a purged task is closed, so not even the status or
+    // metadata of a stale snapshot can be rewritten onto it.
     const task = await mgr.load(taskId);
     assert.ok(task);
-    await mgr.save(task);
+    await assert.rejects(
+      () => mgr.save(task),
+      (error: unknown) => error instanceof TaskManagerError && error.code === 'task_purged',
+    );
     assert.equal(mgr.stats().chunks, 0, 'replay of an empty snapshot does not recreate chunks');
   } finally {
     mgr.close();
@@ -987,25 +993,29 @@ test('bridge append path enforces output admission (review #101 ①: cancel inte
   }
 });
 
-test('schema v2: v1 databases re-migrate additively; tombstoned_at_ms appears and data survives', () => {
+test('schema v3: v1 databases re-migrate additively; v2/v3 columns appear and data survives', () => {
   const { dir, dbPath } = tempDbPath();
   try {
-    // Build a v2 database, then rewind it to a v1 shape.
+    // Build a current database, then rewind it to a v1 shape (drop every
+    // ADDITIVE column the newer migrations introduced).
     const first = newManager(dbPath);
     const { taskId } = accept(first, 'migration-v2-1');
     first.close();
 
     const raw = new DatabaseSync(dbPath);
     raw.exec('ALTER TABLE a2a_request_ledger DROP COLUMN tombstoned_at_ms');
+    raw.exec('ALTER TABLE a2a_tasks DROP COLUMN purged_at_ms');
     raw.prepare("UPDATE lumithink_a2a_meta SET value = '1' WHERE key = 'schema_version'").run();
     raw.close();
 
     const reopened = newManager(dbPath);
     try {
-      assert.equal(reopened.schemaVersion, 2);
+      assert.equal(reopened.schemaVersion, A2A_TASK_MANAGER_SCHEMA_VERSION);
       const probe = new DatabaseSync(dbPath);
-      const columns = probe.prepare("PRAGMA table_info('a2a_request_ledger')").all() as { name: string }[];
-      assert.ok(columns.some((column) => column.name === 'tombstoned_at_ms'), 'v2 column restored');
+      const ledgerColumns = probe.prepare("PRAGMA table_info('a2a_request_ledger')").all() as { name: string }[];
+      assert.ok(ledgerColumns.some((column) => column.name === 'tombstoned_at_ms'), 'v2 column restored');
+      const taskColumns = probe.prepare("PRAGMA table_info('a2a_tasks')").all() as { name: string }[];
+      assert.ok(taskColumns.some((column) => column.name === 'purged_at_ms'), 'v3 column restored');
       probe.close();
       // Existing data survived the migration.
       assert.equal(reopened.getTaskDetail(taskId).currentState, 'submitted');

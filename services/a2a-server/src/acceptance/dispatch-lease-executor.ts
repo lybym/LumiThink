@@ -84,6 +84,13 @@ export interface LeaseDispatchExecutorOptions {
   quotaGate?: QuotaGate;
   /** Dispatch lease TTL; expired leases fail callback attribution. */
   leaseTtlMs: number;
+  /**
+   * Sink for execution-row BOOKKEEPING failures (review #87 r1 P2-2,
+   * closed in P1-08/#90): settlement is diagnostics-only and must never
+   * mask the executor result, but "never mask" must not mean "never seen" —
+   * failures surface here (default: stderr diagnostic).
+   */
+  onSettlementError?: (error: unknown, context: { taskId: string; executionId: string; phase: 'fallback' | 'executor_error' }) => void;
   /** Injectable clock (tests). */
   now?: () => number;
 }
@@ -107,6 +114,14 @@ function statusUpdate(
 export function leaseDispatchExecutor(options: LeaseDispatchExecutorOptions): AgentExecutor {
   const { inner, taskManager } = options;
   const now = options.now ?? (() => Date.now());
+  const reportSettlementError = options.onSettlementError ?? ((error, context) => {
+    // Default sink: a visible stderr diagnostic (non-masking, no body).
+    console.error(
+      `[lumithink-a2a] execution-row settlement bookkeeping failed ` +
+        `(taskId=${context.taskId}, executionId=${context.executionId}, phase=${context.phase}):`,
+      error,
+    );
+  });
 
   return {
     async execute(requestContext: RequestContext, eventBus: ExecutionEventBus): Promise<void> {
@@ -176,7 +191,15 @@ export function leaseDispatchExecutor(options: LeaseDispatchExecutorOptions): Ag
         // Executor error → the SDK settles FAILED; the execution row must
         // not stay open behind it (settlement path, review #103 P2-2).
         if (claimed !== null) {
-          settleFromTaskState(taskManager, claimed, 'executor_error');
+          const claimedInfo = claimed;
+          const settlement = settleFromTaskState(taskManager, claimedInfo, 'executor_error');
+          if (settlement.outcome === 'failed') {
+            reportSettlementError(settlement.error, {
+              taskId: claimedInfo.taskId,
+              executionId: claimedInfo.executionId,
+              phase: 'executor_error',
+            });
+          }
         }
         throw error;
       }
@@ -186,7 +209,17 @@ export function leaseDispatchExecutor(options: LeaseDispatchExecutorOptions): Ag
       // row now (review #103 P2-2: 执行行永不结算 → 补执行行结算路径). Lease-
       // aware executors settle themselves with process evidence; this call
       // then observes already_settled (idempotent, first wins).
-      settleFromTaskState(taskManager, claimed);
+      if (claimed !== null) {
+        const claimedInfo = claimed;
+        const settlement = settleFromTaskState(taskManager, claimedInfo);
+        if (settlement.outcome === 'failed') {
+          reportSettlementError(settlement.error, {
+            taskId: claimedInfo.taskId,
+            executionId: claimedInfo.executionId,
+            phase: 'fallback',
+          });
+        }
+      }
     },
 
     async cancelTask(taskId: string, eventBus: ExecutionEventBus): Promise<void> {
@@ -208,12 +241,17 @@ export function leaseDispatchExecutor(options: LeaseDispatchExecutorOptions): Ag
  * Closes the claimed execution row from the DISPATCH side, mirroring the
  * authoritative task state after the inner executor returned. No-op when
  * the row is already settled (lease-aware executors settle themselves).
+ *
+ * NEVER throws (diagnostics-only bookkeeping must not mask the executor
+ * result) — but per review #87 r1 P2-2 (closed P1-08/#90) a failure is not
+ * swallowed either: the caller receives {outcome:'failed', error} and
+ * surfaces it through the configured sink.
  */
 function settleFromTaskState(
   taskManager: SqliteTaskManager,
   claimed: DispatchLeaseInfo,
   errorReason?: string,
-): void {
+): { outcome: 'settled' | 'already_settled' } | { outcome: 'failed'; error: unknown } {
   try {
     const detail = taskManager.getTaskDetail(claimed.taskId);
     const state = detail.currentState;
@@ -227,7 +265,7 @@ function settleFromTaskState(
             : state === 'failed'
               ? ({ outcome: 'failed' } as const)
               : ({ outcome: 'stopped', reason: `executor_finished_${state}` } as const);
-    taskManager.settleExecution({
+    const settled = taskManager.settleExecution({
       taskId: claimed.taskId,
       executionId: claimed.executionId,
       turnSeq: claimed.turnSeq,
@@ -235,7 +273,15 @@ function settleFromTaskState(
       leaseId: claimed.leaseId,
       result: outcome,
     });
-  } catch {
-    // Diagnostics-only bookkeeping must never mask the executor result.
+    if (settled.outcome === 'settled') return { outcome: 'settled' };
+    if (settled.outcome === 'already_settled') return { outcome: 'already_settled' };
+    // Rejected = the claim keys do not match the row (attribution/lease) —
+    // a real bookkeeping anomaly; surface it through the caller's sink.
+    return {
+      outcome: 'failed',
+      error: new Error(`execution-row settlement rejected: ${settled.reason}`),
+    };
+  } catch (error) {
+    return { outcome: 'failed', error };
   }
 }
