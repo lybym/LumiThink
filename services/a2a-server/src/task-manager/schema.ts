@@ -27,7 +27,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { TaskManagerError } from './errors.ts';
 
-export const A2A_TASK_MANAGER_SCHEMA_VERSION = 2;
+export const A2A_TASK_MANAGER_SCHEMA_VERSION = 3;
 
 interface SchemaMigration {
   readonly version: number;
@@ -198,7 +198,27 @@ const MIGRATION_V2: SchemaMigration = {
   `,
 };
 
-const MIGRATIONS: readonly SchemaMigration[] = [MIGRATION_V1, MIGRATION_V2];
+/**
+ * v3 (issue #90, P1-08): persisted PURGE MARKER on the task row
+ * (`a2a_tasks.purged_at_ms`). `purgeTaskBody` already deletes every body
+ * surface (history/chunks/artifacts/Outbox) and tombstones the ledger keys,
+ * but the task ROW stayed writeable: a stale SDK snapshot replayed through
+ * the authoritative `save()` bridge could re-insert artifacts + history for
+ * a purged task (review #103 r1 P2-3 — unreachable in P1 because tombstoned
+ * keys never re-run the executor, yet a REAL seam: nothing structural
+ * refused the write). v3 closes it fail-closed: once `purged_at_ms` is set
+ * the repository refuses ANY snapshot save for that task (typed
+ * `task_purged`), so deleted bodies cannot resurrect through ANY replay
+ * path. ADDITIVE only — no destructive statements.
+ */
+const MIGRATION_V3: SchemaMigration = {
+  version: 3,
+  ddl: `
+    ALTER TABLE a2a_tasks ADD COLUMN purged_at_ms INTEGER;
+  `,
+};
+
+const MIGRATIONS: readonly SchemaMigration[] = [MIGRATION_V1, MIGRATION_V2, MIGRATION_V3];
 
 const META_TABLE_DDL = `
   CREATE TABLE IF NOT EXISTS lumithink_a2a_meta (

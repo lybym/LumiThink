@@ -128,6 +128,14 @@ export type WorkerBehavior =
    * Worker；限期未停止不能假成功).
    */
   | 'never-stops'
+  /**
+   * P1-08 (issue #90, review #106 r1 P2-1): protocol-anomaly completion —
+   * the worker re-sends a KNOWN chunkId with DIFFERENT content (the
+   * repository rejects it, fencing the run) and then self-reports a normal
+   * completion. The public settlement must be an explicit FAILED (never a
+   * hanging working task, never a fabricated full answer).
+   */
+  | 'conflict-output-then-complete'
   | 'bad-proto'
   | 'external-kind';
 

@@ -33,6 +33,13 @@
  *                                        re-check → Worker);
  *   8. jsonRpcParseErrorHandler        — malformed JSON → standard -32700.
  *
+ * P1-08 (#90): BEFORE the listener opens, the independent deletion ledger is
+ * opened and replayed (恢复时先重放删除——已删数据不能复活) and the startup
+ * recovery scan settles every persisted non-terminal state from persisted
+ * facts (interrupted executions → abandoned + FAILED; confirmed-never-started
+ * → re-dispatch through the same lease path; settled evidence → re-derived
+ * public settlement).
+ *
  * The SDK handler receives EXACTLY ONE Task Store (see task-manager-port.ts):
  * the SQLite Task Manager (P1-02) wrapped in the authorizing decorator
  * (P1-03) that binds task ownership at acceptance time and re-checks access
@@ -49,10 +56,14 @@ import express from 'express';
 import {
   DefaultExecutionEventBusManager,
   DefaultRequestHandler,
+  RequestContext,
+  ResultManager,
+  ServerCallContext,
+  type AgentExecutionEvent,
   type AgentExecutor,
 } from '@a2a-js/sdk/server';
 import { agentCardHandler, jsonRpcHandler } from '@a2a-js/sdk/server/express';
-import type { AgentCard } from '@a2a-js/sdk';
+import { TaskState, type AgentCard, type Message, type SendMessageRequest } from '@a2a-js/sdk';
 import { type A2aServiceConfig } from './config.ts';
 import { buildLumithinkAgentCard, LUMITHINK_AGENT_NAME } from './lumithink-agent-card.ts';
 import { jsonRpcParseErrorHandler, requireA2aVersion } from './error-map.ts';
@@ -62,6 +73,8 @@ import { requireIdempotentAcceptance } from './acceptance/acceptance-gate.ts';
 import { leaseDispatchExecutor, type QuotaGate } from './acceptance/dispatch-lease-executor.ts';
 import { DshWorkerRuntime } from './runtime/dsh-worker-runtime.ts';
 import { DshWorkerExecutor } from './runtime/dsh-worker-executor.ts';
+import { DeletionLedger } from './recovery/deletion-ledger.ts';
+import { runStartupRecovery, type StartupRecoveryReport } from './recovery/startup-recovery.ts';
 import {
   IdentityController,
   StreamRegistry,
@@ -122,6 +135,16 @@ export interface StartedA2aService {
    * stopA2aService disposes it (kills every live worker process).
    */
   runtime?: DshWorkerRuntime;
+  /** Independent deletion ledger (P1-08) — owned + closed by the service. */
+  deletionLedger?: DeletionLedger;
+  /**
+   * Startup recovery report (P1-08): what the scan settled/abandoned/
+   * re-dispatched before the listener opened. Undefined with a custom
+   * Task Store (recovery semantics are repository-owned).
+   */
+  recovery?: StartupRecoveryReport;
+  /** True when the service created (and owns/closes) the deletion ledger. */
+  ownsDeletionLedger: boolean;
   /** Resolves when the server has fully closed (after close()). */
   closed: Promise<void>;
 }
@@ -217,6 +240,80 @@ export async function startA2aService(
     quotaGate: options.quotaGate,
     leaseTtlMs: config.dispatchLeaseTtlMs,
   });
+
+  // P1-08 (#90): the deletion ledger + startup recovery scan run BEFORE the
+  // listener opens (TASK_LIFECYCLE §9: 恢复时先重放删除和撤权、清理缓存及待
+  // 发事件，再开放服务). Both are repository-owned semantics — with a
+  // caller-supplied custom Task Store neither wires (no partial recovery).
+  let deletionLedger: DeletionLedger | undefined;
+  let recovery: StartupRecoveryReport | undefined;
+  if (sqliteTaskManager !== undefined) {
+    deletionLedger = new DeletionLedger({ dbPath: config.deletionLedgerDbPath });
+    const recoveryBusManager = new DefaultExecutionEventBusManager();
+    /**
+     * Re-dispatch of a CONFIRMED-never-started task (submitted, no execution
+     * row): the real executor through its quota → claim → authorization →
+     * worker sequence; events persist through the SDK's own ResultManager
+     * wired to the SAME authoritative repository — the recovery path and
+     * the request path share one write face (§9: 再次检查取消、授权和资源配额).
+     */
+    const recoveryDispatch = async (taskId: string, inputMessage: Message): Promise<void> => {
+      const contextId = sqliteTaskManager.getTaskDetail(taskId).contextId;
+      const context = new ServerCallContext({ requestedVersion: '1.0' });
+      const bus = recoveryBusManager.createOrGetByTaskId(taskId, context);
+      const resultManager = new ResultManager(sqliteTaskManager, context);
+      resultManager.setContext(inputMessage);
+      bus.on('event', (event: AgentExecutionEvent) => {
+        void resultManager.processEvent(event).catch((error: unknown) => {
+          console.error(
+            `[lumithink-a2a] recovery event persistence failed for task ${taskId}:`,
+            error,
+          );
+        });
+      });
+      try {
+        // The proto-generated SendMessageRequest carries required (nullable)
+        // envelope fields; the recovery path only needs the original message.
+        const request: SendMessageRequest = {
+          message: inputMessage,
+          configuration: undefined,
+          metadata: undefined,
+          tenant: '',
+        };
+        await executor.execute(new RequestContext(request, taskId, contextId, context), bus);
+      } catch {
+        // Mirror the SDK handler's rejection settlement: a synthetic FAILED
+        // status so persisted state converges (the lease decorator already
+        // closed the execution row; ResultManager re-loads from the store
+        // and enforces terminal irreversibility itself).
+        bus.publish({
+          kind: 'statusUpdate',
+          data: {
+            taskId,
+            contextId,
+            status: {
+              state: TaskState.TASK_STATE_FAILED,
+              message: undefined,
+              timestamp: new Date().toISOString(),
+            },
+            metadata: undefined,
+          },
+        });
+      } finally {
+        // Drain the queued event-persistence microtasks before settling the
+        // bus (events were dispatched synchronously into processEvent).
+        await new Promise((resolve) => setImmediate(resolve));
+        bus.finished();
+        recoveryBusManager.cleanupByTaskId(taskId, context);
+      }
+    };
+    recovery = await runStartupRecovery({
+      taskManager: sqliteTaskManager,
+      identity: identity.store,
+      ledger: deletionLedger,
+      requeue: recoveryDispatch,
+    });
+  }
   // The handler keeps a reference to this card object; URL fields are
   // finalized in place once the loopback port is bound (P0-02 pattern).
   const agentCard = options.agentCard ?? buildLumithinkAgentCard(`http://${config.host}:0`);
@@ -287,6 +384,9 @@ export async function startA2aService(
     identity,
     ownsIdentity,
     runtime,
+    deletionLedger,
+    recovery,
+    ownsDeletionLedger: deletionLedger !== undefined,
     closed,
   };
 }
@@ -315,5 +415,10 @@ export async function stopA2aService(service: StartedA2aService): Promise<void> 
   }
   if (service.ownsIdentity) {
     service.identity.store.close();
+  }
+  // The independent deletion ledger outlives the task store by contract
+  // (P1-08): closed LAST, after every writer is gone.
+  if (service.ownsDeletionLedger && service.deletionLedger !== undefined) {
+    service.deletionLedger.close();
   }
 }

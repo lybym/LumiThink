@@ -241,9 +241,23 @@ export interface ExecutionSettlement {
     | 'timeout'
     | 'lost_contact'
     | 'startup_failed'
-    | 'crashed';
+    | 'crashed'
+    /**
+     * Recovery-reserved evidence for execution rows the recovering process
+     * can no longer account for (row state='abandoned', P1-08/#90): the
+     * outcome is UNKNOWN — never re-dispatched automatically.
+     */
+    | 'abandoned';
   /** Stable reason code (e.g. 'worker_exit_nonzero', 'output_admission_closed'). */
   reason?: string;
+  /**
+   * The output-admission fence reason when the run was fenced while body
+   * chunks were being admitted (P1-08, review #106 r1 P2-4: the fence
+   * reason is recorded SEPARATELY from `reason` so a later settle path —
+   * e.g. a cancel-grace force stop — never overwrites it, and the recovery
+   * scan can re-derive the honest public settlement from the row alone).
+   */
+  fencedReason?: string;
   exitCode?: number | null;
   signal?: string | null;
   /**
@@ -302,12 +316,89 @@ export type MarkExecutionStopRequestedResult =
   /** No active (registered/running) execution row: nothing to fence. */
   | { outcome: 'no_active_execution' };
 
+/**
+ * Recovery-scan view (P1-08/#90): the persisted facts the startup scan
+ * re-decides from — non-terminal tasks with their execution rows (parsed,
+ * body-free evidence) and the tasks that still hold un-published Outbox
+ * rows. Read-only; every WRITE goes back through the Task-Manager API.
+ */
+export interface RecoveryScanView {
+  nonTerminalTasks: {
+    taskId: string;
+    contextId: string;
+    currentState: A2aTaskState;
+    stateVersion: number;
+    cancelIntent: boolean;
+    /** Latest turn's output admission (open = the body channel was never closed). */
+    latestTurnAdmission: 'open' | 'closed' | null;
+    executions: {
+      executionId: string;
+      turnSeq: number;
+      epoch: number;
+      state: 'registered' | 'running' | 'stop_requested' | 'settled' | 'abandoned';
+      settledAtMs: number | null;
+      result: ExecutionSettlement | null;
+    }[];
+  }[];
+  /** Tasks (any state) with at least one un-published Outbox row. */
+  unpublishedOutboxTaskIds: string[];
+  /**
+   * TERMINAL tasks that still hold ACTIVE (registered/running/stop_requested)
+   * execution rows — a crash closed the process before the row settled. The
+   * public task is already terminal (保持不变, §9); only the stale row is
+   * closed bookkeeping-wise (abandoned).
+   */
+  terminalTasksWithActiveExecutions: {
+    taskId: string;
+    executionId: string;
+    priorState: 'registered' | 'running' | 'stop_requested';
+  }[];
+}
+
+export interface AbandonExecutionParams {
+  taskId: string;
+  executionId: string;
+  /** Stable recovery reason code, e.g. 'restart_interrupted_unknown_outcome'. */
+  reason: string;
+}
+
+export type AbandonExecutionResult =
+  | { outcome: 'abandoned' }
+  /** The row was already settled/abandoned or is not in an active state. */
+  | { outcome: 'not_active' }
+  | { outcome: 'not_found' };
+
+export interface SettleRecoveredTaskParams {
+  taskId: string;
+  expectedState: A2aTaskState;
+  expectedStateVersion: number;
+  nextState: A2aTaskState;
+  /** Stable recovery reason code recorded on the Outbox statusUpdate. */
+  reason: string;
+  /** Optional readable status message (agent Message) persisted with the state. */
+  statusMessage?: Message;
+  /** Optional metadata merged into the task row (e.g. lumithinkResult flags). */
+  metadata?: Record<string, unknown>;
+}
+
+export type SettleRecoveredTaskResult =
+  | { outcome: 'committed'; currentState: A2aTaskState; stateVersion: number }
+  /** Loser of the version race re-reads state and re-decides (§4.2). */
+  | { outcome: 'stale'; currentState: A2aTaskState; stateVersion: number }
+  | { outcome: 'rejected'; reason: 'task_purged' };
+
 export interface PurgeTaskBodyResult {
   outcome: 'purged';
   taskId: string;
   purgedAtMs: number;
   /** Ledger keys (original + supplementary inputs) moved to tombstoned. */
   tombstonedKeys: number;
+  /**
+   * True when the task row already carried a purge marker BEFORE this call
+   * (idempotent re-application — the deletion-ledger replay re-runs
+   * purgeTaskBody for every recorded deletion; P1-08/#90).
+   */
+  alreadyPurged: boolean;
 }
 
 export interface AppendTurnParams {
@@ -379,6 +470,8 @@ interface TaskRow {
   cancel_intent: number;
   cancel_requested_at_ms: number | null;
   cancel_reason: string | null;
+  /** v3 (P1-08): set by purgeTaskBody; a purged task refuses snapshot saves. */
+  purged_at_ms: number | null;
 }
 
 const DEFAULT_BUSY_TIMEOUT_MS = 2000;
@@ -1183,6 +1276,226 @@ export class SqliteTaskManager implements TaskStore {
   }
 
   // -------------------------------------------------------------------------
+  // Startup-recovery primitives (P1-08, issue #90; TASK_LIFECYCLE §9)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Marks ONE execution row `abandoned` — the reserved state for executions
+   * the recovering process can no longer account for (ADR-0016: "state=
+   * 'abandoned' is reserved for the P1-08 recovery scan"). The holder's
+   * lease is deliberately NOT required here: the whole premise of the
+   * recovery scan is that the holder process is GONE — requiring its lease
+   * would make interrupted executions permanently unsettleable. Attribution
+   * is still enforced (task + execution row must match; only ACTIVE rows —
+   * registered/running/stop_requested — can be abandoned). The row records
+   * body-free evidence {outcome:'abandoned', reason}; a settled/abandoned
+   * row is never overwritten (first close wins, same as settleExecution).
+   *
+   * Semantics (TASK_LIFECYCLE §9): an abandoned execution's outcome is
+   * UNKNOWN — it is never re-dispatched automatically and later callbacks
+   * are rejected by the existing execution_settled guards.
+   */
+  abandonExecution(params: AbandonExecutionParams): AbandonExecutionResult {
+    return this.withWriteTransaction(() => {
+      const exec = this.db
+        .prepare('SELECT state FROM a2a_executions WHERE execution_id = ? AND task_id = ?')
+        .get(params.executionId, params.taskId) as { state: string } | undefined;
+      if (!exec) return { outcome: 'not_found' as const };
+      if (
+        exec.state !== 'registered' &&
+        exec.state !== 'running' &&
+        exec.state !== 'stop_requested'
+      ) {
+        return { outcome: 'not_active' as const };
+      }
+      const result: ExecutionSettlement = {
+        outcome: 'abandoned',
+        reason: params.reason,
+        endedAtMs: this.now(),
+      };
+      // 'abandoned' is the recovery-reserved row state; the evidence JSON
+      // mirrors it so diagnostics read one story from row state + result.
+      this.db
+        .prepare(
+          "UPDATE a2a_executions SET state = 'abandoned', settled_at_ms = ?, result_json = ? " +
+            'WHERE execution_id = ? AND task_id = ?',
+        )
+        .run(this.now(), JSON.stringify(result), params.executionId, params.taskId);
+      this.checkFailurePoint('beforeCommit');
+      return { outcome: 'abandoned' as const };
+    });
+  }
+
+  /**
+   * Recovery-time PUBLIC task settlement (TASK_LIFECYCLE §9: the recovery
+   * scanner submits its decisions through the Task Manager, §8.4). Same
+   * conditional-update discipline as transitionTask (expected state +
+   * state_version + transition table + Outbox statusUpdate in ONE
+   * transaction), plus the optional readable status message and metadata
+   * (e.g. recovered lumithinkResult flags) written in the SAME transaction —
+   * a recovered completion must never commit its state without its flags.
+   * Purged tasks are refused outright (fail-closed, no tombstone rewriting).
+   */
+  settleRecoveredTask(params: SettleRecoveredTaskParams): SettleRecoveredTaskResult {
+    return this.withWriteTransaction(() => {
+      const row = this.selectTaskLocked(params.taskId);
+      if (!row) {
+        throw new TaskManagerError('task_not_found', `Task not found: ${params.taskId}`);
+      }
+      if (row.purged_at_ms !== null) {
+        return { outcome: 'rejected' as const, reason: 'task_purged' as const };
+      }
+      if (
+        row.current_state !== params.expectedState ||
+        row.state_version !== params.expectedStateVersion
+      ) {
+        return {
+          outcome: 'stale' as const,
+          currentState: row.current_state as A2aTaskState,
+          stateVersion: row.state_version,
+        };
+      }
+      if (!isLegalTaskTransition(params.expectedState, params.nextState)) {
+        throw new TaskManagerError(
+          'illegal_transition',
+          `Illegal recovery transition ${params.expectedState} → ${params.nextState} ` +
+            '(TASK_LIFECYCLE §3; terminal states are irreversible)',
+          { taskId: params.taskId, from: params.expectedState, to: params.nextState },
+        );
+      }
+      const nowMs = this.now();
+      const nextVersion = row.state_version + 1;
+      const changes = this.db
+        .prepare(
+          'UPDATE a2a_tasks SET current_state = ?, state_version = ?, updated_at_ms = ?, terminal_at_ms = ?, ' +
+            'status_message_json = COALESCE(?, status_message_json), ' +
+            'metadata_json = COALESCE(?, metadata_json) ' +
+            'WHERE task_id = ? AND current_state = ? AND state_version = ?',
+        )
+        .run(
+          params.nextState,
+          nextVersion,
+          nowMs,
+          isTerminalTaskState(params.nextState) ? nowMs : row.terminal_at_ms,
+          params.statusMessage === undefined ? null : JSON.stringify(params.statusMessage),
+          params.metadata === undefined ? null : JSON.stringify(this.mergedMetadataLocked(row, params.metadata)),
+          params.taskId,
+          params.expectedState,
+          params.expectedStateVersion,
+        ).changes;
+      if (Number(changes) !== 1) {
+        const fresh = this.selectTaskLocked(params.taskId)!;
+        return {
+          outcome: 'stale' as const,
+          currentState: fresh.current_state as A2aTaskState,
+          stateVersion: fresh.state_version,
+        };
+      }
+      this.checkFailurePoint('afterTaskWrite');
+      this.appendOutboxLocked(params.taskId, 'statusUpdate', {
+        taskId: params.taskId,
+        contextId: row.context_id,
+        from: params.expectedState,
+        to: params.nextState,
+        reason: params.reason,
+        source: 'startup-recovery',
+      });
+      this.checkFailurePoint('afterOutboxWrite');
+      this.checkFailurePoint('beforeCommit');
+      return {
+        outcome: 'committed' as const,
+        currentState: params.nextState,
+        stateVersion: nextVersion,
+      };
+    });
+  }
+
+  /** Merges recovery metadata over the persisted metadata (row locked). */
+  private mergedMetadataLocked(
+    row: TaskRow,
+    metadata: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const existing = parseJsonOrNull<Record<string, unknown>>(row.metadata_json);
+    return { ...(existing ?? {}), ...metadata };
+  }
+
+  /**
+   * Read-only recovery scan (TASK_LIFECYCLE §9 持久状态 → 恢复行为): every
+   * decision the startup scan makes is derived from THIS view; writes go
+   * back through the Task-Manager API (abandonExecution /
+   * settleRecoveredTask / transitionTask).
+   */
+  recoveryScanView(): RecoveryScanView {
+    this.assertOpen();
+    const taskRows = this.db
+      .prepare(
+        "SELECT * FROM a2a_tasks WHERE current_state IN " +
+          "('submitted','working','input_required','auth_required') " +
+          'ORDER BY created_at_ms, task_id',
+      )
+      .all() as unknown as TaskRow[];
+    const nonTerminalTasks = taskRows.map((row) => {
+      const executions = (
+        this.db
+          .prepare('SELECT * FROM a2a_executions WHERE task_id = ? ORDER BY created_at_ms')
+          .all(row.task_id) as Record<string, unknown>[]
+      ).map((exec) => ({
+        executionId: exec['execution_id'] as string,
+        turnSeq: exec['turn_seq'] as number,
+        epoch: exec['epoch'] as number,
+        state: exec['state'] as RecoveryScanView['nonTerminalTasks'][number]['executions'][number]['state'],
+        settledAtMs: (exec['settled_at_ms'] as number | null) ?? null,
+        result: parseJsonOrNull<ExecutionSettlement>(exec['result_json'] as string | null) ?? null,
+      }));
+      const latestTurn = this.db
+        .prepare(
+          'SELECT output_admission FROM a2a_turns WHERE task_id = ? ORDER BY turn_seq DESC LIMIT 1',
+        )
+        .get(row.task_id) as { output_admission: string } | undefined;
+      return {
+        taskId: row.task_id,
+        contextId: row.context_id,
+        currentState: row.current_state as A2aTaskState,
+        stateVersion: row.state_version,
+        cancelIntent: row.cancel_intent === 1,
+        latestTurnAdmission: (latestTurn?.output_admission as 'open' | 'closed' | undefined) ?? null,
+        executions,
+      };
+    });
+    const unpublishedRows = this.db
+      .prepare(
+        'SELECT DISTINCT task_id FROM a2a_outbox WHERE published_at_ms IS NULL ORDER BY task_id',
+      )
+      .all() as { task_id: string }[];
+    const terminalStaleRows = this.db
+      .prepare(
+        "SELECT e.task_id AS task_id, e.execution_id AS execution_id, e.state AS state " +
+          'FROM a2a_executions e JOIN a2a_tasks t ON t.task_id = e.task_id ' +
+          "WHERE e.state IN ('registered','running','stop_requested') " +
+          "AND t.current_state IN ('completed','failed','canceled','rejected') " +
+          'ORDER BY e.task_id, e.created_at_ms',
+      )
+      .all() as { task_id: string; execution_id: string; state: string }[];
+    return {
+      nonTerminalTasks,
+      unpublishedOutboxTaskIds: unpublishedRows.map((entry) => entry.task_id),
+      terminalTasksWithActiveExecutions: terminalStaleRows.map((row) => ({
+        taskId: row.task_id,
+        executionId: row.execution_id,
+        priorState: row.state as 'registered' | 'running' | 'stop_requested',
+      })),
+    };
+  }
+
+  /** Existence probe for the identity-binding orphan cleanup (P1-08). */
+  taskExists(taskId: string): boolean {
+    this.assertOpen();
+    return (
+      this.db.prepare('SELECT 1 FROM a2a_tasks WHERE task_id = ?').get(taskId) !== undefined
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Body purge / idempotency tombstone (§5.4, P1-04 AC 4)
   // -------------------------------------------------------------------------
 
@@ -1206,6 +1519,12 @@ export class SqliteTaskManager implements TaskStore {
    * request on a tombstoned key returns the tombstoned outcome and never
    * re-executes.
    *
+   * Since schema v3 (P1-08/#90) the purge also stamps `a2a_tasks.purged_at_ms`:
+   * the fail-closed marker that makes `save()` refuse any snapshot write for
+   * a purged task, so a stale SDK snapshot replayed through the bridge can
+   * never resurrect deleted body (review #103 r1 P2-3 closure). Idempotent:
+   * re-applying a purge (deletion-ledger replay) returns alreadyPurged=true.
+   *
    * The cross-cutting cleanup orchestration (startup scan, caches, channel
    * deliveries) is P1-08/#90; this is the repository primitive that
    * contract builds on.
@@ -1217,6 +1536,13 @@ export class SqliteTaskManager implements TaskStore {
         throw new TaskManagerError('task_not_found', `Task not found: ${taskId}`);
       }
       const nowMs = this.now();
+      // Ledger-replay accounting (P1-08, draft unit test authority): once the
+      // fail-closed marker is stamped, a ledger replay of the same entry
+      // reports alreadyPurged=true — even when a restored old snapshot
+      // brought body rows back; those rows are deleted again in THIS
+      // transaction either way, and the deletion-ledger tests assert both
+      // the counting and the effective removal separately.
+      const alreadyPurged = row.purged_at_ms !== null;
       this.db.prepare('DELETE FROM a2a_task_history WHERE task_id = ?').run(taskId);
       this.db.prepare('DELETE FROM a2a_artifact_chunks WHERE task_id = ?').run(taskId);
       this.db.prepare('DELETE FROM a2a_artifacts WHERE task_id = ?').run(taskId);
@@ -1228,10 +1554,10 @@ export class SqliteTaskManager implements TaskStore {
         .run(JSON.stringify({ lumithinkPurged: true, version: 1 }), taskId);
       this.db
         .prepare(
-          'UPDATE a2a_tasks SET status_message_json = NULL, metadata_json = NULL, updated_at_ms = ? ' +
-            'WHERE task_id = ?',
+          'UPDATE a2a_tasks SET status_message_json = NULL, metadata_json = NULL, purged_at_ms = ?, ' +
+            'updated_at_ms = ? WHERE task_id = ?',
         )
-        .run(nowMs, taskId);
+        .run(nowMs, nowMs, taskId);
       const ledgerChanges = this.db
         .prepare(
           "UPDATE a2a_request_ledger SET status = 'tombstoned', tombstoned_at_ms = ? " +
@@ -1244,6 +1570,7 @@ export class SqliteTaskManager implements TaskStore {
         taskId,
         purgedAtMs: nowMs,
         tombstonedKeys: Number(ledgerChanges),
+        alreadyPurged,
       };
     });
   }
@@ -1353,6 +1680,18 @@ export class SqliteTaskManager implements TaskStore {
       this.ensureConversationLocked(task.contextId, nowMs);
       const incomingState = fromSdkTaskState(task.status?.state ?? TaskState.TASK_STATE_SUBMITTED);
       const row = this.selectTaskLocked(task.id);
+      if (row !== undefined && row.purged_at_ms !== null) {
+        // Review #103 r1 P2-3 closure (schema v3, P1-08/#90): a purged task
+        // is CLOSED. A stale SDK snapshot replayed through this bridge must
+        // never re-insert history/artifacts/Outbox rows nor rewrite status or
+        // metadata — the body would resurrect through the replay path the
+        // purge just removed. Fail loudly; no partial write.
+        throw new TaskManagerError(
+          'task_purged',
+          `Task ${task.id} has been purged (purged_at_ms=${row.purged_at_ms}); ` +
+            'snapshot saves are refused — deleted body must not resurrect (TASK_LIFECYCLE §5.4/§9)',
+        );
+      }
       if (!row) {
         this.insertTaskLocked({
           taskId: task.id,

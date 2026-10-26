@@ -331,8 +331,53 @@ export class IdentityStore {
    * Applies a full bootstrap in ONE transaction. Duplicate rows or dangling
    * references throw and roll back the whole directory. Bumps the epoch so
    * caches never serve decisions from before the seed.
+   *
+   * RESTART-AWARE (P1-08/#90): a durable deployment re-opens its identity
+   * database on every start, so re-applying the SAME bootstrap must be a
+   * no-op rather than a UNIQUE failure. The seeded content is recorded in
+   * the identity meta (canonical-content hash); re-applying an IDENTICAL
+   * bootstrap on an already-seeded directory returns false (skipped), while
+   * a DIFFERENT bootstrap refuses to start (fail-closed — the operator must
+   * reconcile the directory instead of silently running against stale
+   * identity data). Returns true when the directory was seeded.
    */
-  applyBootstrap(bootstrap: IdentityBootstrap): void {
+  applyBootstrap(bootstrap: IdentityBootstrap): boolean {
+    const seedHash = sha256Hex(canonicalJson(bootstrap));
+    if (!this.isFreshDirectory()) {
+      const stored = this.db
+        .prepare("SELECT value FROM lumithink_a2a_identity_meta WHERE key = 'bootstrap_sha256'")
+        .get() as { value: string } | undefined;
+      if (stored?.value === seedHash) {
+        return false; // restart with the identical bootstrap — no-op
+      }
+      if (stored === undefined) {
+        // Legacy directory (seeded by a pre-marker build): adopt the current
+        // bootstrap hash ONCE instead of bricking the upgrade with an
+        // identical bootstrap (review-90-r1 P1). After adoption the normal
+        // identical-no-op / different-fail-closed rules apply.
+        this.withWriteTransaction(() => {
+          this.db
+            .prepare(
+              "INSERT INTO lumithink_a2a_identity_meta (key, value) VALUES ('bootstrap_sha256', ?) " +
+                'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+            )
+            .run(seedHash);
+          return undefined;
+        });
+        console.warn(
+          '[lumithink-a2a] identity directory had no bootstrap_sha256 marker (pre-P1-08 build); ' +
+            'adopted the current LUMITHINK_A2A_IDENTITY_BOOTSTRAP as its recorded seed. Reconcile ' +
+            'the bootstrap with the directory content if it was originally created from a different one.',
+        );
+        return false;
+      }
+      throw new IdentityError(
+        'invalid_input',
+        'identity directory is already seeded with a DIFFERENT bootstrap; ' +
+          'refusing to start (reconcile LUMITHINK_A2A_IDENTITY_BOOTSTRAP with the ' +
+          'existing identity database — restart support, P1-08/#90)',
+      );
+    }
     this.withWriteTransaction(() => {
       const nowMs = this.now();
       const seenHouseholds = new Set<string>();
@@ -576,8 +621,24 @@ export class IdentityStore {
             'active',
           );
       }
+      // Record the seeded content so a RESTART with the same bootstrap is a
+      // recognized no-op and a DIFFERENT one fails loudly (P1-08/#90).
+      this.db
+        .prepare(
+          "INSERT INTO lumithink_a2a_identity_meta (key, value) VALUES ('bootstrap_sha256', ?) " +
+            'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        )
+        .run(seedHash);
       return undefined;
     });
+    return true;
+  }
+
+  /** True when no household has ever been seeded into this directory. */
+  private isFreshDirectory(): boolean {
+    return (
+      this.db.prepare('SELECT 1 FROM a2a_identity_households LIMIT 1').get() === undefined
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -726,6 +787,53 @@ export class IdentityStore {
     const rows = this.db
       .prepare('SELECT * FROM a2a_identity_task_bindings WHERE context_id = ? ORDER BY created_at_ms')
       .all(contextId) as Record<string, unknown>[];
+    return rows
+      .map((row) => this.taskBindingRowOf(row))
+      .filter((binding): binding is TaskBinding => binding !== undefined);
+  }
+
+  /**
+   * Every task binding (P1-08/#90 startup orphan scan): the recovery scan
+   * cross-checks bindings against the Task Manager's task rows and releases
+   * the crash-window orphans (binding written before the task row committed,
+   * ADR-0015 fail-closed ordering). Validation-service scale keeps this
+   * bounded; the scan runs once per process start.
+   */
+  allTaskBindings(): TaskBinding[] {
+    this.assertOpen();
+    const rows = this.db
+      .prepare('SELECT * FROM a2a_identity_task_bindings ORDER BY created_at_ms, task_id')
+      .all() as Record<string, unknown>[];
+    return rows
+      .map((row) => this.taskBindingRowOf(row))
+      .filter((binding): binding is TaskBinding => binding !== undefined);
+  }
+
+  /**
+   * Task bindings inside a processing scope (P1-08/#90 deletion-first
+   * contract, A2A_DESIGN §11.2: 处理授权撤回按范围删除). With
+   * `principalUserId` the scope is that principal's own tasks inside the
+   * household; without it the scope is the WHOLE household (every bound
+   * principal — visitor/candidate bindings included, they carry household
+   * scope too).
+   */
+  taskBindingsForScope(
+    householdId: string,
+    principalUserId?: string | null,
+  ): TaskBinding[] {
+    this.assertOpen();
+    const rows = (
+      principalUserId === undefined || principalUserId === null
+        ? this.db
+            .prepare('SELECT * FROM a2a_identity_task_bindings WHERE household_id = ? ORDER BY created_at_ms, task_id')
+            .all(householdId)
+        : this.db
+            .prepare(
+              'SELECT * FROM a2a_identity_task_bindings WHERE household_id = ? AND principal_user_id = ? ' +
+                'ORDER BY created_at_ms, task_id',
+            )
+            .all(householdId, principalUserId)
+    ) as Record<string, unknown>[];
     return rows
       .map((row) => this.taskBindingRowOf(row))
       .filter((binding): binding is TaskBinding => binding !== undefined);
@@ -1038,3 +1146,19 @@ export class IdentityStore {
 }
 
 export type { AssuranceLevel };
+
+/**
+ * Deterministic JSON serialization (recursively sorted object keys) for the
+ * bootstrap seed hash — the same logical bootstrap must produce the same
+ * hash regardless of key order in the source JSON.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
+}

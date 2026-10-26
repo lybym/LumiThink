@@ -20,6 +20,9 @@ export function testConfig(overrides: Partial<A2aServiceConfig> = {}): A2aServic
     supportedVersions: ['1.0'],
     dbPath: ':memory:',
     identityDbPath: ':memory:',
+    // P1-08 (issue #90): the deletion ledger defaults to an in-memory DB in
+    // tests (restart/deletion specs override it with a real file).
+    deletionLedgerDbPath: ':memory:',
     // P1-04 defaults (deterministic in tests; loadA2aServiceConfig derives
     // the same values from env for the real entrypoint).
     fingerprintKey: 'test-fingerprint-hmac-key',

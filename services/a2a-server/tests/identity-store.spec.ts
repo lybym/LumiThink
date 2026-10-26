@@ -554,3 +554,56 @@ test('audit entries record decisions without token or content material', () => {
     store.close();
   }
 });
+
+test('upgrade migration: a pre-marker directory adopts the current bootstrap instead of refusing to start (review-90-r1 P1)', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'identity-legacy-'));
+  const dbPath = path.join(dir, 'identity.sqlite3');
+  try {
+    // Phase 1 — a PRE-P1-08 build seeds the directory: content exists but the
+    // bootstrap_sha256 marker was never written.
+    const legacy = new IdentityStore({ dbPath });
+    legacy.applyBootstrap(bootstrapWithToken(TOKEN));
+    legacy.close();
+    const raw = new DatabaseSync(dbPath);
+    raw.prepare("DELETE FROM lumithink_a2a_identity_meta WHERE key = 'bootstrap_sha256'").run();
+    const metaRows = raw
+      .prepare("SELECT COUNT(*) AS n FROM lumithink_a2a_identity_meta WHERE key = 'bootstrap_sha256'")
+      .get() as { n: number };
+    assert.equal(metaRows.n, 0, 'precondition: the legacy directory has no marker');
+    raw.close();
+
+    // Phase 2 — the upgraded build starts on the SAME bootstrap: it adopts the
+    // legacy directory instead of failing with 'refusing to start'.
+    const upgraded = new IdentityStore({ dbPath });
+    try {
+      assert.equal(upgraded.applyBootstrap(bootstrapWithToken(TOKEN)), false, 'no reseed on adoption');
+      const adopted = new DatabaseSync(dbPath);
+      try {
+        const row = adopted
+          .prepare("SELECT value FROM lumithink_a2a_identity_meta WHERE key = 'bootstrap_sha256'")
+          .get() as { value: string } | undefined;
+        assert.ok(row !== undefined && row.value.length === 64, 'the marker was adopted (sha256)');
+      } finally {
+        adopted.close();
+      }
+      // A SECOND restart with the identical bootstrap is now the plain no-op.
+      assert.equal(upgraded.applyBootstrap(bootstrapWithToken(TOKEN)), false);
+    } finally {
+      upgraded.close();
+    }
+
+    // Phase 3 — once the marker exists, a DIFFERENT bootstrap still fails closed.
+    const different = new IdentityStore({ dbPath });
+    try {
+      assert.throws(
+        () => different.applyBootstrap(bootstrapWithToken('another-synthetic-token-0123456789')),
+        /refusing to start/,
+        'different bootstrap on an adopted directory stays fail-closed',
+      );
+    } finally {
+      different.close();
+    }
+  } finally {
+    removeTempDir(dir);
+  }
+});
