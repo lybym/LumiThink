@@ -350,6 +350,27 @@ export class IdentityStore {
       if (stored?.value === seedHash) {
         return false; // restart with the identical bootstrap — no-op
       }
+      if (stored === undefined) {
+        // Legacy directory (seeded by a pre-marker build): adopt the current
+        // bootstrap hash ONCE instead of bricking the upgrade with an
+        // identical bootstrap (review-90-r1 P1). After adoption the normal
+        // identical-no-op / different-fail-closed rules apply.
+        this.withWriteTransaction(() => {
+          this.db
+            .prepare(
+              "INSERT INTO lumithink_a2a_identity_meta (key, value) VALUES ('bootstrap_sha256', ?) " +
+                'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+            )
+            .run(seedHash);
+          return undefined;
+        });
+        console.warn(
+          '[lumithink-a2a] identity directory had no bootstrap_sha256 marker (pre-P1-08 build); ' +
+            'adopted the current LUMITHINK_A2A_IDENTITY_BOOTSTRAP as its recorded seed. Reconcile ' +
+            'the bootstrap with the directory content if it was originally created from a different one.',
+        );
+        return false;
+      }
       throw new IdentityError(
         'invalid_input',
         'identity directory is already seeded with a DIFFERENT bootstrap; ' +
