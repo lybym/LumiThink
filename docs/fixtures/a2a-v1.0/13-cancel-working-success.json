@@ -1,0 +1,36 @@
+{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "result": {
+    "id": "task-example",
+    "contextId": "ctx-example",
+    "status": {
+      "state": "TASK_STATE_CANCELED",
+      "timestamp": "2026-10-26T00:00:00.000Z"
+    },
+    "artifacts": [
+      {
+        "artifactId": "answer",
+        "name": "Admitted answer",
+        "description": "",
+        "parts": [
+          {
+            "text": "你好。"
+          }
+        ],
+        "metadata": {
+          "lumithinkContent": { "version": 1, "category": "admitted-answer" }
+        }
+      }
+    ],
+    "history": [
+      {
+        "messageId": "msg-cancel-active-001",
+        "contextId": "ctx-example",
+        "taskId": "task-example",
+        "role": "ROLE_USER",
+        "parts": [{ "text": "开始学习任务" }]
+      }
+    ]
+  }
+}

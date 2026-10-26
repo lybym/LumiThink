@@ -108,8 +108,15 @@ async function run() {
     process.exit(3);
   }
 
-  // Output-producing profiles: complete / stop-on-cancel / flood-after-cancel.
-  if (behavior === 'complete' || behavior === 'stop-on-cancel' || behavior === 'flood-after-cancel') {
+  // Output-producing profiles: complete / stop-on-cancel / flood-after-cancel
+  // / complete-after-cancel (P1-07 完成竞争) / never-stops (P1-07 非协作).
+  if (
+    behavior === 'complete' ||
+    behavior === 'stop-on-cancel' ||
+    behavior === 'flood-after-cancel' ||
+    behavior === 'complete-after-cancel' ||
+    behavior === 'never-stops'
+  ) {
     void (async () => {
       send({ type: 'output', chunkId: 'answer#chunk-1', text: '你好。', lastChunk: false });
       await sleep(150);
@@ -119,8 +126,9 @@ async function run() {
         stopHeartbeats();
         process.exit(0);
       }
-      // stop-on-cancel / flood-after-cancel park here until the cancel
-      // control arrives (cooperative-stop / late-output test profiles).
+      // stop-on-cancel / flood-after-cancel / complete-after-cancel /
+      // never-stops park here until the cancel control arrives (cooperative
+      // stop, late output, completion race and non-cooperation test profiles).
     })();
   }
 
@@ -132,6 +140,12 @@ async function run() {
       return;
     }
     if (frame.type !== 'cancel') return;
+    if (behavior === 'never-stops') {
+      // P1-07 非协作 profile: the cancel control is IGNORED (heartbeats keep
+      // running, no result ever arrives) — only the runtime's cancel-grace
+      // watchdog terminates this process (forced stop with SIGKILL evidence).
+      return;
+    }
     stopHeartbeats();
     if (behavior === 'flood-after-cancel') {
       // Late-output profile: keep emitting AFTER the cancel control so the
@@ -140,6 +154,20 @@ async function run() {
         await sleep(120);
         send({ type: 'output', chunkId: 'answer#late-1', text: '迟到的输出。', lastChunk: false });
         send({ type: 'result', outcome: 'canceled', reason: 'worker_profile_canceled' });
+        process.exit(0);
+      })();
+      return;
+    }
+    if (behavior === 'complete-after-cancel') {
+      // P1-07 completion-race profile: the worker had ALREADY finished its
+      // work when the cancel control arrived. It emits one late candidate
+      // body chunk (the service must suppress it via the admission state),
+      // then reports the TRUE completion — the task settles COMPLETED with
+      // the suppressed-answer flags, never a fabricated CANCELED.
+      void (async () => {
+        await sleep(120);
+        send({ type: 'output', chunkId: 'answer#late-1', text: '迟到的收尾。', lastChunk: false });
+        send({ type: 'result', outcome: 'completed' });
         process.exit(0);
       })();
       return;

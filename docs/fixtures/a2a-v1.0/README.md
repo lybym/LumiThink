@@ -26,6 +26,13 @@ Task metadata.lumithinkResult 是应用契约，不是新状态。终态 COMPLET
 - [11-error-task-not-found.json](11-error-task-not-found.json)：`GetTask` 未知任务的标准错误 `-32001`（TaskNotFound）。
 - [12-error-version-not-supported.json](12-error-version-not-supported.json)：`A2A-Version` 头为不支持的 `9.9`，或**缺失**该头（规范按 0.3 处理而本服务仅声明 1.0）时，均返回 `-32009`（VersionNotSupported）。
 
+## 线级外壳示例（13–14，P1-07 以锁定官方 SDK 在真实实现上实测归一）
+
+以下两个外壳来自 P1-07（issue #89）在 dsh-worker 验证服务上的官方客户端实测（证据与命令见 [2026-10-26-p1-07 实现记录](../../reviews/2026-10-26-p1-07-real-cancel-completion-races.md)），标识与时间戳同样归一为合成固定值；语义与 08/09/11 的锁定口径一致，不自创状态或错误码。
+
+- [13-cancel-working-success.json](13-cancel-working-success.json)：对活动（working）任务 `CancelTask` 成功后，快照返回 `TASK_STATE_CANCELED` 及已交付的部分 Artifact（重复取消再按 09 幂等）。
+- [14-error-cancel-not-found.json](14-error-cancel-not-found.json)：对未知任务 `CancelTask` 的标准错误 `-32001`（TaskNotFound），形状同 11。
+
 官方 JS/Python 客户端均随每个请求发送 `A2A-Version: 1.0`（P0-02 实测）。服务端实现必须显式校验该头，不能静默接受空缺值。
 
 本次静态校验 JSON 可解析、字段层级、字节区间、摘要和聚合正文一致；05–12 由 `poc/a2a-compat`（锁定 `@a2a-js/sdk@1.3.0`）与 `poc/a2a-compat/py/codec_verify.py`（锁定 `a2a-sdk==1.2.3`）自动复核。P1-01/P1-06 需在真实实现上继续验证编解码及传输外壳；P1-06 验证持久化与重连，P1-07 补充标准 CancelTask 成功/不可取消/未找到的真实响应 Fixture。终态订阅按标准错误处理，改用 GetTask；不承诺 A2A 核心提供任意历史 SSE 回放游标。

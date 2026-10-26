@@ -1,4 +1,4 @@
-# @lumithink/a2a-server — LumiThink A2A 验证服务（P1-01…P1-06，issue #83/#84/#85/#86/#87/#88）
+# @lumithink/a2a-server — LumiThink A2A 验证服务（P1-01…P1-07，issue #83/#84/#85/#86/#87/#88/#89）
 
 独立服务入口：官方 `@a2a-js/sdk@1.3.0` 服务端 + Agent Card + JSON-RPC over HTTPS/SSE + 标准错误映射 + Task-only 业务适配边界。执行运行时双模式：`synthetic`（缺省，协议/传输验证）与 `dsh-worker`（P1-05：真实 DSH 子进程机制 + 合成供应商内容；真实模型另验，Gate 归 P1-10/#92）。
 
@@ -95,6 +95,20 @@ pnpm --dir services/a2a-server run start
 
 重复请求最终口径（ADR-0015 §5.2 收口）：维持"快照直答不等待"——处理中任务的流式重复即回单帧快照并继续以 GetTask/Subscribe 重附着（测试锚：`tests/acceptance-idempotency.spec.ts`）。实现记录与证据：[docs/reviews/2026-10-26-p1-06-artifact-outbox-snapshot-recovery.md](../../docs/reviews/2026-10-26-p1-06-artifact-outbox-snapshot-recovery.md)。
 
+## 真实取消、完成竞态与抑制答案语义（P1-07，issue #89）
+
+在 P1-04 取消意图持久化与 P1-05 真实停止证据之上补齐 TASK_LIFECYCLE §7.2 的取消结算表与 fixture 03/04 应用契约：
+
+| 契约 | 内容 |
+| --- | --- |
+| 仅凭取消命令不认定停止 | `recordCancelIntent` + 执行行 `stop_requested` 围栏均不改公开状态；公开终态只在**真实停止证据**（worker 自报结果 / 进程退出证据 / watchdog 判定）之后发布。协作宽限（缺省 5s）内 worker 不停止 → 运行时 SIGKILL 强停，执行行以 `cancel_grace_expired` + `killedByRuntime=true` 结算，随后才发布 CANCELED——限期未停止绝不假成功 |
+| 完成竞争如实结算 | 取消已受理但 worker 真实完成时任务按 **COMPLETED** 结算（绝不谎报 CANCELED）；被围栏抑制的剩余正文无投递事件、不进公开快照、不补播 |
+| lumithinkResult 旗标 | 所有真实完成统一携带 `Task.metadata.lumithinkResult={version:1, outputSuppressedAfterCancel, answerComplete}`（fixture 03/04 应用契约；经锁定 SDK 的事件 metadata 合并进权威 store.save 落库，GetTask/SSE 与快照一致）。canceled/failed/rejected 不带旗标 |
+| 标准取消语义族 | 不自创状态或错误码：已取消重复取消幂等成功返回当前快照（fixture 09）；COMPLETED 取消 → 标准 TaskNotCancelable（fixture 08，-32002）；未知任务 → TaskNotFound（fixture 11，-32001）；活动任务取消成功返回 CANCELED 快照（fixture 13）。均为锁定官方客户端门级实测 |
+| review 移交收口 | `claimExecution` 显式 epoch 必须匹配 Turn 锚（#84 r1 P2-②③）；`admitChunk` 约束冲突无同 ID 行时以 `chunk_write_conflict` 失败、不再误报内容不一致（#105 r1 P2-3）；运行时重复会话防御守卫（#87 r1 P2-⑤）；租约过期只关输出准入、从不映射公开 CANCELED 的口径补记入 ADR-0016（#87 r1 P2-③）；WRITE_LOCK_BUSY 门级映射直接负例（#86 关闭评论 test gap） |
+
+测试锚：`tests/p1-07-cancel-semantics.spec.ts`（非协作强停 / 完成竞争抑制 / 正常完成旗标 / 标准取消语义族 / epoch 锚 / 写锁忙门级）。实现记录与证据：[docs/reviews/2026-10-26-p1-07-real-cancel-completion-races.md](../../docs/reviews/2026-10-26-p1-07-real-cancel-completion-races.md)。
+
 ## 测试
 
 ```powershell
@@ -124,12 +138,13 @@ CI 承载：`.github/workflows/p1-a2a-server-gate.yml`（ubuntu，frozen install
 | `tests/identity-authorizer.spec.ts` | #85：双层解析与 assurance 分级；epoch 决策缓存撤销即失效；过期/撤销凭据与授权负例（AC4）；grant 客户端绑定/会话绑定/提升不污染缓存；executor 门按当前状态复核；**review #102 收口：`task_not_attributable`（pre-v2 NULL 归因行）与 `credential_expired`（过期≠撤销）独立负例直达断言** |
 | `tests/identity-authorization-policy.spec.ts` | #85：同家庭共享事实按关系+操作决定（监护关系缺省拒绝）；候选声纹/未识别访客私有数据全拒（AC4）；P1 写冻结；grant scope 越界负例；跨家庭目标恒拒 |
 | `tests/identity-service-acl.spec.ts` | #85 AC1–AC4 服务级：伪造 metadata/tenant 不改授权；跨家庭与跨主体 Get/Cancel/Subscribe/续接拒绝且不建 Task；ListTasks 过滤；撤销关闭 SSE 长流 + 401/403 即时生效 + 审计；设备仅认证家庭、会话授权提升与撤销/过期负例；executor 门取消结算；默认 bootstrap 保持 P1-01 单 token 契约 |
+| `tests/p1-07-cancel-semantics.spec.ts` | #89 AC1–AC4 + 移交收口：非协作 Worker 取消命令不认定停止（宽限窗口内恒 working）、限期 SIGKILL 强停证据（`cancel_grace_expired`+`killedByRuntime`）与重复取消零新副作用；完成竞争——取消后真实完成 → COMPLETED + lumithinkResult 抑制旗标 + 可读说明 + 迟到分片无事件/不补播，正常完整完成携带 fixture 03 旗标；标准取消语义族经锁定官方客户端（已取消幂等成功 fixture 09 / 已完成 -32002 fixture 08 / 未找到 -32001 fixture 11）；`claimExecution` 显式 epoch 锚核验（#84 r1 P2-③）；WRITE_LOCK_BUSY 门级映射直接负例（#86 收口） |
 
 ## 边界（本包不做）
 
 - 不接真实模型/生产 Runtime：`dsh-worker` 模式的进程机制为真（真实子进程、租约、超时与退出证据），供应商内容为合成（真实模型另验，P1-10/#92 Gate）。中断执行的重启恢复扫描、删除台账、清理编排归 P1-08/#90（`state='abandoned'` 是其保留态）。
 - 不做 OpenAI-compatible 入口；不拆 Companion/Learning（单 Agent `lumithink`）。
-- 幂等受理/派发租约已接入 handler 受理链（P1-04/#86）；Outbox 重放原语、一致性切点与重复片段契约已随 P1-06/#88 落地；仍归后续 Issue：CancelTask 完整语义族与真实取消证据（P1-07/#89）、启动扫描/删除台账/跨库清理编排（P1-08/#90——`purgeTaskBody`+Outbox 删除与墓碑时间戳是其仓储原语，崩溃窗口孤儿绑定归其清理）、真实资源限额与背压（P1-09/#91——配额门挂钩已预留，缺省放行）。
+- 幂等受理/派发租约已接入 handler 受理链（P1-04/#86）；Outbox 重放原语、一致性切点与重复片段契约已随 P1-06/#88 落地；真实取消、完成竞态结算表与标准 CancelTask 语义族已随 P1-07/#89 落地（dsh-worker 真实进程证据链 + fixture 03/04 应用契约 + 官方客户端门级验证）。仍归后续 Issue：启动扫描/删除台账/跨库清理编排（P1-08/#90——`purgeTaskBody`+Outbox 删除与墓碑时间戳是其仓储原语，崩溃窗口孤儿绑定与中断执行恢复扫描归其清理）、真实资源限额与背压（P1-09/#91——配额门挂钩已预留，缺省放行）。
 - 身份层不含渠道身份入口本体：飞书事件验证、DSH Profile 凭据分发流程、设备会话确认 UX、声纹识别服务分别归 P3/P2/P4（本 Issue 只冻结共用解析/授权/撤销/审计接口，见 ADR-0014）；授权决策缓存按 epoch 失效，无 TTL 撤销窗口。
 - 不切换现有 UDS 链路；不使用真实儿童数据；不发布。
 

@@ -143,12 +143,27 @@ export class DshWorkerRuntime {
   /**
    * Spawns the worker process and registers the session. The caller's
    * handlers receive worker events and exactly ONE finalize callback.
+   *
+   * Defensive duplicate-session guard (review #87 r1 P2-⑤, closed in
+   * P1-07/#89): a taskId with a LIVE session must never spawn a second
+   * process — one active execution per task is a repository invariant
+   * (UNIQUE(task_id, epoch)) that this dispatch-side bookkeeping mirrors
+   * fail-closed. The duplicate request finalizes immediately with
+   * 'protocol_violation' instead of racing two children on one task id.
    */
   startExecution(request: WorkerStartRequest, handlers: WorkerSessionHandlers): void {
     if (this.disposed) {
       handlers.onFinalized(
         { exitCode: null, signal: null, killedByRuntime: false, stderrTail: '' },
         'disposed',
+      );
+      return;
+    }
+    const existing = this.sessions.get(request.taskId);
+    if (existing !== undefined && !existing.finalized) {
+      handlers.onFinalized(
+        { exitCode: null, signal: null, killedByRuntime: false, stderrTail: '' },
+        'protocol_violation',
       );
       return;
     }

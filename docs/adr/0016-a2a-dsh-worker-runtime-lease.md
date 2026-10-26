@@ -23,3 +23,10 @@ P1-04（ADR-0015）交付了事务性派发租约（`claimExecution`）与受理
 - 执行状态机全部状态（registered/running/stop_requested/settled + abandoned 保留）首次有真实写路径与断言；live 路径不再残留永久 registered 行。
 - 取消语义仍是最小接线（意图持久化 → stop_requested 标记 → 协作停止/限期强停 + 停止证据）；完成竞态族、非协作停止细则归 P1-07/#89。
 - 新增配置面：`LUMITHINK_A2A_RUNTIME_MODE` 与 `LUMITHINK_A2A_DSH_WORKER_*`（entry/timeout/hello/lost-contact/cancel-grace）；全部缺省保持合成与 CI 无文件写入。
+
+## 补记（P1-07/#89 实现时的语义口径）
+
+review #87 r1 P2-③ 要求补记的口径，随 P1-07 实现（2026-10-26）冻结：
+
+- **租约过期围栏与公开结算分离**。`admitChunk` 在租约过期时拒绝后续正文（`lease_invalid`），但这只是**输出准入围栏**，不是任务结算依据；公开 Task 结算只看执行证据：worker 自报结果 / 进程退出证据 / watchdog 判定。因此"租约过期"本身从不直接映射 CANCELED——租约过期的执行仍可由其 holder 合法结算（例如长跑执行完成后结算 completed）。
+- **取消宽限到期的语义**：协作窗口（`cancel_grace_ms`，初始 5s）内 worker 未停止时，运行时 SIGKILL 强停并以 `cancel_grace_expired` 记录执行行结算（outcome=canceled + killedByRuntime=true）。因为 SIGKILL 是同步硬终止，强停即"实际停止有确认"，公开任务在** kill 之后**才发布 CANCELED——不会像 TASK_LIFECYCLE §7.2 的 `execution_stop_unconfirmed`（截止时间到仍无法确认停止→FAILED）那样假成功；该 FAILED 分支在当前"强停必有 kill 证据"的运行时设计下不可达，如未来引入无法 kill 的外部执行器再启用。被抑制的完成分支（取消已受理但 worker 真实完成）按 fixture 04 结算 COMPLETED + `outputSuppressedAfterCancel=true`/`answerComplete=false`，见 ADR-0015 移交说明。
