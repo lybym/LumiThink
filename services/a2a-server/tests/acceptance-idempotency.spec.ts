@@ -22,6 +22,7 @@
  */
 import test from 'node:test';
 import { strict as assert } from 'node:assert';
+import { TaskState } from '@a2a-js/sdk';
 import { startA2aService } from '../src/a2a-service.ts';
 import { SqliteTaskManager } from '../src/task-manager/sqlite-task-manager.ts';
 import {
@@ -456,6 +457,163 @@ test('AC1 cross-subject: the same messageId from ANOTHER credential is a DIFFERE
     assert.equal((unauth.body['error'] as Record<string, unknown>)['code'], -32000);
     assert.equal(manager.stats().tasks, 1, 'unauthenticated requests never reach the ledger');
     assert.equal(manager.getTaskDetail(firstId).currentState, 'completed');
+  } finally {
+    await stopA2aService(service);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P1-06 (issue #88): binding-orphan convergence + duplicate-response stance
+// ---------------------------------------------------------------------------
+
+test('#88 / review #103 P2-1: duplicate, conflict and tombstone retries leave NO orphan task bindings behind', async () => {
+  const service = await startTest();
+  try {
+    const manager = service.taskStore as SqliteTaskManager;
+    const identity = service.identity.store;
+    const first = await postRpc(service.base, sendBody(1, wireMessage('msg-bind-1', '第一条')));
+    const taskId = wireTaskOf(first.body)['id'] as string;
+    const contextId = wireTaskOf(first.body)['contextId'] as string;
+    assert.ok(taskId && contextId);
+
+    for (let i = 0; i < 5; i += 1) {
+      // Duplicate retry (same key + fingerprint)…
+      await postRpc(service.base, sendBody(10 + i, wireMessage('msg-bind-1', '第一条')));
+      // …and a conflicting re-key (same key, different fingerprint).
+      const conflict = await postRpc(
+        service.base,
+        sendBody(20 + i, wireMessage('msg-bind-1', `变体${i}`)),
+      );
+      assert.equal((conflict.body['error'] as Record<string, unknown>)?.['code'], -32602);
+    }
+
+    assert.equal(
+      identity.taskBindingsForContext(contextId).length,
+      1,
+      'retry loops must not grow random-taskId orphan bindings',
+    );
+    assert.equal(identity.taskBindingsForContext(contextId)[0].taskId, taskId);
+
+    // Purge → tombstoned key → RESULT_PURGED retries also stay clean.
+    manager.purgeTaskBody(taskId);
+    const purgedRetry = await postRpc(service.base, sendBody(99, wireMessage('msg-bind-1', '第一条')));
+    const purgedError = purgedRetry.body['error'] as { data?: { reason?: string }[] } | undefined;
+    assert.equal(purgedError?.data?.[0]?.reason, 'RESULT_PURGED');
+    assert.equal(identity.taskBindingsForContext(contextId).length, 1);
+  } finally {
+    await stopA2aService(service);
+  }
+});
+
+test('#88 / ADR-0015 §5.2 final stance: a streaming duplicate of a WORKING task answers IMMEDIATELY from the snapshot — it never waits for the original execution', async () => {
+  let release!: () => void;
+  const parked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let released = false;
+  const parkedExecutor = {
+    async execute(requestContext: { taskId: string; contextId: string }, eventBus: {
+      publish(event: unknown): void;
+    }): Promise<void> {
+      const { taskId, contextId } = requestContext;
+      eventBus.publish({
+        kind: 'task',
+        data: {
+          id: taskId,
+          contextId,
+          status: { state: TaskState.TASK_STATE_SUBMITTED, message: undefined, timestamp: undefined },
+          artifacts: [],
+          history: [],
+          metadata: undefined,
+        },
+      });
+      eventBus.publish({
+        kind: 'statusUpdate',
+        data: {
+          taskId,
+          contextId,
+          status: { state: TaskState.TASK_STATE_WORKING, message: undefined, timestamp: undefined },
+          metadata: undefined,
+        },
+      });
+      await parked;
+      released = true;
+      eventBus.publish({
+        kind: 'statusUpdate',
+        data: {
+          taskId,
+          contextId,
+          status: { state: TaskState.TASK_STATE_COMPLETED, message: undefined, timestamp: undefined },
+          metadata: undefined,
+        },
+      });
+    },
+    async cancelTask(): Promise<void> {},
+  };
+  const service = await startA2aService({ config: testConfig(), executor: parkedExecutor });
+  try {
+    // Start the ORIGINAL send as a stream and break after the first frame —
+    // the task is now dispatched and PARKED in working (executor blocked).
+    const streamRes = await fetch(`${service.base}/`, {
+      method: 'POST',
+      headers: rpcHeaders(),
+      body: JSON.stringify(sendBody(1, wireMessage('msg-nowait-1', '原始请求'), 'SendStreamingMessage')),
+    });
+    assert.equal(streamRes.status, 200);
+    const reader = streamRes.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffered = '';
+    let workingTaskId = '';
+    while (workingTaskId === '') {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      const frames = buffered.split('\n\n');
+      buffered = frames.pop() ?? '';
+      for (const frame of frames) {
+        if (!frame.startsWith('data:')) continue;
+        const parsed = JSON.parse(frame.slice('data:'.length).trim()) as Record<string, unknown>;
+        const payload = parsed['result'] as Record<string, unknown> | undefined;
+        const candidate =
+          (payload?.['task'] as Record<string, unknown> | undefined) ??
+          (payload?.['status'] !== undefined ? (payload as Record<string, unknown>) : undefined);
+        const id = (candidate?.['taskId'] as string) ?? (candidate?.['id'] as string);
+        if (id) workingTaskId = id;
+      }
+    }
+    assert.ok(workingTaskId, 'the original stream delivered a task id');
+    assert.equal(released, false, 'the executor is still parked');
+    assert.equal(service.taskStore instanceof SqliteTaskManager, true);
+
+    // The DUPLICATE streaming retry must return while the original run is
+    // still parked — 快照直答不等待 (ADR-0015 §5.2 FINAL stance since #88).
+    const duplicateStart = Date.now();
+    const duplicateRes = await fetch(`${service.base}/`, {
+      method: 'POST',
+      headers: rpcHeaders(),
+      body: JSON.stringify(sendBody(2, wireMessage('msg-nowait-1', '原始请求'), 'SendStreamingMessage')),
+    });
+    assert.equal(duplicateRes.status, 200);
+    const raw = await duplicateRes.text();
+    assert.equal(Date.now() - duplicateStart < 5000, true, 'no blocking wait on the parked execution');
+    const frames = raw
+      .split('\n\n')
+      .filter((chunk) => chunk.startsWith('data:'))
+      .map((chunk) => JSON.parse(chunk.slice('data:'.length).trim()) as Record<string, unknown>);
+    assert.equal(frames.length, 1);
+    const wire = ((frames[0]['result'] as Record<string, unknown>)['task'] ?? {}) as Record<string, unknown>;
+    assert.equal(wire['id'], workingTaskId);
+    assert.equal((wire['status'] as Record<string, unknown>)['state'], 'TASK_STATE_WORKING');
+
+    // The parked execution was NOT affected by the duplicate answer; release
+    // it and confirm it settles normally afterwards.
+    release();
+    const manager = service.taskStore as SqliteTaskManager;
+    for (let i = 0; i < 50 && !released; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(released, true, 'the original execution completes after release');
+    assert.equal(manager.getTaskDetail(workingTaskId).currentState, 'completed');
   } finally {
     await stopA2aService(service);
   }

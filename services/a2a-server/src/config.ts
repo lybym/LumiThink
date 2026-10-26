@@ -40,7 +40,9 @@ export const A2A_IDENTITY_DEFAULT_DB_PATH = ':memory:';
  * synthetic default keeps standalone/CI runs deterministic and is NOT a
  * credential (fingerprints cover ids + synthetic validation text only);
  * durable deployments MUST set LUMITHINK_A2A_FINGERPRINT_KEY so stored
- * fingerprints are not enumerable across deployments.
+ * fingerprints are not enumerable across deployments. Since #88 the "MUST"
+ * is ENFORCED: falling back to this default logs a warning, and dsh-worker
+ * mode refuses to start on it (review #103 r1 P2-4).
  */
 export const A2A_FINGERPRINT_SYNTHETIC_DEFAULT_KEY = 'p1-04-synthetic-fingerprint-hmac-key';
 
@@ -159,10 +161,23 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
     rawBootstrap !== undefined && rawBootstrap.trim() !== '' ? rawBootstrap : undefined;
 
   const rawFingerprintKey = env.LUMITHINK_A2A_FINGERPRINT_KEY;
-  const fingerprintKey =
-    rawFingerprintKey !== undefined && rawFingerprintKey.trim() !== ''
-      ? rawFingerprintKey.trim()
-      : A2A_FINGERPRINT_SYNTHETIC_DEFAULT_KEY;
+  const fingerprintKeyIsDefault =
+    rawFingerprintKey === undefined || rawFingerprintKey.trim() === '';
+  if (fingerprintKeyIsDefault) {
+    // #88 scope (review #103 r1 P2-4): running on the PUBLIC synthetic
+    // default must never happen silently — warn in synthetic validation
+    // mode; dsh-worker mode REFUSES to start (check below, after the mode
+    // is parsed). Fingerprints persist ≥30 days and a shared public key
+    // would make them enumerable across deployments (TASK_LIFECYCLE §5.4).
+    console.warn(
+      '[lumithink-a2a] LUMITHINK_A2A_FINGERPRINT_KEY is NOT set — using the PUBLIC ' +
+        'synthetic default request-fingerprint HMAC key (P1 synthetic validation only). ' +
+        'Durable deployments MUST set their own key; dsh-worker mode refuses to start without one.',
+    );
+  }
+  const fingerprintKey = fingerprintKeyIsDefault
+    ? A2A_FINGERPRINT_SYNTHETIC_DEFAULT_KEY
+    : rawFingerprintKey!.trim();
 
   const rawLeaseTtl = env.LUMITHINK_A2A_DISPATCH_LEASE_TTL_MS;
   let dispatchLeaseTtlMs = A2A_DISPATCH_LEASE_DEFAULT_TTL_MS;
@@ -228,6 +243,18 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
       );
     }
     runtimeMode = rawRuntimeMode;
+  }
+  // #88 scope (review #103 r1 P2-4): fail-closed fingerprint key in the
+  // REAL worker mode. The synthetic default is public knowledge; persisted
+  // fingerprints made with it are dictionary-enumerable, which violates
+  // TASK_LIFECYCLE §5.4 for anything beyond the synthetic validation text.
+  if (fingerprintKeyIsDefault && runtimeMode === 'dsh-worker') {
+    throw new Error(
+      'LUMITHINK_A2A_FINGERPRINT_KEY must be set when LUMITHINK_A2A_RUNTIME_MODE=dsh-worker: ' +
+        'request fingerprints are versioned HMAC digests persisted for at least 30 days, and ' +
+        'running on the public synthetic default key would make them enumerable across ' +
+        'deployments (review #103 r1 P2-4; TASK_LIFECYCLE §5.4).',
+    );
   }
   const positiveInt = (raw: string | undefined, fallback: number, label: string): number => {
     if (raw === undefined || raw === '') return fallback;
