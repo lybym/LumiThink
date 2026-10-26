@@ -1,4 +1,4 @@
-# @lumithink/a2a-server — LumiThink A2A 验证服务（P1-01…P1-05，issue #83/#84/#85/#86/#87）
+# @lumithink/a2a-server — LumiThink A2A 验证服务（P1-01…P1-06，issue #83/#84/#85/#86/#87/#88）
 
 独立服务入口：官方 `@a2a-js/sdk@1.3.0` 服务端 + Agent Card + JSON-RPC over HTTPS/SSE + 标准错误映射 + Task-only 业务适配边界。执行运行时双模式：`synthetic`（缺省，协议/传输验证）与 `dsh-worker`（P1-05：真实 DSH 子进程机制 + 合成供应商内容；真实模型另验，Gate 归 P1-10/#92）。
 
@@ -19,7 +19,7 @@ $env:LUMITHINK_A2A_VALIDATION_PORT = '3312'   # 缺省即 3312（deploy/validati
 $env:LUMITHINK_A2A_VALIDATION_DB   = '<sqlite file path>'  # 缺省 ':memory:'（进程内、无文件写入）
 $env:LUMITHINK_A2A_IDENTITY_DB     = '<sqlite file path>'  # 缺省 ':memory:'；身份库（P1-03）
 $env:LUMITHINK_A2A_IDENTITY_BOOTSTRAP = '<json>'          # 可选：额外合成客户端/凭据/授权（严格校验）
-$env:LUMITHINK_A2A_FINGERPRINT_KEY    = '<hmac key>'      # 可选：请求指纹 HMAC 密钥（P1-04；持久部署应设置自己的密钥，合成缺省见 config.ts）
+$env:LUMITHINK_A2A_FINGERPRINT_KEY    = '<hmac key>'      # 可选：请求指纹 HMAC 密钥（P1-04；#88 起强制——未设置时合成模式告警，dsh-worker 模式拒绝启动；持久部署必须用自己的密钥）
 $env:LUMITHINK_A2A_DISPATCH_LEASE_TTL_MS = '300000'        # 可选：派发租约 TTL（P1-04，缺省 5 分钟）
 $env:LUMITHINK_A2A_RETENTION_RETRY_HOURS    = '24'        # 可选：重试窗口（≥1）
 $env:LUMITHINK_A2A_RETENTION_RESULT_DAYS    = '7'         # 可选：结果留存天数（≥1）
@@ -79,6 +79,22 @@ pnpm --dir services/a2a-server run start
 
 配置：`LUMITHINK_A2A_DSH_WORKER_ENTRY`（缺省内置入口）、`LUMITHINK_A2A_DSH_WORKER_TIMEOUT_MS`（缺省 120s）、`..._HELLO_TIMEOUT_MS`（10s）、`..._LOST_CONTACT_MS`（15s）、`..._CANCEL_GRACE_MS`（5s）。`dsh-worker` 模式要求 SQLite Task Manager（自定义 Task Store 拒绝启动，fail-closed）。`state='abandoned'` 保留给 P1-08 恢复扫描。设计依据 [ADR-0016](../../docs/adr/0016-a2a-dsh-worker-runtime-lease.md)。
 
+## 稳定 Artifact、Outbox 重放与快照恢复（P1-06，issue #88）
+
+在既有输出准入（P1-04 准入门 + `admitChunk`）之上把安全准入后的正文落为稳定追加型 Artifact 与可重放 Outbox：
+
+| 契约 | 内容 |
+| --- | --- |
+| 片段元数据在事件 | `TaskArtifactUpdateEvent.metadata.lumithinkOutput = { version: 1, chunkId, startByte/endByte (UTF-8 字节区间), sha256 }`；`append`/`lastChunk` 只属于更新事件（首片段 `append:false`，结束片段 `lastChunk:true`）；Artifact 级 metadata 仅稳定属性（如 `lumithinkContent`），快照聚合正文、不携带逐片段 metadata |
+| 重复事件同 ID 幂等 | 同 `chunkId` + 字节相同内容 → `duplicate`（保持原 seq/区间/摘要，无新事件）；同 ID 不同内容 → **拒绝**（`chunk_content_mismatch`，执行器围栏处理），公开前缀绝不改写——bridge 追加路径同样忽略对已发布分片的改写快照 |
+| 合法重复词句保留 | 相同文本在不同 chunkId 下各自入库、字节区间无缝铺排——按内容去重不成立（§6.1），语音去重由渠道按 `taskId+artifactId+chunkId` 进行 |
+| 快照/游标切点 | `getReplayCutpoint(taskId)`：单个 deferred 读事务内返回聚合快照 + 已提交事件最大 seq；`readOutboxAfter(taskId, afterSeq)` 返回游标之后的全部有序事件（消费水位由调用方持有）。快照 + 游标后增量接合无缺口、无重复；终态客户端直接 GetTask（标准不保证历史游标）；**不提供从零自动补播原语**——无可靠水位的适配器禁止自动从头补播 |
+| 删除停止交付 | `purgeTaskBody` 同时删除该任务的全部 Outbox 行：删除后既无正文也无任何重放来源（输入/正文/Outbox 不可访问，仅剩墓碑） |
+| fpv1 密钥强制 | 未设置 `LUMITHINK_A2A_FINGERPRINT_KEY` 时合成模式显式告警；`dsh-worker` 模式拒绝启动（review #103 r1 P2-4 收口） |
+| 受理孤儿收敛 | 每个**非 created** 受理结果立即释放本次预绑定（`IdentityStore.unbindTask` + 审计）：按键重试不再增长随机 taskId 孤儿（review #103 r1 P2-1 收口）；崩溃窗口孤儿归 P1-08/#90 |
+
+重复请求最终口径（ADR-0015 §5.2 收口）：维持"快照直答不等待"——处理中任务的流式重复即回单帧快照并继续以 GetTask/Subscribe 重附着（测试锚：`tests/acceptance-idempotency.spec.ts`）。实现记录与证据：[docs/reviews/2026-10-26-p1-06-artifact-outbox-snapshot-recovery.md](../../docs/reviews/2026-10-26-p1-06-artifact-outbox-snapshot-recovery.md)。
+
 ## 测试
 
 ```powershell
@@ -93,16 +109,16 @@ CI 承载：`.github/workflows/p1-a2a-server-gate.yml`（ubuntu，frozen install
 
 | spec | 覆盖 |
 | --- | --- |
-| `tests/acceptance-idempotency.spec.ts` | #86 AC1–AC4 服务级：并发同键唯一 Task/执行（5 路竞争）；同键不同内容 MESSAGE_ID_CONFLICT 不泄漏主体；首响应丢失重发原消息恢复同 taskId（完成态 + 进行中态、跨 SendMessage/流式模式）且不重复推理；取消意图先持久化、补发远端取消无新副作用；配额拒绝 REJECTED、Worker 启动失败保留执行记录且重试不重跑；purge 墓碑后重试/重放不复活正文；流式重复单帧快照 |
+| `tests/acceptance-idempotency.spec.ts` | #86 AC1–AC4 服务级：并发同键唯一 Task/执行（5 路竞争）；同键不同内容 MESSAGE_ID_CONFLICT 不泄漏主体；首响应丢失重发原消息恢复同 taskId（完成态 + 进行中态、跨 SendMessage/流式模式）且不重复推理；取消意图先持久化、补发远端取消无新副作用；配额拒绝 REJECTED、Worker 启动失败保留执行记录且重试不重跑；purge 墓碑后重试/重放不复活正文；流式重复单帧快照。**#88：处理中任务的流式重复立即返回快照、不等待原执行（ADR-0015 §5.2 最终口径锚）；duplicate/conflict/tombstone 重试不增长归属绑定孤儿（P2-1 收口）** |
 | `tests/request-key.spec.ts` | #86：请求键按完整认证绑定分域（跨客户端/家庭/主体/设备互不碰撞、访客按设备稳定受限主体）；键编码防分隔符碰撞；指纹跨传输模式稳定（阻塞/立即返回/流式一致）、键序无关、内容变化即冲突、HMAC 密钥敏感 |
-| `tests/config-retention.spec.ts` | #86 AC4：24h/7d/30d 缺省初值精确钉死；环境覆盖解析；墓碑 30 天硬下限拒绝启动；非法数值 fail-closed |
+| `tests/config-retention.spec.ts` | #86 AC4 + #88：24h/7d/30d 缺省初值精确钉死；环境覆盖解析；墓碑 30 天硬下限拒绝启动；非法数值 fail-closed；**#88 P2-4：dsh-worker 模式在公开合成指纹密钥上拒绝启动、合成回落显式告警** |
 | `tests/official-client-roundtrip.spec.ts` | #83 AC1：官方独立客户端发现 Agent Card、阻塞/流式发送（task 首帧、append/lastChunk 只在更新事件）、GetTask 快照恢复、CancelTask |
 | `tests/protocol-errors.spec.ts` | #83 AC2：标准错误映射（-32001/-32002/-32004/-32009，冻结 fixtures 08–12 语义）、认证/参数失败不建 Task、Task-only 线形、Skill 声明不作授权依据、单一权威 store 接线 |
 | `tests/stream-resilience.spec.ts` | #83 AC3：SSE 断开不默认取消、终态订阅标准错误 + GetTask 恢复、活动任务重订阅 |
 | `tests/service-contract.spec.ts` | 配置契约（3312 缺省、loopback 锁、fail-closed token）、Agent Card 单 Agent 契约、A2A-Version 显式校验（R7） |
 | `tests/service-entry.spec.ts` | 独立入口子进程启动（banner SYNTHETIC 标注、卡发现、bearer 门、SIGTERM 干净退出） |
 | `tests/task-manager-state-machine.spec.ts` | #84 AC1：状态机表逐条对照 TASK_LIFECYCLE §3、终态无出边、SDK 状态映射 fail-closed |
-| `tests/task-manager-repository.spec.ts` | #84 AC2/AC3/AC4 + #86：迁移 v1/v2（含 v1→v2 加性重迁移、墓碑时间戳列）+ 未知未来版本拒开；原子受理（5 个失败注入点全回滚）；重复键/指纹冲突语义；状态版本竞争唯一赢家；终态不可逆（表+触发器）；取消×派发竞争（含 P1-04 `canceled_pre_dispatch`）；执行归属（epoch/**lease 持有者必须出示**，review #101 ⑤）与迟到回调拒绝；`purgeTaskBody` 正文清除+墓碑+重放不复活；bridge 按消息身份同步（review #101 ⑥ 窗口化不丢消息）与追加输出准入复核（review #101 ①）；Outbox 事务外发布+稳定重放；写锁有界竞争（busy_timeout）；无网络调用 + 异步事务体失败 |
+| `tests/task-manager-repository.spec.ts` | #84 AC2/AC3/AC4 + #86：迁移 v1/v2（含 v1→v2 加性重迁移、墓碑时间戳列）+ 未知未来版本拒开；原子受理（5 个失败注入点全回滚）；重复键/指纹冲突语义；状态版本竞争唯一赢家；终态不可逆（表+触发器）；取消×派发竞争（含 P1-04 `canceled_pre_dispatch`）；执行归属（epoch/**lease 持有者必须出示**，review #101 ⑤）与迟到回调拒绝；`purgeTaskBody` 正文清除+墓碑+重放不复活；bridge 按消息身份同步（review #101 ⑥ 窗口化不丢消息）与追加输出准入复核（review #101 ①）；Outbox 事务外发布+稳定重放；写锁有界竞争（busy_timeout）；无网络调用 + 异步事务体失败。**#88：同 ID 同内容幂等/不同内容拒绝不改写公开前缀、合法重复词句保留、bridge 改写快照被忽略；`getReplayCutpoint`+`readOutboxAfter` 快照/游标无缺口接合；purge 删除 Outbox 后重放零交付** |
 | `tests/task-manager-sdk-bridge.spec.ts` | #84：组合根默认单一权威 store；官方客户端往返全程落库（合法转换链/分片/Outbox 流水）；文件库跨重启恢复（GetTask/list）；陈旧快照不移动权威行；终态后追加正文失败 |
 | `tests/identity-store.spec.ts` | #85：身份库迁移 v1 + 未来版本拒开；凭据仅存摘要（明文不落盘）；bootstrap 严格校验负例；撤销精确 bump epoch（无变更不 bump）；任务归属 ACL（跨家庭/跨主体/候选上限/访客续接）；审计无令牌材料 |
 | `tests/identity-authorizer.spec.ts` | #85：双层解析与 assurance 分级；epoch 决策缓存撤销即失效；过期/撤销凭据与授权负例（AC4）；grant 客户端绑定/会话绑定/提升不污染缓存；executor 门按当前状态复核；**review #102 收口：`task_not_attributable`（pre-v2 NULL 归因行）与 `credential_expired`（过期≠撤销）独立负例直达断言** |
@@ -113,7 +129,7 @@ CI 承载：`.github/workflows/p1-a2a-server-gate.yml`（ubuntu，frozen install
 
 - 不接真实模型/生产 Runtime：`dsh-worker` 模式的进程机制为真（真实子进程、租约、超时与退出证据），供应商内容为合成（真实模型另验，P1-10/#92 Gate）。中断执行的重启恢复扫描、删除台账、清理编排归 P1-08/#90（`state='abandoned'` 是其保留态）。
 - 不做 OpenAI-compatible 入口；不拆 Companion/Learning（单 Agent `lumithink`）。
-- 幂等受理/派发租约已接入 handler 受理链（P1-04/#86）；仍归后续 Issue：分片级输出 Outbox 交付契约与重连水位（P1-06/#88）、CancelTask 完整语义族与真实取消证据（P1-07/#89）、启动扫描/删除台账/清理编排（P1-08/#90——`purgeTaskBody` 与墓碑时间戳是其仓储原语）、真实资源限额与背压（P1-09/#91——配额门挂钩已预留，缺省放行）。
+- 幂等受理/派发租约已接入 handler 受理链（P1-04/#86）；Outbox 重放原语、一致性切点与重复片段契约已随 P1-06/#88 落地；仍归后续 Issue：CancelTask 完整语义族与真实取消证据（P1-07/#89）、启动扫描/删除台账/跨库清理编排（P1-08/#90——`purgeTaskBody`+Outbox 删除与墓碑时间戳是其仓储原语，崩溃窗口孤儿绑定归其清理）、真实资源限额与背压（P1-09/#91——配额门挂钩已预留，缺省放行）。
 - 身份层不含渠道身份入口本体：飞书事件验证、DSH Profile 凭据分发流程、设备会话确认 UX、声纹识别服务分别归 P3/P2/P4（本 Issue 只冻结共用解析/授权/撤销/审计接口，见 ADR-0014）；授权决策缓存按 epoch 失效，无 TTL 撤销窗口。
 - 不切换现有 UDS 链路；不使用真实儿童数据；不发布。
 

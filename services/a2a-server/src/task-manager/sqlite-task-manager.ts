@@ -199,7 +199,13 @@ export type AdmitChunkResult =
         | 'lease_invalid'
         /** 迟到回调不能追加正文 (AC 3). */
         | 'task_terminal'
-        | 'output_admission_closed';
+        | 'output_admission_closed'
+        /**
+         * Redelivery of a known chunkId with DIFFERENT content (#88 AC 2:
+         * 同 ID 不同内容拒绝) — a protocol anomaly; the original public
+         * chunk is never rewritten (公开后不改写已公开前缀, §6.1).
+         */
+        | 'chunk_content_mismatch';
     };
 
 export interface RecordCancelIntentParams {
@@ -871,18 +877,24 @@ export class SqliteTaskManager implements TaskStore {
       }
 
       this.ensureArtifactLocked(params.taskId, params.artifactId, params.artifactName, this.now());
-      // Idempotent redelivery: a caller-supplied stable chunkId that already
-      // exists keeps the original chunk (no rewrite, no new outbox row, §6.1).
+      // Idempotent redelivery (#88 AC 2): a caller-supplied stable chunkId
+      // that already exists is honored ONLY with byte-identical content —
+      // the original chunk is kept (no rewrite, no new outbox row, §6.1).
+      // The same id carrying DIFFERENT content is a protocol anomaly and is
+      // REJECTED (同 ID 不同内容拒绝) instead of being silently absorbed.
       if (params.chunkId !== undefined) {
         const existing = this.db
           .prepare(
-            'SELECT chunk_seq FROM a2a_artifact_chunks WHERE task_id = ? AND artifact_id = ? AND chunk_id = ?',
+            'SELECT chunk_seq, text, sha256 FROM a2a_artifact_chunks WHERE task_id = ? AND artifact_id = ? AND chunk_id = ?',
           )
           .get(params.taskId, params.artifactId, params.chunkId) as
-          | { chunk_seq: number }
+          | { chunk_seq: number; text: string; sha256: string }
           | undefined;
         if (existing) {
-          return { outcome: 'duplicate', chunkSeq: existing.chunk_seq, chunkId: params.chunkId };
+          if (existing.text === params.text && existing.sha256 === sha256Hex(params.text)) {
+            return { outcome: 'duplicate', chunkSeq: existing.chunk_seq, chunkId: params.chunkId };
+          }
+          return { outcome: 'rejected', reason: 'chunk_content_mismatch' };
         }
       }
       const countRow = this.db
@@ -918,13 +930,24 @@ export class SqliteTaskManager implements TaskStore {
           this.now(),
         ).changes;
       if (Number(changes) !== 1) {
-        // chunk_id UNIQUE hit → idempotent redelivery; keep the original.
+        // chunk_id UNIQUE hit → redelivery of an already-admitted chunk.
+        // Content must match byte-for-byte (§6.1 / #88 AC 2); a mismatch is
+        // the rejected anomaly, never a silent rewrite.
         const existing = this.db
           .prepare(
-            'SELECT chunk_seq FROM a2a_artifact_chunks WHERE task_id = ? AND artifact_id = ? AND chunk_id = ?',
+            'SELECT chunk_seq, text, sha256 FROM a2a_artifact_chunks WHERE task_id = ? AND artifact_id = ? AND chunk_id = ?',
           )
-          .get(params.taskId, params.artifactId, chunkId) as { chunk_seq: number } | undefined;
-        return { outcome: 'duplicate', chunkSeq: existing?.chunk_seq ?? chunkSeq, chunkId };
+          .get(params.taskId, params.artifactId, chunkId) as
+          | { chunk_seq: number; text: string; sha256: string }
+          | undefined;
+        if (
+          existing &&
+          existing.text === params.text &&
+          existing.sha256 === sha256Hex(params.text)
+        ) {
+          return { outcome: 'duplicate', chunkSeq: existing.chunk_seq, chunkId };
+        }
+        return { outcome: 'rejected', reason: 'chunk_content_mismatch' };
       }
       if (exec.state === 'registered') {
         this.db
@@ -1131,21 +1154,24 @@ export class SqliteTaskManager implements TaskStore {
    * ONE transaction (§5.4: 删除个人正文…优先于常规窗口；仅保留必要墓碑):
    *   - task history rows (user/agent message bodies) — deleted;
    *   - artifacts + admitted chunks (public body) — deleted;
+   *   - Outbox rows (#88 AC 4: 删除后停止事件交付) — deleted;
    *   - turn input_message_json — replaced by a redacted marker (NOT NULL
    *     column; the marker carries no body and no keyless digest);
    *   - task status message + metadata — cleared;
    *   - ledger keys — status='tombstoned' + tombstoned_at_ms (retention
    *     baseline for the ≥30d minimum tombstone window).
    *
-   * Kept (minimal, body-free by construction): task/state/version rows,
-   * execution lease records, and Outbox rows — P1-02 outbox payloads hold
-   * ids/positions/digests only, never text, so replaying them cannot
-   * resurrect body ("清理或重放不复活已删正文"). A retried request on a
-   * tombstoned key returns the tombstoned outcome and never re-executes.
+   * Kept (minimal): task/state/version rows and execution lease records.
+   * Outbox rows are DELETED (#88 AC 4: 删除后停止事件交付) — after a purge
+   * NO replay source exists for this task at all ("删除后输入/正文/
+   * Outbox 不可访问，仅剩最小墓碑", §9 重启恢复 + §10 验证表), so neither
+   * publication nor replay can deliver anything afterwards. A retried
+   * request on a tombstoned key returns the tombstoned outcome and never
+   * re-executes.
    *
    * The cross-cutting cleanup orchestration (startup scan, caches, channel
-   * deliveries, outbox-with-body from P1-06) is P1-08/#90; this is the
-   * repository primitive that contract builds on.
+   * deliveries) is P1-08/#90; this is the repository primitive that
+   * contract builds on.
    */
   purgeTaskBody(taskId: string): PurgeTaskBodyResult {
     return this.withWriteTransaction(() => {
@@ -1157,6 +1183,9 @@ export class SqliteTaskManager implements TaskStore {
       this.db.prepare('DELETE FROM a2a_task_history WHERE task_id = ?').run(taskId);
       this.db.prepare('DELETE FROM a2a_artifact_chunks WHERE task_id = ?').run(taskId);
       this.db.prepare('DELETE FROM a2a_artifacts WHERE task_id = ?').run(taskId);
+      // #88 AC 4: removal stops EVENT DELIVERY too — no outbox rows survive
+      // the purge, so neither publication nor replay can deliver afterwards.
+      this.db.prepare('DELETE FROM a2a_outbox WHERE task_id = ?').run(taskId);
       this.db
         .prepare("UPDATE a2a_turns SET input_message_json = ? WHERE task_id = ?")
         .run(JSON.stringify({ lumithinkPurged: true, version: 1 }), taskId);
@@ -1209,6 +1238,65 @@ export class SqliteTaskManager implements TaskStore {
         .run(this.now(), taskId, throughSeq).changes;
       return Number(changes);
     });
+  }
+
+  /**
+   * Replay slice from a consumer-owned cursor (#88 AC 1/AC 3): all events of
+   * the task with `seq > afterSeq`, ordered, regardless of the publication
+   * marker. The PUBLICATION watermark is transport-delivery bookkeeping; a
+   * reconnecting subscriber's position is the cursor the caller holds —
+   * 正文消费位置由渠道侧记录（§6.1），仓储只保证重发保持片段 ID、位置和摘要.
+   * There is deliberately NO auto-replay-from-zero helper: an adapter without
+   * a reliable watermark must NOT resync by replaying everything (#88 AC 4,
+   * design §9.3 重连以当前快照建立边界).
+   */
+  readOutboxAfter(taskId: string, afterSeq: number): OutboxEvent[] {
+    this.assertOpen();
+    if (!Number.isInteger(afterSeq) || afterSeq < 0) {
+      throw new TaskManagerError('invalid_input', `afterSeq must be a non-negative integer: ${afterSeq}`);
+    }
+    const rows = this.db
+      .prepare('SELECT * FROM a2a_outbox WHERE task_id = ? AND seq > ? ORDER BY seq')
+      .all(taskId, afterSeq) as Record<string, unknown>[];
+    return rows.map((row) => this.outboxEventOf(row));
+  }
+
+  /**
+   * Consistent snapshot/cursor cutpoint for subscription establishment
+   * (#88 AC 3, TASK_LIFECYCLE §6.2: 订阅建立时，将当前 Task 快照和对应内部
+   * 事件游标作为一致性切点，再发送切点之后的事件). Reads the aggregated Task
+   * snapshot and the highest committed Outbox seq inside ONE deferred read
+   * transaction, so a concurrent admission can never fall BETWEEN the
+   * snapshot and the cursor: joining "snapshot + readOutboxAfter(seq)"
+   * yields no gap and no duplicate delivery. Terminal-state clients ignore
+   * the cursor and read the snapshot via GetTask instead (标准不保证历史
+   * 游标); the cursor exists for LIVE resubscription join points.
+   */
+  getReplayCutpoint(taskId: string):
+    | { found: true; snapshot: Task; lastCommittedEventSeq: number }
+    | { found: false } {
+    this.assertOpen();
+    this.db.exec('BEGIN DEFERRED');
+    try {
+      const row = this.selectTaskLocked(taskId);
+      if (!row) {
+        this.db.exec('COMMIT');
+        return { found: false };
+      }
+      const maxRow = this.db
+        .prepare('SELECT COALESCE(MAX(seq), 0) AS maxSeq FROM a2a_outbox WHERE task_id = ?')
+        .get(taskId) as { maxSeq: number };
+      const snapshot = this.assembleTaskFromRow(row);
+      this.db.exec('COMMIT');
+      return { found: true, snapshot, lastCommittedEventSeq: Number(maxRow.maxSeq) };
+    } catch (error) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        // BEGIN itself failed — nothing to roll back.
+      }
+      throw this.wrapSqliteError(error);
+    }
   }
 
   // -------------------------------------------------------------------------

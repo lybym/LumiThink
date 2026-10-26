@@ -29,6 +29,11 @@
  *                            RESULT_PURGED; never re-runs, never resurrects
  *                            body (§5.2, AC 4).
  *
+ * Every NON-created outcome RELEASES its just-created ownership pre-bind
+ * (review #103 r1 P2-1, converged in #88): keyed retries no longer grow
+ * random-taskId orphan bindings — only 'created' keeps its binding. The
+ * crash window between bind and accept remains a P1-08/#90 cleanup item.
+ *
  * Auth/param failures never reach here (upstream middleware) and never
  * create a Task. All decisions are audit-logged server-side without message
  * content (design §13.2 minimal audit).
@@ -146,6 +151,11 @@ export function requireIdempotentAcceptance(options: AcceptanceGateOptions): Req
     const fingerprint = fingerprintOf(rawMessage, options.fingerprintKey);
 
     let accepted: ReturnType<typeof taskManager.acceptInput>;
+    // The PRE-ASSIGNED binding id (fail-closed ordering, P1-03). Hoisted so
+    // every non-created acceptance outcome can RELEASE the just-created
+    // pre-bind (review #103 r1 P2-1 convergence): a keyed retry loop would
+    // otherwise leave one random-taskId orphan per attempt behind.
+    const boundTaskId = randomUUID();
     try {
       // Fail-closed ordering (P1-03): the ownership binding is written
       // BEFORE the task row, under a PRE-ASSIGNED task id. A crash in
@@ -153,7 +163,7 @@ export function requireIdempotentAcceptance(options: AcceptanceGateOptions): Req
       // reverse order would strand an unreadable task whose ledger key can
       // never be re-executed. The contextId is pre-assigned so binding and
       // acceptance share one conversation id.
-      const taskId = randomUUID();
+      const taskId = boundTaskId;
       const contextId =
         typeof (rawMessage as { contextId?: unknown }).contextId === 'string' &&
         ((rawMessage as { contextId: string }).contextId).trim() !== ''
@@ -170,6 +180,8 @@ export function requireIdempotentAcceptance(options: AcceptanceGateOptions): Req
       });
     } catch (error) {
       if (isTaskManagerError(error) && error.code === 'message_id_conflict') {
+        // No task committed for this attempt — release the pre-bind.
+        options.identity.unbindTask(boundTaskId, 'acceptance_message_id_conflict');
         audit({
           action: 'accept',
           decision: 'deny',
@@ -211,7 +223,10 @@ export function requireIdempotentAcceptance(options: AcceptanceGateOptions): Req
         return;
       }
       if (isTaskManagerError(error) && error.code === 'write_lock_busy') {
-        // Transient and SAFE to retry: acceptance is idempotent by key.
+        // Transient and SAFE to retry: acceptance is idempotent by key. The
+        // rolled-back attempt committed nothing — release its pre-bind so
+        // lock-contention retries cannot grow orphan bindings either.
+        options.identity.unbindTask(boundTaskId, 'acceptance_write_lock_busy');
         res.status(200).json(
           jsonRpcErrorBody(
             requestIdOf(req),
@@ -222,11 +237,15 @@ export function requireIdempotentAcceptance(options: AcceptanceGateOptions): Req
         );
         return;
       }
+      // Any other error also committed no task — release the pre-bind before
+      // propagating (fail loudly afterwards; the release must not mask it).
+      options.identity.unbindTask(boundTaskId, 'acceptance_error');
       throw error;
     }
 
     if (accepted.outcome === 'conflict') {
       // Defensive mirror of the typed-error path above (no subject data).
+      options.identity.unbindTask(boundTaskId, 'acceptance_message_id_conflict');
       res.status(200).json(
         jsonRpcErrorBody(
           requestIdOf(req),
@@ -239,6 +258,9 @@ export function requireIdempotentAcceptance(options: AcceptanceGateOptions): Req
     }
 
     if (accepted.outcome === 'tombstoned') {
+      // Nothing accepted for this attempt — release the pre-bind (#88 scope:
+      // tombstone retries must not grow orphan bindings either).
+      options.identity.unbindTask(boundTaskId, 'acceptance_result_purged');
       audit({
         action: 'accept',
         decision: 'deny',
@@ -262,6 +284,10 @@ export function requireIdempotentAcceptance(options: AcceptanceGateOptions): Req
       // §5.2: 权限已撤销 → 拒绝访问，即使请求键已存在。The wire error mirrors
       // the authorizing store's "task does not exist" semantics; the real
       // reason lives in the audit log (design §4.1: 不靠 ID 保密).
+      // The pre-bind of THIS attempt is released either way — duplicates
+      // never own a new task, so a retry loop must not grow bindings
+      // (review #103 r1 P2-1 convergence).
+      options.identity.unbindTask(boundTaskId, 'acceptance_duplicate');
       const access = options.identity.checkTaskAccess(accepted.taskId, auth);
       if (!access.allowed) {
         audit({

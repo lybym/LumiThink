@@ -834,6 +834,47 @@ export class IdentityStore {
     }
   }
 
+  /**
+   * Releases the PRE-BOUND ownership row of an acceptance that did NOT
+   * commit a task (#88 scope; review #103 r1 P2-1 收敛). The fail-closed
+   * ordering (binding BEFORE task row, ADR-0014/P1-03) leaves one binding
+   * per ATTEMPT behind on duplicate/conflict/tombstoned outcomes — a keyed
+   * retry loop then grows random-taskId orphans without bound. Releasing the
+   * just-created pre-bind on every non-created acceptance outcome removes
+   * that growth while keeping the ordering invariant: after release there is
+   * again neither task nor binding (nothing was accepted).
+   *
+   * The crash window between bindTask() and acceptInput() still persists its
+   * orphan by design (harmless, points at no task); the startup cleanup for
+   * it stays with P1-08/#90. Returns true when a row was deleted.
+   */
+  unbindTask(taskId: string, reason: string): boolean {
+    this.assertOpen();
+    const existed = this.taskBinding(taskId);
+    if (!existed) return false;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db
+        .prepare('DELETE FROM a2a_identity_task_bindings WHERE task_id = ?')
+        .run(taskId);
+      this.auditInTransaction({
+        action: 'task_binding_released',
+        decision: 'allow',
+        reason,
+        taskId,
+        contextId: existed.contextId,
+        householdId: existed.householdId,
+        principalUserId: existed.principalUserId,
+        clientId: existed.clientId,
+      });
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return true;
+  }
+
   /** ACL decision for reading/canceling/subscribing to an existing task. */
   checkTaskAccess(
     taskId: string,

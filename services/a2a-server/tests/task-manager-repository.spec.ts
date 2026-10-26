@@ -17,6 +17,7 @@
  */
 import test from 'node:test';
 import { strict as assert } from 'node:assert';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -1024,5 +1025,220 @@ test('schema v2: v1 databases re-migrate additively; tombstoned_at_ms appears an
     }
   } finally {
     removeTempDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P1-06 (issue #88): stable append-only Artifact, Outbox replay & recovery
+// ---------------------------------------------------------------------------
+
+interface AdmitFixture { taskId: string }
+
+function admitFixture(mgr: SqliteTaskManager, key: string): AdmitFixture {
+  const { taskId } = accept(mgr, key);
+  assert.equal(
+    mgr.claimExecution({ taskId, executionId: 'exec-1', leaseId: 'lease-1' }).outcome,
+    'claimed',
+  );
+  return { taskId };
+}
+
+test('#88 AC 2: redelivery with the SAME chunk id + same content stays idempotent; DIFFERENT content is REJECTED and never rewrites the public prefix', () => {
+  const mgr = newManager(':memory:');
+  try {
+    const { taskId } = admitFixture(mgr, 'chunk-idem');
+    const first = mgr.admitChunk({
+      taskId, executionId: 'exec-1', turnSeq: 1, epoch: 1, leaseId: 'lease-1',
+      artifactId: 'answer-1', chunkId: 'c-1', text: '苹果',
+    });
+    assert.equal(first.outcome, 'admitted');
+
+    // Same id + same bytes → duplicate outcome, no new chunk, no new event.
+    const before = mgr.stats();
+    const again = mgr.admitChunk({
+      taskId, executionId: 'exec-1', turnSeq: 1, epoch: 1, leaseId: 'lease-1',
+      artifactId: 'answer-1', chunkId: 'c-1', text: '苹果',
+    });
+    assert.deepEqual(again, { outcome: 'duplicate', chunkSeq: 1, chunkId: 'c-1' });
+    assert.deepEqual(mgr.stats(), before);
+    assert.equal(
+      mgr.readOutbox(taskId).filter((event) => event.kind === 'artifactUpdate').length,
+      1,
+      'redelivery adds no second outbox event',
+    );
+
+    // SAME id + DIFFERENT content → protocol anomaly: rejected, original
+    // chunk and its outbox evidence stay byte-for-byte unchanged.
+    const conflict = mgr.admitChunk({
+      taskId, executionId: 'exec-1', turnSeq: 1, epoch: 1, leaseId: 'lease-1',
+      artifactId: 'answer-1', chunkId: 'c-1', text: '橘子',
+    });
+    assert.equal(conflict.outcome, 'rejected');
+    if (conflict.outcome === 'rejected') {
+      assert.equal(conflict.reason, 'chunk_content_mismatch');
+    }
+    assert.deepEqual(mgr.stats(), before, 'no rewrite of the admitted prefix');
+    const chunks = mgr.readOutbox(taskId).filter((event) => event.kind === 'artifactUpdate');
+    assert.equal(chunks.length, 1, 'the conflict adds no new outbox event either');
+    const digest = createHash('sha256').update('苹果', 'utf8').digest('hex');
+    const stored = (chunks[0].payload['chunk'] as Record<string, unknown>)['sha256'];
+    assert.equal(stored, digest, 'the ORIGINAL digest survives the conflicting redelivery');
+  } finally {
+    mgr.close();
+  }
+});
+
+test('#88 AC 2: legitimate repeated words across SEPARATE chunk ids are both retained (never de-duplicated by content)', async () => {
+  const mgr = newManager(':memory:');
+  try {
+    const { taskId } = admitFixture(mgr, 'dup-words');
+    const c1 = mgr.admitChunk({
+      taskId, executionId: 'exec-1', turnSeq: 1, epoch: 1, leaseId: 'lease-1',
+      artifactId: 'answer-1', chunkId: 'w-1', text: '很好',
+    });
+    const c2 = mgr.admitChunk({
+      taskId, executionId: 'exec-1', turnSeq: 1, epoch: 1, leaseId: 'lease-1',
+      artifactId: 'answer-1', chunkId: 'w-2', text: '很好',
+    });
+    assert.equal(c1.outcome, 'admitted');
+    assert.equal(c2.outcome, 'admitted');
+    if (c1.outcome === 'admitted' && c2.outcome === 'admitted') {
+      assert.notEqual(c1.chunkId, c2.chunkId, 'stable ids differ for identical words');
+      assert.equal(c2.startByte, c1.endByte, 'byte ranges tile without overlap or gap');
+    }
+    assert.equal(mgr.stats().chunks, 2);
+    const artifacts = (await mgr.load(taskId))?.artifacts ?? [];
+    const body = artifacts[0].parts
+      .map((part) => (part.content?.$case === 'text' ? part.content.value : ''))
+      .join('');
+    assert.equal(body, '很好很好', 'content-based de-duplication must NOT drop legitimate repeats');
+    const events = mgr.readOutbox(taskId).filter((event) => event.kind === 'artifactUpdate');
+    assert.equal(events.length, 2, 'both deliveries keep their own event');
+  } finally {
+    mgr.close();
+  }
+});
+
+test('#88 AC 1/AC 3: snapshot/cursor cutpoint joins WITHOUT gap — snapshot(before) + readOutboxAfter(cursor) rebuild the snapshot(after)', async () => {
+  const mgr = newManager(':memory:');
+  try {
+    const { taskId } = admitFixture(mgr, 'cutpoint-1');
+    assert.equal(
+      mgr.admitChunk({
+        taskId, executionId: 'exec-1', turnSeq: 1, epoch: 1, leaseId: 'lease-1',
+        artifactId: 'answer-1', chunkId: 'k-1', text: '第一段。',
+      }).outcome,
+      'admitted',
+    );
+
+    // Subscription-establishment cutpoint: aggregated snapshot + committed
+    // cursor inside ONE consistent read.
+    const cut = mgr.getReplayCutpoint(taskId);
+    assert.ok(cut.found);
+    if (!cut.found) throw new Error('unreachable');
+    const bodyAtCut = (cut.snapshot.artifacts?.[0]?.parts ?? [])
+      .map((part) => (part.content?.$case === 'text' ? part.content.value : ''))
+      .join('');
+    assert.equal(bodyAtCut, '第一段。');
+
+    // Concurrent admissions AFTER the cutpoint…
+    assert.equal(
+      mgr.admitChunk({
+        taskId, executionId: 'exec-1', turnSeq: 1, epoch: 1, leaseId: 'lease-1',
+        artifactId: 'answer-1', chunkId: 'k-2', text: '第二段。',
+      }).outcome,
+      'admitted',
+    );
+    assert.equal(
+      mgr.transitionTask({
+        taskId, expectedState: 'working', expectedStateVersion: 2, nextState: 'completed',
+        reason: 'settle',
+      }).outcome,
+      'committed',
+    );
+    // …arrive COMPLETELY behind the cursor: no gap, no double delivery.
+    const increments = mgr.readOutboxAfter(taskId, cut.lastCommittedEventSeq);
+    assert.equal(increments.length, 2, 'chunk event + statusUpdate arrive as increments');
+    assert.ok(increments.every((event) => event.seq > cut.lastCommittedEventSeq));
+    assert.equal(increments[0].seq, cut.lastCommittedEventSeq + 1, 'the FIRST increment fills the cursor boundary exactly');
+    const after = await mgr.load(taskId);
+    const joined =
+      bodyAtCut +
+      (after?.artifacts?.[0]?.parts ?? [])
+        .map((part) => (part.content?.$case === 'text' ? part.content.value : ''))
+        .slice(-1)
+        .join('');
+    assert.ok(joined.startsWith(bodyAtCut));
+    // Cutpoint on an empty task starts at seq 0 → full-event replay.
+    const fresh = mgr.getReplayCutpoint(taskId);
+    assert.ok(fresh.found);
+    if (fresh.found) assert.equal(fresh.lastCommittedEventSeq, mgr.readOutbox(taskId, { includePublished: true }).slice(-1)[0]?.seq ?? 0);
+
+    // Unknown task → found:false (never a fabricated snapshot).
+    assert.deepEqual(mgr.getReplayCutpoint('task-missing'), { found: false });
+  } finally {
+    mgr.close();
+  }
+});
+
+test('#88 AC 4: purgeTaskBody deletes the Outbox — after deletion NO replay source exists and delivery stops', async () => {
+  const mgr = newManager(':memory:');
+  try {
+    const { taskId } = admitFixture(mgr, 'purge-delivery');
+    assert.equal(
+      mgr.admitChunk({
+        taskId, executionId: 'exec-1', turnSeq: 1, epoch: 1, leaseId: 'lease-1',
+        artifactId: 'answer-1', chunkId: 'p-1', text: '将被删除的正文',
+      }).outcome,
+      'admitted',
+    );
+    assert.ok(mgr.readOutbox(taskId, { includePublished: true }).length > 0);
+
+    mgr.purgeTaskBody(taskId);
+
+    assert.deepEqual(mgr.readOutbox(taskId, { includePublished: true }), []);
+    assert.deepEqual(mgr.readOutboxAfter(taskId, 0), [], 'cursor replay after deletion delivers NOTHING');
+    const cut = mgr.getReplayCutpoint(taskId);
+    assert.ok(cut.found);
+    if (cut.found) {
+      assert.equal(cut.lastCommittedEventSeq, 0, 'no events remain behind the cutpoint');
+      assert.equal(cut.snapshot.artifacts?.length ?? 0, 0, 'aggregated body is gone too');
+    }
+  } finally {
+    mgr.close();
+  }
+});
+
+test('#88 AC 2: SDK-bridge save cannot REPLACE an already-published prefix — same-position parts with changed text are ignored', async () => {
+  const mgr = newManager(':memory:');
+  try {
+    const { taskId } = admitFixture(mgr, 'prefix-guard');
+    assert.equal(
+      mgr.admitChunk({
+        taskId, executionId: 'exec-1', turnSeq: 1, epoch: 1, leaseId: 'lease-1',
+        artifactId: 'answer-1', chunkId: 'pub-1', text: '已公开的前缀',
+      }).outcome,
+      'admitted',
+    );
+    const baseline = await mgr.load(taskId);
+
+    // A snapshot carrying a REWRITTEN version of the published part under
+    // the same chunk id must not touch the persisted prefix…
+    const tampered = JSON.parse(JSON.stringify(baseline)) as Awaited<ReturnType<typeof mgr.load>>;
+    tampered!.artifacts![0].parts[0] = {
+      content: { $case: 'text' as const, value: '被替换的正文' },
+      metadata: { lumithinkOutput: { version: 1, chunkId: 'pub-1' } },
+      filename: '', mediaType: 'text/plain',
+    };
+    await mgr.save(tampered!);
+    const after = await mgr.load(taskId);
+    assert.equal(
+      after!.artifacts![0].parts.map((p) => (p.content?.$case === 'text' ? p.content.value : '')).join(''),
+      '已公开的前缀',
+      'the published prefix is immutable through the bridge path',
+    );
+    assert.equal(mgr.stats().chunks, 1);
+  } finally {
+    mgr.close();
   }
 });

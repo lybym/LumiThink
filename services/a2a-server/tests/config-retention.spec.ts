@@ -67,3 +67,40 @@ test('malformed retention/lease numbers fail closed with explicit errors', () =>
     /LUMITHINK_A2A_DISPATCH_LEASE_TTL_MS/,
   );
 });
+
+// ---------------------------------------------------------------------------
+// P1-06 (issue #88): fpv1 fingerprint-key enforcement (review #103 r1 P2-4)
+// ---------------------------------------------------------------------------
+
+test('#88: dsh-worker mode REFUSES to start on the public synthetic fingerprint key (P2-4 fail-closed)', () => {
+  assert.throws(
+    () => loadA2aServiceConfig({ ...BASE_ENV, LUMITHINK_A2A_RUNTIME_MODE: 'dsh-worker' }),
+    /LUMITHINK_A2A_FINGERPRINT_KEY/,
+  );
+  const durable = loadA2aServiceConfig({
+    ...BASE_ENV,
+    LUMITHINK_A2A_RUNTIME_MODE: 'dsh-worker',
+    LUMITHINK_A2A_FINGERPRINT_KEY: 'deployment-specific-hmac-key',
+  });
+  assert.equal(durable.runtimeMode, 'dsh-worker');
+  assert.equal(durable.fingerprintKey, 'deployment-specific-hmac-key');
+});
+
+test('#88: falling back to the synthetic default fingerprint key WARNS loudly (synthetic mode keeps working)', () => {
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((entry) => String(entry)).join(' '));
+  };
+  try {
+    const config = loadA2aServiceConfig(BASE_ENV);
+    assert.equal(config.fingerprintKey, A2A_FINGERPRINT_SYNTHETIC_DEFAULT_KEY,
+      'synthetic validation keeps the documented deterministic default');
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.ok(
+    warnings.some((entry) => entry.includes('LUMITHINK_A2A_FINGERPRINT_KEY')),
+    'the fallback must never happen silently',
+  );
+});
