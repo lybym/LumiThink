@@ -114,6 +114,20 @@ export type WorkerBehavior =
   | 'heartbeat-forever'
   | 'stop-on-cancel'
   | 'flood-after-cancel'
+  /**
+   * P1-07 (issue #89): cancel loses the completion race — the worker
+   * finishes despite the cancel control; its late body is suppressed by the
+   * admission state and the task settles COMPLETED with the suppressed flags
+   * (TASK_LIFECYCLE §7.2 真实完成但正文被抑制 branch, fixture 04).
+   */
+  | 'complete-after-cancel'
+  /**
+   * P1-07 (issue #89): non-cooperative worker — ignores the cancel control
+   * entirely (keeps heartbeating); only the cancel-grace watchdog's forced
+   * stop terminates it, producing real SIGKILL stop evidence (AC 非协作
+   * Worker；限期未停止不能假成功).
+   */
+  | 'never-stops'
   | 'bad-proto'
   | 'external-kind';
 

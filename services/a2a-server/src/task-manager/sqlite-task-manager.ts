@@ -205,7 +205,15 @@ export type AdmitChunkResult =
          * 同 ID 不同内容拒绝) — a protocol anomaly; the original public
          * chunk is never rewritten (公开后不改写已公开前缀, §6.1).
          */
-        | 'chunk_content_mismatch';
+        | 'chunk_content_mismatch'
+        /**
+         * A persistence-constraint collision WITHOUT a matching chunkId row
+         * (e.g. the chunk_seq primary key). Review #105 (P1-06) carry-over:
+         * this is NOT a content mismatch — declaring one would misattribute
+         * the anomaly (reason-code fidelity); the write fails loudly and the
+         * executor fences on any rejected admission either way.
+         */
+        | 'chunk_write_conflict';
     };
 
 export interface RecordCancelIntentParams {
@@ -238,6 +246,11 @@ export interface ExecutionSettlement {
   reason?: string;
   exitCode?: number | null;
   signal?: string | null;
+  /**
+   * True when the runtime itself terminated the process (forced-stop
+   * evidence; P1-07 AC 实际停止有证据). Absent on clean worker exits.
+   */
+  killedByRuntime?: boolean;
   workerId?: string | null;
   pid?: number | null;
   startedAtMs?: number | null;
@@ -773,6 +786,18 @@ export class SqliteTaskManager implements TaskStore {
           `Turn ${turnSeq} does not exist on task ${params.taskId}`,
         );
       }
+      if (params.epoch !== undefined && params.epoch !== turn.epoch) {
+        // Four-field anchor completeness (TASK_LIFECYCLE §4.2; review #84
+        // carry-over P2-②③, closed in P1-07/#89): an explicitly supplied
+        // epoch must match the referenced turn — the execution's epoch is
+        // verified at CLAIM time, not only on later callbacks. An inherited
+        // (undefined) epoch always takes the authoritative turn value.
+        throw new TaskManagerError(
+          'execution_attribution',
+          `Explicit epoch ${params.epoch} does not match turn ${turnSeq} epoch ${turn.epoch}` +
+            ` on task ${params.taskId} (anchor integrity, TASK_LIFECYCLE §4.2)`,
+        );
+      }
       const epoch = params.epoch ?? turn.epoch;
       const nowMs = this.now();
       this.db
@@ -930,9 +955,18 @@ export class SqliteTaskManager implements TaskStore {
           this.now(),
         ).changes;
       if (Number(changes) !== 1) {
-        // chunk_id UNIQUE hit → redelivery of an already-admitted chunk.
-        // Content must match byte-for-byte (§6.1 / #88 AC 2); a mismatch is
-        // the rejected anomaly, never a silent rewrite.
+        // Persistence-constraint collision on the defensive fallback path.
+        // Reason-code fidelity (review #105 carry-over, closed in P1-07):
+        //   - a row with the SAME chunkId decides by CONTENT — identical is
+        //     an idempotent duplicate, different content is the rejected
+        //     anomaly ('chunk_content_mismatch'), and the original public
+        //     chunk is never rewritten (公开后不改写已公开前缀, §6.1);
+        //   - NO matching chunkId row means the collision came from a
+        //     DIFFERENT constraint (e.g. the chunk_seq primary key): a real
+        //     write conflict, NOT a content mismatch — it must fail loudly
+        //     under its own reason instead of misattributing the anomaly
+        //     (single-writer discipline makes this unreachable; kept honest
+        //     so the discriminator stays trustworthy).
         const existing = this.db
           .prepare(
             'SELECT chunk_seq, text, sha256 FROM a2a_artifact_chunks WHERE task_id = ? AND artifact_id = ? AND chunk_id = ?',
@@ -947,7 +981,10 @@ export class SqliteTaskManager implements TaskStore {
         ) {
           return { outcome: 'duplicate', chunkSeq: existing.chunk_seq, chunkId };
         }
-        return { outcome: 'rejected', reason: 'chunk_content_mismatch' };
+        if (existing) {
+          return { outcome: 'rejected', reason: 'chunk_content_mismatch' };
+        }
+        return { outcome: 'rejected', reason: 'chunk_write_conflict' };
       }
       if (exec.state === 'registered') {
         this.db

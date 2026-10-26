@@ -22,10 +22,14 @@
  * guards); this executor never publishes over a terminal task (AC 3).
  */
 import type { AgentExecutor, ExecutionEventBus, RequestContext } from '@a2a-js/sdk/server';
-import { TaskState } from '@a2a-js/sdk';
+import { Role, TaskState } from '@a2a-js/sdk';
 import type { Part, Task, TaskStatus, TaskStatusUpdateEvent } from '@a2a-js/sdk';
+import { randomUUID } from 'node:crypto';
 import { isTerminalTaskState, type A2aTaskState } from '../task-manager/state-machine.ts';
-import type { SqliteTaskManager, ExecutionSettlement } from '../task-manager/sqlite-task-manager.ts';
+import type {
+  SqliteTaskManager,
+  ExecutionSettlement,
+} from '../task-manager/sqlite-task-manager.ts';
 import {
   DshWorkerRuntime,
   type FinalizeCause,
@@ -53,10 +57,32 @@ function statusUpdate(
   taskId: string,
   contextId: string,
   state: TaskState,
+  options: { message?: Part[]; metadata?: Record<string, unknown> } = {},
 ): { kind: 'statusUpdate'; data: TaskStatusUpdateEvent } {
+  const message =
+    options.message === undefined
+      ? undefined
+      : {
+          messageId: `status-${randomUUID()}`,
+          contextId,
+          taskId,
+          role: Role.ROLE_AGENT,
+          parts: options.message,
+          metadata: undefined,
+          extensions: [],
+          referenceTaskIds: [],
+        };
   return {
     kind: 'statusUpdate',
-    data: { taskId, contextId, status: statusOf(state), metadata: undefined },
+    data: {
+      taskId,
+      contextId,
+      status: { state, message, timestamp: new Date().toISOString() },
+      // Event-level metadata: the locked SDK handler merges event metadata
+      // into the current Task and persists it through the authoritative
+      // store save (dist applyStatusUpdate → task.metadata merge).
+      metadata: options.metadata as TaskStatusUpdateEvent['metadata'],
+    },
   };
 }
 
@@ -255,14 +281,6 @@ export class DshWorkerExecutor implements AgentExecutor {
 
   // -------------------------------------------------------------------------
 
-  private currentTaskState(taskId: string): A2aTaskState | null {
-    try {
-      return this.taskManager.getTaskDetail(taskId).currentState;
-    } catch {
-      return null;
-    }
-  }
-
   /**
    * Maps the finalized session (cause + exit evidence + raw worker result)
    * to (1) the execution-row settlement and (2) the public Task settlement.
@@ -329,6 +347,7 @@ export class DshWorkerExecutor implements AgentExecutor {
       reason,
       exitCode: evidence.exitCode,
       signal: evidence.signal,
+      killedByRuntime: evidence.killedByRuntime === true ? true : undefined,
       workerId: null,
       startedAtMs: null,
       endedAtMs,
@@ -338,24 +357,45 @@ export class DshWorkerExecutor implements AgentExecutor {
     }
 
     // --- public Task settlement (only when justified) ---------------------
-    const detailState = this.currentTaskState(input.taskId);
-    if (detailState !== null && !isTerminalTaskState(detailState) && cause !== 'disposed') {
+    const detail = this.currentTaskDetail(input.taskId);
+    if (
+      detail !== null &&
+      !isTerminalTaskState(detail.currentState) &&
+      cause !== 'disposed'
+    ) {
       const desired = this.desiredPublicState(input, outcome);
       if (desired === TaskState.TASK_STATE_COMPLETED) {
+        // Completion semantics (P1-07, issue #89 — TASK_LIFECYCLE §7.2,
+        // fixtures 03/04): EVERY real completion carries the versioned
+        // lumithinkResult flags on the terminal event — the locked SDK
+        // handler merges event-level metadata into the persisted Task and
+        // saves it through the authoritative repository (GetTask/SSE and
+        // the snapshot agree). A completion that raced a cancel intent and
+        // lost its remaining body to the admission fence settles COMPLETED
+        // with outputSuppressedAfterCancel=true / answerComplete=false plus
+        // the readable status message — never a fabricated CANCELED (the
+        // execution really finished; "不能谎报已停止推理").
+        const suppressed =
+          input.admissionBlocked && input.admissionBlockReason === 'output_admission_closed';
         input.eventBus.publish(
-          statusUpdate(input.taskId, input.contextId, TaskState.TASK_STATE_COMPLETED),
+          statusUpdate(input.taskId, input.contextId, TaskState.TASK_STATE_COMPLETED, {
+            message: suppressed ? [textPart('执行已完成，后续输出因取消被抑制。')] : undefined,
+            metadata: {
+              lumithinkResult: {
+                version: 1,
+                outputSuppressedAfterCancel: suppressed,
+                answerComplete: !suppressed,
+              },
+            },
+          }),
         );
       } else if (desired === TaskState.TASK_STATE_CANCELED) {
-        input.eventBus.publish(
-          statusUpdate(input.taskId, input.contextId, TaskState.TASK_STATE_CANCELED),
-        );
+        input.eventBus.publish(statusUpdate(input.taskId, input.contextId, TaskState.TASK_STATE_CANCELED));
       } else if (desired === TaskState.TASK_STATE_FAILED) {
-        input.eventBus.publish(
-          statusUpdate(input.taskId, input.contextId, TaskState.TASK_STATE_FAILED),
-        );
+        input.eventBus.publish(statusUpdate(input.taskId, input.contextId, TaskState.TASK_STATE_FAILED));
       }
-      // desired === null → admission closed by the cancel path; that path
-      // owns the CANCELED settlement through its own flow.
+      // desired === null → a fenced anomaly owned elsewhere: the executor
+      // publishes NOTHING over it (admission/cancel path owns the outcome).
     }
 
     this.taskManager.settleExecution({
@@ -368,6 +408,19 @@ export class DshWorkerExecutor implements AgentExecutor {
     });
   }
 
+  private currentTaskState(taskId: string): A2aTaskState | null {
+    const detail = this.currentTaskDetail(taskId);
+    return detail?.currentState ?? null;
+  }
+
+  private currentTaskDetail(taskId: string): { currentState: A2aTaskState } | null {
+    try {
+      return { currentState: this.taskManager.getTaskDetail(taskId).currentState };
+    } catch {
+      return null;
+    }
+  }
+
   private desiredPublicState(
     input: {
       workerResult: WorkerResult | null;
@@ -377,8 +430,19 @@ export class DshWorkerExecutor implements AgentExecutor {
     },
     outcome: ExecutionSettlement['outcome'],
   ): TaskState | null {
-    if (outcome === 'completed' && !input.admissionBlocked) {
-      return TaskState.TASK_STATE_COMPLETED;
+    if (outcome === 'completed') {
+      if (!input.admissionBlocked) {
+        return TaskState.TASK_STATE_COMPLETED;
+      }
+      // Completion racing a cancel intent (P1-07, §7.2): the body remaining
+      // after the cancel was fenced by the admission state — the execution
+      // itself REALLY finished, so the task settles COMPLETED with the
+      // suppressed-answer flags (executor publishes them), never CANCELED.
+      if (input.admissionBlockReason === 'output_admission_closed') {
+        return TaskState.TASK_STATE_COMPLETED;
+      }
+      // Any OTHER fence reason (protocol anomaly) stays unpublished here.
+      return null;
     }
     if (outcome === 'canceled') {
       return TaskState.TASK_STATE_CANCELED;
@@ -386,8 +450,8 @@ export class DshWorkerExecutor implements AgentExecutor {
     if (outcome === 'failed' || outcome === 'crashed' || outcome === 'lost_contact' || outcome === 'timeout' || outcome === 'startup_failed') {
       return TaskState.TASK_STATE_FAILED;
     }
-    // 'stopped' or completed-but-admission-blocked: the fence/cancel path
-    // owns the settlement — do not publish over it here.
+    // 'stopped': the service-shutdown/cancel path owns the settlement — do
+    // not publish over it here.
     return null;
   }
 }
