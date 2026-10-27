@@ -15,6 +15,8 @@
  * optional.
  */
 import { fileURLToPath } from 'node:url';
+import { A2A_LIMITS_DEFAULTS, type A2aLimitsConfig } from './limits/config.ts';
+import { loadA2aLimits, type LimitsLoadResult } from './limits/load.ts';
 
 export const A2A_VALIDATION_DEFAULT_PORT = 3312;
 export const A2A_LOOPBACK_HOST = '127.0.0.1';
@@ -141,6 +143,19 @@ export interface A2aServiceConfig {
   runtimeMode: A2aRuntimeMode;
   /** Real DSH worker runtime tuning (P1-05; used in dsh-worker mode). */
   dshWorker: A2aDshWorkerConfig;
+  /**
+   * Bounded-resource limits (P1-09, issue #91; docs/A2A_DESIGN.md §13.4).
+   * The DEFAULTS are the frozen §13.4 initial protection values and are
+   * deliberately permissive enough that the pre-P1-09 suite keeps passing:
+   * the caps exist (never unlimited) but are the published initial values,
+   * and synthetic validation runs admit immediately (admissionWaitMs=0).
+   */
+  limits: A2aLimitsConfig;
+  /**
+   * ADR-0017 deployment profile: 'production' makes the unfilled §13.4
+   * "部署时必须填写" values a hard refusal; 'validation' (default) warns.
+   */
+  deploymentProfile: 'validation' | 'production';
 }
 
 export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aServiceConfig {
@@ -310,6 +325,32 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
     ),
   };
 
+  // P1-09 (issue #91): the §13.4 bounded-resource limits.
+  // Fail-closed: a malformed or zero cap refuses to start (上限不能为无限), a
+  // per-household cap above its global cap is clamped, and dsh-worker mode
+  // refuses to start without the §13.4 "部署时必须填写" values (worker memory
+  // ceiling + per-household daily budget). The task store's busy_timeout is
+  // driven by the SAME limits block so the two can never drift apart.
+  // ADR-0017: 'production' turns the unfilled §13.4 "部署时必须填写" values
+  // into a hard refusal; anything else keeps the loud warning.
+  const rawProfile = env.LUMITHINK_A2A_DEPLOYMENT_PROFILE;
+  let deploymentProfile: 'validation' | 'production' = 'validation';
+  if (rawProfile !== undefined && rawProfile !== '') {
+    if (rawProfile !== 'validation' && rawProfile !== 'production') {
+      throw new Error(
+        `LUMITHINK_A2A_DEPLOYMENT_PROFILE must be 'validation' or 'production', got: ${rawProfile}`,
+      );
+    }
+    deploymentProfile = rawProfile;
+  }
+  const limitsLoad = loadA2aLimits(env, { runtimeMode, deploymentProfile });
+  for (const override of limitsLoad.overrides) {
+    console.log(
+      '[lumithink-a2a] limits override ' + override.path + '=' + String(override.value) +
+        ' (§13.4 default ' + String(override.fallback) + ')',
+    );
+  }
+
   return {
     port,
     host: A2A_LOOPBACK_HOST,
@@ -324,5 +365,7 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
     retention,
     runtimeMode,
     dshWorker,
+    limits: limitsLoad.limits,
+    deploymentProfile,
   };
 }

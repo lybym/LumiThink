@@ -20,7 +20,8 @@
  * In-memory session state is dispatch bookkeeping only — persistence stays
  * authoritative in the repository (restart recovery is P1-08/#90).
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import readline from 'node:readline';
 import {
   WORKER_PROTOCOL_VERSION,
@@ -55,8 +56,44 @@ export interface DshWorkerRuntimeOptions {
   cancelGraceMs: number;
   /** Extra env for the worker process (behavior profiles in tests). */
   workerEnv?: Record<string, string>;
+  /**
+   * P1-09 (issue #91, §13.4 row "Worker 内存"): declared per-worker memory
+   * ceiling in bytes. 0 / undefined = NOT configured. When set, the ceiling
+   * is applied as the V8 JS **heap** cap (`--max-old-space-size`), an honest
+   * PARTIAL limit — see {@link WorkerMemoryEnforcement}. Native and off-heap
+   * allocations are NOT capped by it, so this is never reported as a hard
+   * OS-level memory limit.
+   */
+  workerMemoryLimitBytes?: number;
+  /**
+   * Whether this runtime may read a live worker's RSS. Default true on
+   * Linux/macOS; Windows has no cheap permission-free RSS probe, so the
+   * default there is false and the load report says so instead of inventing a
+   * number.
+   */
+  canReadWorkerRss?: boolean;
   /** Injectable clock (tests). */
   now?: () => number;
+}
+
+/**
+ * The HONEST description of the worker memory ceiling for the load report
+ * (P1-09 AC 4: 限额实测 — and 不假装已强制 where enforcement is partial).
+ */
+export interface WorkerMemoryEnforcement {
+  /** Declared ceiling in bytes (0 = not configured). */
+  limitBytes: number;
+  status: 'configured' | 'not_configured';
+  /** Mechanism actually applied to spawned workers. */
+  mechanism: 'v8_heap_flag' | 'none';
+  /**
+   * False for the V8 heap flag: a heap cap is NOT a hard RSS limit. An
+   * over-consumption surfaces as a worker crash ("Fatal process out of
+   * memory") settled as `crashed`, which the report states explicitly.
+   */
+  hardLimit: boolean;
+  /** Human-readable honesty note for the report/tests. */
+  note: string;
 }
 
 export interface WorkerStartRequest {
@@ -121,6 +158,8 @@ export class DshWorkerRuntime {
   private readonly options: DshWorkerRuntimeOptions;
   private readonly now: () => number;
   private readonly sessions = new Map<string, Session>();
+  private spawnedTotal = 0;
+  private peakLiveWorkers = 0;
   /** Pending forced-stop evidence deliveries (dispose waits for them). */
   private readonly pendingEvidence = new Set<Promise<void>>();
   private disposed = false;
@@ -134,6 +173,73 @@ export class DshWorkerRuntime {
   sessionByTask(taskId: string): WorkerSessionView | undefined {
     const session = this.sessions.get(taskId);
     return session ? this.viewOf(session) : undefined;
+  }
+
+  /**
+   * P1-09 (AC 4): the single honest source for "what memory ceiling is in
+   * force for workers". Used by the load report so the numbers can never
+   * drift from the spawn behaviour.
+   */
+  memoryEnforcement(): WorkerMemoryEnforcement {
+    const limitBytes = Math.max(0, Math.floor(this.options.workerMemoryLimitBytes ?? 0));
+    if (limitBytes <= 0) {
+      return {
+        limitBytes: 0,
+        status: 'not_configured',
+        mechanism: 'none',
+        hardLimit: false,
+        note:
+          'No worker memory ceiling is configured. §13.4 requires LUMITHINK_A2A_LIMITS_WORKER_MEMORY_LIMIT_BYTES ' +
+          'before 正式运行; synthetic validation runs intentionally leave it unset.',
+      };
+    }
+    return {
+      limitBytes,
+      status: 'configured',
+      mechanism: 'v8_heap_flag',
+      hardLimit: false,
+      note:
+        'The ceiling is applied as the worker V8 heap cap (--max-old-space-size=' +
+        String(Math.floor(limitBytes / (1024 * 1024))) +
+        ' MiB). This is a JS-heap limit only: native/off-heap allocations are not capped, ' +
+        'and exceeding it terminates the worker (settled as crashed). It is NOT an OS/container hard limit.',
+    };
+  }
+
+  /** The spawn-time argument list that applies the declared heap cap. */
+  private heapFlagArgs(): string[] {
+    const limitBytes = Math.max(0, Math.floor(this.options.workerMemoryLimitBytes ?? 0));
+    if (limitBytes <= 0) return [];
+    return ['--max-old-space-size=' + String(Math.max(1, Math.floor(limitBytes / (1024 * 1024))))];
+  }
+
+  /**
+   * P1-09 (AC 4 负载报告: Worker内存): live worker count, spawn counters and —
+   * when the platform allows probing — each live worker's RSS. A pid that
+   * cannot be read is simply absent: the report never fabricates a reading.
+   */
+  workerLoad(): {
+    liveWorkers: number;
+    spawnedTotal: number;
+    peakLiveWorkers: number;
+    rssBytesByTask: Record<string, number>;
+  } {
+    const rssBytesByTask: Record<string, number> = {};
+    const canRead = this.options.canReadWorkerRss ?? process.platform !== 'win32';
+    if (canRead) {
+      for (const session of this.sessions.values()) {
+        const pid = session.child.pid;
+        if (pid === undefined) continue;
+        const rss = readProcessRssBytes(pid);
+        if (rss !== null) rssBytesByTask[session.request.taskId] = rss;
+      }
+    }
+    return {
+      liveWorkers: this.sessions.size,
+      spawnedTotal: this.spawnedTotal,
+      peakLiveWorkers: this.peakLiveWorkers,
+      rssBytesByTask,
+    };
   }
 
   viewOf(session: Session): WorkerSessionView {
@@ -177,7 +283,13 @@ export class DshWorkerRuntime {
       return;
     }
     const startedAtMs = this.now();
-    const child = spawn(process.execPath, [this.options.workerEntryPath], {
+    // P1-09 (§13.4 row "Worker 内存"): a configured ceiling becomes the V8
+    // heap cap of the worker process. The flag must precede the entry script
+    // to actually bound the child's JS heap. Undeclared ceilings spawn
+    // exactly as before (originally behaviour-preserving).
+    const heapFlag = this.heapFlagArgs();
+    this.spawnedTotal += 1;
+    const child = spawn(process.execPath, [...heapFlag, this.options.workerEntryPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, ...this.options.workerEnv },
     });
@@ -195,6 +307,7 @@ export class DshWorkerRuntime {
       handlers,
     };
     this.sessions.set(request.taskId, session);
+    this.peakLiveWorkers = Math.max(this.peakLiveWorkers, this.sessions.size);
 
     child.on('error', (error) => {
       // Spawn failure (e.g. entry missing) = startup failure evidence.
@@ -414,6 +527,32 @@ export class DshWorkerRuntime {
       () => this.pendingEvidence.delete(delivery),
       () => this.pendingEvidence.delete(delivery),
     );
+  }
+}
+
+/**
+ * Reads ONE process' resident set size in bytes, or null when the platform /
+ * permissions do not allow it (never a fabricated number). Linux uses
+ * /proc/<pid>/status VmRSS; macOS uses ps. Windows returns null on purpose:
+ * no cheap permission-free RSS probe exists, and a wrong number is worse
+ * than an explicit absence (P1-09 AC 4 honesty).
+ */
+function readProcessRssBytes(pid: number): number | null {
+  try {
+    if (process.platform === 'linux') {
+      const status = readFileSync('/proc/' + String(pid) + '/status', 'utf8');
+      const match = /^VmRSS:\s+(\d+)\s+kB$/m.exec(status);
+      if (match === null) return null;
+      return Number(match[1]) * 1024;
+    }
+    if (process.platform === 'darwin') {
+      const out = execFileSync('ps', ['-o', 'rss=', '-p', String(pid)], { encoding: 'utf8' });
+      const kb = Number(out.trim());
+      return Number.isFinite(kb) && kb > 0 ? kb * 1024 : null;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 

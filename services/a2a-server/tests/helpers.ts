@@ -7,6 +7,7 @@ import { Role } from '@a2a-js/sdk';
 import type { Message, Part } from '@a2a-js/sdk';
 import { startA2aService, stopA2aService, type StartedA2aService } from '../src/a2a-service.ts';
 import { type A2aServiceConfig } from '../src/config.ts';
+import { A2A_LIMITS_DEFAULTS } from '../src/limits/config.ts';
 import { SyntheticExecutor } from '../src/synthetic-executor.ts';
 import type { TaskStore } from '../src/task-manager-port.ts';
 
@@ -38,6 +39,11 @@ export function testConfig(overrides: Partial<A2aServiceConfig> = {}): A2aServic
       lostContactMs: 15 * 1000,
       cancelGraceMs: 5 * 1000,
     },
+    // P1-09 (issue #91): the frozen §13.4 initial protection values. Tests
+    // that pin capacity behaviour deep-clone this and shrink it.
+    limits: structuredClone(A2A_LIMITS_DEFAULTS),
+    // ADR-0017: validation profile (warn, don't refuse) unless a test opts in.
+    deploymentProfile: 'validation',
     ...overrides,
   };
 }
