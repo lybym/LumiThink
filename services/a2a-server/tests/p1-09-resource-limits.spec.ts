@@ -253,13 +253,32 @@ test('capacity refusal never strands a task in working (review #108 r1 P0)', asy
   let service!: Awaited<ReturnType<typeof startA2aService>>;
 
   try {
-    // Bounded blocking: each execution holds its slot for 5 s and then
-    // finishes (deadline-free, deterministic teardown without resolvers).
-    let executed = 0;
+    // Bounded blocking: each execution holds its slot for 900 ms and then
+    // publishes a real COMPLETED status event (so the SDK ResultManager can
+    // settle it) — deterministic teardown, no dangling resolvers.
+    const sdk = await import('@a2a-js/sdk');
     blockingExecutor = {
-      execute(): Promise<void> {
-        executed += 1;
-        return new Promise<void>((resolve) => setTimeout(resolve, 5000));
+      execute(requestContext: { taskId: string; contextId: string }, bus: {
+        publish(event: Record<string, unknown>): void;
+      }): Promise<void> {
+        return new Promise<void>((resolve) => {
+          setTimeout(() => {
+            bus.publish({
+              kind: 'statusUpdate',
+              data: {
+                taskId: requestContext.taskId,
+                contextId: requestContext.contextId,
+                status: {
+                  state: sdk.TaskState.TASK_STATE_COMPLETED,
+                  message: undefined,
+                  timestamp: new Date().toISOString(),
+                },
+                metadata: undefined,
+              },
+            });
+            resolve();
+          }, 900);
+        });
       },
       cancelTask(): Promise<void> { return Promise.resolve(); },
     } as unknown as import('@a2a-js/sdk/server').AgentExecutor;
@@ -268,11 +287,11 @@ test('capacity refusal never strands a task in working (review #108 r1 P0)', asy
       executor: blockingExecutor,
     });
     const manager = service.taskStore as SqliteTaskManager;
-    const controllers: AbortController[] = [];
+    const wirePromises: Promise<Response>[] = [];
     const postMessage = (id: number, text: string): Promise<Response> => {
-      const ac = new AbortController();
-      controllers.push(ac);
-      return postWire(service.base, sendBody(id, wireMsg(`msg-${id}`, text)), ac.signal);
+      const promise = postWire(service.base, sendBody(id, wireMsg(`msg-${id}`, text)));
+      wirePromises.push(promise);
+      return promise;
     };
     void postMessage(1, 'occupy one');
     void postMessage(2, 'occupy two');
@@ -311,21 +330,20 @@ test('capacity refusal never strands a task in working (review #108 r1 P0)', asy
     assert.ok(thirdRejected !== null, `third task was SETTLED to rejected (observed: ${thirdRejected})`);
     assert.ok(snapCount <= 2, `no worker ever started for the refused task (executions=${snapCount})`);
 
-    // Phase C: release the blockers so nothing outlives the test.
-    for (const pending of [firstId, secondId]) {
-      try {
-        manager.transitionTask({
-          taskId: pending as string,
-          expectedState: manager.getTaskDetail(pending as string).currentState,
-          expectedStateVersion: manager.getTaskDetail(pending as string).stateVersion,
-          nextState: 'failed',
-          reason: 'test_teardown_release',
-        });
-      } catch {
-        // best effort teardown only
-      }
+    // Phase C: wait for the two blocked executions to finish NATURALLY (their
+    // 5 s window) so every wire response and ledger write settles BEFORE the
+    // service stops — otherwise fetches reject after the test ends.
+    let finishedCount = 0;
+    for (let attempt = 0; attempt < 100 && finishedCount < 2; attempt += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      const bothCompleted =
+        manager.getTaskDetail(firstId as string).currentState === 'completed' &&
+        manager.getTaskDetail(secondId as string).currentState === 'completed';
+      finishedCount = bothCompleted ? 2 : 0;
     }
-    void p3;
+    // Wire responses are in; nothing rejected after the test ended.
+    await Promise.allSettled(wirePromises);
+    if (typeof p3 !== 'undefined') await Promise.allSettled([p3]);
   } finally {
     await stopA2aService(service);
   }
