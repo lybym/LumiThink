@@ -3,8 +3,10 @@
  *
  * Every knob is a POSITIVE integer (a cap of 0 / a negative / a NaN would
  * silently mean "no cap", which §13.4 forbids: 不能将上限置为无限). The two
- * "部署时必须填写" values are allowed to stay at their 0 sentinel in synthetic
- * validation mode and refuse to start in `dsh-worker` mode.
+ * "部署时必须填写" values may stay at their 0 sentinel while
+ * LUMITHINK_A2A_DEPLOYMENT_PROFILE is 'validation' (default): the service
+ * then starts with a LOUD warning that is repeated in every load report's
+ * limitations section. Under 'production' they are a HARD refusal to start.
  */
 import { A2A_LIMITS_DEFAULTS, type A2aLimitsConfig } from './config.ts';
 
@@ -61,7 +63,6 @@ export interface LimitsLoadResult {
 export function loadA2aLimits(
   env: NodeJS.ProcessEnv,
   context: {
-    runtimeMode: 'synthetic' | 'dsh-worker';
     /**
      * ADR-0017: 'production' escalates the unfilled §13.4 "部署时必须填写"
      * values (worker memory ceiling, per-household daily budget) into a hard
@@ -114,8 +115,8 @@ export function loadA2aLimits(
         d.modelBudget.maxModelRequestsPerTask,
       ),
       maxTokensPerTask: read('modelBudget.maxTokensPerTask', d.modelBudget.maxTokensPerTask),
-      // 0 = NOT CONFIGURED (the §13.4 "部署时必须填写" sentinel): synthetic
-      // validation runs may start; dsh-worker mode refuses below.
+      // 0 = NOT CONFIGURED (the §13.4 "部署时必须填写" sentinel): the default
+      // 'validation' profile warns loudly; 'production' refuses below.
       maxDailyTokensPerHousehold: read(
         'modelBudget.maxDailyTokensPerHousehold',
         d.modelBudget.maxDailyTokensPerHousehold,

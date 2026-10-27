@@ -24,7 +24,8 @@ export type LimitsRejectionReason =
   | 'daily_budget_exhausted'
   | 'task_budget_exhausted'
   | 'model_slots_full'
-  | 'model_wait_timeout';
+  | 'model_wait_timeout'
+  | 'model_task_call_limit';
 
 export interface AdmissionRequest {
   taskId: string;
@@ -88,6 +89,8 @@ export interface SchedulerSnapshot {
   activeModelRequestsByHousehold: Record<string, number>;
   taskTokensByTask: Record<string, number>;
   dailyTokensByHousehold: Record<string, number>;
+  /** Cumulative per-task model-call counts (never refunded; AC budget evidence). */
+  taskCallsByTask: Record<string, number>;
   /** Un-released model grants (0 in a healthy process; a leak diagnostic). */
   liveModelGrants: number;
   controlInFlight: number;
@@ -167,6 +170,7 @@ function zeroRefusals(): Record<LimitsRejectionReason, number> {
     task_budget_exhausted: 0,
     model_slots_full: 0,
     model_wait_timeout: 0,
+    model_task_call_limit: 0,
   };
 }
 
@@ -206,6 +210,8 @@ export class AdmissionScheduler {
   private readonly activeModelRequests = new Map<string, number>();
   private readonly dailyTokens = new Map<string, number>();
   private readonly taskTokens = new Map<string, number>();
+  /** Cumulative per-task model-call ledger (§13.4; never refunded). */
+  private readonly taskModelCalls = new Map<string, number>();
   /** Live model grants (diagnostics: an un-released grant is a leak). */
   private readonly grants = new Map<number, () => void>();
 
@@ -259,6 +265,33 @@ export class AdmissionScheduler {
     const budget = this.budgetRejection(request);
     if (budget !== null) return budget;
     return this.queueFullRejection(request.householdId);
+  }
+
+  /**
+   * Read-only mirror of takeSlot() (review #108 r1 P0): reports the FULL
+   * immediate refusal reason INCLUDING worker/conversation capacity — for a
+   * pre-claim check by the lease layer so refusals land on `submitted`
+   * (REJECTED is legal there; claimed-first refusals strand). Pure.
+   */
+  wouldRejectNowForCapacity(request: AdmissionRequest): LimitsRejectionReason | null {
+    if (this.closed) return 'scheduler_closed';
+    const budget = this.budgetRejection(request);
+    if (budget !== null) return budget;
+    const queueFull = this.queueFullRejection(request.householdId);
+    if (queueFull !== null) return queueFull;
+    const { concurrency } = this.limits;
+    if ((this.activeWorkers.get(request.householdId) ?? 0) >= concurrency.maxActiveWorkersPerHousehold) return 'capacity_full';
+    if (total(this.activeWorkers) >= concurrency.maxActiveWorkers) return 'capacity_full';
+    if (
+      (this.activeExecutions.get(request.contextId) ?? 0) >=
+      this.limits.conversation.maxActiveExecutionsPerConversation
+    ) {
+      return 'capacity_full';
+    }
+    for (const held of this.heldTickets.values()) {
+      if (held.taskId === request.taskId) return 'capacity_full'; // double-admission shape
+    }
+    return null;
   }
 
   /** Pre-call budget check (estimated input + max output, §13.4). */
@@ -459,6 +492,14 @@ export class AdmissionScheduler {
    */
   private modelBudgetRejection(request: ModelCallRequest): LimitsRejectionReason | null {
     const budget = this.limits.modelBudget;
+    // Per-task CALL count first (§13.4 row "模型调用预算": maxModelRequestsPerTask).
+    const taskCalls = this.taskModelCalls.get(request.taskId) ?? 0;
+    if (
+      budget.maxModelRequestsPerTask > 0 &&
+      taskCalls >= budget.maxModelRequestsPerTask
+    ) {
+      return 'model_task_call_limit';
+    }
     const taskUsed = this.taskTokens.get(request.taskId) ?? 0;
     if (taskUsed + request.tokens > budget.maxTokensPerTask) return 'task_budget_exhausted';
     const dailyUsed = this.dailyTokens.get(request.householdId) ?? 0;
@@ -477,6 +518,10 @@ export class AdmissionScheduler {
       return null;
     }
     if (total(this.activeModelRequests) >= this.limits.concurrency.maxActiveModelRequests) return null;
+    // Per-task call count (§13.4 row "模型调用预算": maxModelRequestsPerTask).
+    // Counted at GRANT time and NEVER refunded on release — cumulative for
+    // the whole task lifetime, retries included (review #108 r1 P1-2).
+    bump(this.taskModelCalls, request.taskId, 1);
     bump(this.activeModelRequests, request.householdId, 1);
     bump(this.dailyTokens, request.householdId, request.tokens);
     bump(this.taskTokens, request.taskId, request.tokens);
@@ -490,8 +535,9 @@ export class AdmissionScheduler {
       released = true;
       this.grants.delete(grantId);
       bump(this.activeModelRequests, request.householdId, -1);
-      bump(this.dailyTokens, request.householdId, -request.tokens);
-      bump(this.taskTokens, request.taskId, -request.tokens);
+      // §13.4 累计预算（review #108 r1 P1-1）: the token reservation is a
+      // CUMULATIVE daily/task ledger — releasing a grant does NOT refund it,
+      // retries and follow-up calls keep counting toward the budget.
       this.pumpModelQueue();
     };
     this.grants.set(grantId, release);
@@ -641,6 +687,7 @@ export class AdmissionScheduler {
       activeModelRequestsByHousehold: toRecord(this.activeModelRequests),
       taskTokensByTask: toRecord(this.taskTokens),
       dailyTokensByHousehold: toRecord(this.dailyTokens),
+      taskCallsByTask: toRecord(this.taskModelCalls),
       liveModelGrants: this.grants.size,
       controlInFlight: this.controlInFlight,
       counters: {

@@ -18,10 +18,13 @@ import {
 } from '../src/limits/observability.ts';
 import { buildLoadReport } from '../src/limits/load-report.ts';
 import { SqliteTaskManager } from '../src/task-manager/sqlite-task-manager.ts';
+import { startA2aService } from '../src/a2a-service.ts';
 import {
   startTest,
   stopA2aService,
+  testConfig,
   TEST_TOKEN,
+  userMessage,
 } from './helpers.ts';
 
 /** §13.4 冻结初值未被悄悄改动（这些数字是容量语义的契约）。 */
@@ -172,7 +175,35 @@ test('double release is counted but never corrupts the accounting (lease leak di
   assert.equal(s.snapshot().counters.doubleReleases, 1, 'the double release stays visible');
 });
 
-test('un-released model grants stay VISIBLE in the snapshot; releasing settles the grant', async () => {
+test('model budget is CUMULATIVE: releasing a grant does not refund tokens; call counts never reset', async () => {
+  const s = new AdmissionScheduler({
+    limits: baseLimits({
+      modelBudget: {
+        maxModelRequestsPerTask: 2,
+        maxTokensPerTask: 32_000,
+        maxDailyTokensPerHousehold: 10_000,
+      },
+    }),
+  });
+  const ticket = await admitOk(s, REQ({ taskId: 'm1', tokensToReserve: 400 }));
+  // Calls 1 and 2 are granted (maxModelRequestsPerTask=2)…
+  const g1 = await s.acquireModelCall({ householdId: 'hh-a', taskId: 'm1', tokens: 700, maxWaitMs: 0 });
+  assert.equal(g1.outcome === 'granted' && g1.grant.tokensReserved, 700);
+  if (g1.outcome === 'granted') g1.grant.release('completed');
+  const g2 = await s.acquireModelCall({ householdId: 'hh-a', taskId: 'm1', tokens: 300, maxWaitMs: 0 });
+  assert.equal(g2.outcome === 'granted' && g2.grant.tokensReserved, 300);
+  if (g2.outcome === 'granted') g2.grant.release('completed');
+  // …the call ledger is cumulative — release did NOT reset it.
+  let snap = s.snapshot();
+  assert.equal(snap.taskCallsByTask['m1'], 2, 'per-task calls accumulate across releases');
+  assert.equal(snap.dailyTokensByHousehold['hh-a'], 1000, 'token reservations stay spent (§13.4 重试也计入)');
+  // …so the THIRD call is refused by the stable reason (review #108 r1 P1-2).
+  const g3 = await s.acquireModelCall({ householdId: 'hh-a', taskId: 'm1', tokens: 200, maxWaitMs: 0 });
+  assert.deepEqual(g3, { outcome: 'refused', reason: 'model_task_call_limit', waitedMs: 0 });
+  s.releaseExecution(ticket.ticketId);
+});
+
+test('un-released grants stay visible as leak diagnostics', async () => {
   const s = new AdmissionScheduler({
     limits: baseLimits({
       modelBudget: {
@@ -192,12 +223,113 @@ test('un-released model grants stay VISIBLE in the snapshot; releasing settles t
   assert.equal(snap.taskTokensByTask['m1'], 700);
   g.grant.release('completed');
   snap = s.snapshot();
-  assert.equal(snap.liveModelGrants, 0, 'release settles the grant');
+  assert.equal(snap.liveModelGrants, 0, 'release settles the grant slot');
   s.releaseExecution(ticket.ticketId);
-  const again = await admitOk(s, REQ({ taskId: 'm2', tokensToReserve: 400 }));
-  s.releaseExecution(again.ticketId);
 });
+/**
+ * P0 regression (review #108 r1): with BOTH generation slots occupied, the
+ * third request must settle REJECTED on `submitted` — NEVER stranded in
+ * `working` because the capacity refusal fired after the dispatch lease had
+ * already been claimed.
+ */
+function wireMsg(messageId: string, text: string): Record<string, unknown> {
+  return { messageId, role: 'ROLE_USER', parts: [{ text }] };
+}
+function sendBody(id: number, message: Record<string, unknown>): Record<string, unknown> {
+  return { jsonrpc: '2.0', id, method: 'SendMessage', params: { message } };
+}
+async function postWire(base: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
+  return fetch(`${base}/`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TEST_TOKEN}`, 'a2a-version': '1.0' },
+    body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
+  });
+}
 
+test('capacity refusal never strands a task in working (review #108 r1 P0)', async () => {
+  const blockedResolvers: (() => void)[] = [];
+  let blockingExecutor: import('@a2a-js/sdk/server').AgentExecutor;
+  let service!: Awaited<ReturnType<typeof startA2aService>>;
+
+  try {
+    // Bounded blocking: each execution holds its slot for 5 s and then
+    // finishes (deadline-free, deterministic teardown without resolvers).
+    let executed = 0;
+    blockingExecutor = {
+      execute(): Promise<void> {
+        executed += 1;
+        return new Promise<void>((resolve) => setTimeout(resolve, 5000));
+      },
+      cancelTask(): Promise<void> { return Promise.resolve(); },
+    } as unknown as import('@a2a-js/sdk/server').AgentExecutor;
+    service = await startA2aService({
+      config: testConfig({} as Partial<import('../src/config.ts').A2aServiceConfig>),
+      executor: blockingExecutor,
+    });
+    const manager = service.taskStore as SqliteTaskManager;
+    const controllers: AbortController[] = [];
+    const postMessage = (id: number, text: string): Promise<Response> => {
+      const ac = new AbortController();
+      controllers.push(ac);
+      return postWire(service.base, sendBody(id, wireMsg(`msg-${id}`, text)), ac.signal);
+    };
+    void postMessage(1, 'occupy one');
+    void postMessage(2, 'occupy two');
+
+    // Phase A: wait until TWO executions exist with public state `working`.
+    let firstId: string | null = null;
+    let secondId: string | null = null;
+    for (let attempt = 0; attempt < 60 && (firstId === null || secondId === null); attempt += 1) {
+      await new Promise((r) => setTimeout(r, 50));
+      const listed = await manager.list({ pageSize: 20 } as Parameters<typeof manager.list>[0]);
+      const ids = listed.tasks.map((t) => t.id);
+      if (ids.length >= 1 && firstId === null) firstId = ids[0];
+      if (ids.length >= 2 && secondId === null) secondId = ids.find((v) => v !== firstId) ?? null;
+    }
+    assert.ok(firstId !== null && secondId !== null, `two admitted tasks appeared (${JSON.stringify([firstId, secondId])})`);
+    assert.equal(manager.getTaskDetail(firstId as string).currentState, 'working');
+    assert.equal(manager.getTaskDetail(secondId as string).currentState, 'working');
+
+    // Phase B: the THIRD request hits full capacity → settled rejected, no strand.
+    let thirdRejected: string | null = null;
+    const p3 = postMessage(999, 'the refused request');
+    for (let attempt = 0; attempt < 60 && thirdRejected === null; attempt += 1) {
+      await new Promise((r) => setTimeout(r, 50));
+      const listed = await manager.list({ pageSize: 20 } as Parameters<typeof manager.list>[0]);
+      for (const task of listed.tasks) {
+        if (
+          task.id !== firstId &&
+          task.id !== secondId &&
+          manager.getTaskDetail(task.id).currentState === 'rejected'
+        ) {
+          thirdRejected = task.id;
+        }
+      }
+    }
+    const snapCount = manager.stats().executions;
+    assert.ok(thirdRejected !== null, `third task was SETTLED to rejected (observed: ${thirdRejected})`);
+    assert.ok(snapCount <= 2, `no worker ever started for the refused task (executions=${snapCount})`);
+
+    // Phase C: release the blockers so nothing outlives the test.
+    for (const pending of [firstId, secondId]) {
+      try {
+        manager.transitionTask({
+          taskId: pending as string,
+          expectedState: manager.getTaskDetail(pending as string).currentState,
+          expectedStateVersion: manager.getTaskDetail(pending as string).stateVersion,
+          nextState: 'failed',
+          reason: 'test_teardown_release',
+        });
+      } catch {
+        // best effort teardown only
+      }
+    }
+    void p3;
+  } finally {
+    await stopA2aService(service);
+  }
+});
 test('scheduler close() settles every queued waiter with an explicit refusal (never a hang)', async () => {
   const s = new AdmissionScheduler({
     limits: baseLimits({ queue: { maxQueuedGlobal: 4, maxQueuedPerHousehold: 4 }, admissionWaitMs: 30_000 }),

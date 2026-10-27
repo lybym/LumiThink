@@ -327,12 +327,13 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
 
   // P1-09 (issue #91): the §13.4 bounded-resource limits.
   // Fail-closed: a malformed or zero cap refuses to start (上限不能为无限), a
-  // per-household cap above its global cap is clamped, and dsh-worker mode
-  // refuses to start without the §13.4 "部署时必须填写" values (worker memory
-  // ceiling + per-household daily budget). The task store's busy_timeout is
-  // driven by the SAME limits block so the two can never drift apart.
-  // ADR-0017: 'production' turns the unfilled §13.4 "部署时必须填写" values
-  // into a hard refusal; anything else keeps the loud warning.
+  // per-household cap above its global cap is clamped, and the unfilled
+  // §13.4 "部署时必须填写" values (worker memory ceiling + per-household daily
+  // budget) become a HARD refusal under LUMITHINK_A2A_DEPLOYMENT_PROFILE=
+  // 'production' — in the default 'validation' profile the service starts
+  // with a loud warning that the load report's limitations section repeats.
+  // The task store's busy_timeout is driven by the SAME limits block so the
+  // two can never drift apart.
   const rawProfile = env.LUMITHINK_A2A_DEPLOYMENT_PROFILE;
   let deploymentProfile: 'validation' | 'production' = 'validation';
   if (rawProfile !== undefined && rawProfile !== '') {
@@ -343,7 +344,7 @@ export function loadA2aServiceConfig(env: NodeJS.ProcessEnv = process.env): A2aS
     }
     deploymentProfile = rawProfile;
   }
-  const limitsLoad = loadA2aLimits(env, { runtimeMode, deploymentProfile });
+  const limitsLoad = loadA2aLimits(env, { deploymentProfile });
   for (const override of limitsLoad.overrides) {
     console.log(
       '[lumithink-a2a] limits override ' + override.path + '=' + String(override.value) +

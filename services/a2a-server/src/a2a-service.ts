@@ -327,6 +327,17 @@ export async function startA2aService(
     taskManager: sqliteTaskManager,
     authorizationGate: (taskId) => identity.executorGate(taskId),
     quotaGate: options.quotaGate,
+    capacityPreflight:
+      sqliteTaskManager === undefined
+        ? undefined
+        : ({ taskId, contextId }) =>
+            scheduler.wouldRejectNowForCapacity({
+              taskId,
+              contextId,
+              householdId: householdOf(taskId),
+              tokensToReserve: config.limits.modelBudget.maxTokensPerTask,
+              maxWaitMs: config.limits.admissionWaitMs,
+            }),
     leaseTtlMs: config.dispatchLeaseTtlMs,
   });
 

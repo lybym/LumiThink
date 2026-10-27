@@ -63,11 +63,13 @@ export async function startTest(options: {
   taskStore?: TaskStore;
   configOverrides?: Partial<A2aServiceConfig>;
   identityBootstrap?: import('../src/identity/identity-store.ts').IdentityBootstrap;
+  /** Custom inner executor (default SyntheticExecutor); used by resource-limit tests. */
+  executor?: import('@a2a-js/sdk/server').AgentExecutor;
 } = {}): Promise<StartedTest> {
   const service = await startA2aService({
     config: testConfig(options.configOverrides),
     taskStore: options.taskStore,
-    executor: new SyntheticExecutor(),
+    executor: options.executor ?? new SyntheticExecutor(),
     identityBootstrap: options.identityBootstrap,
   });
   return service as StartedTest;

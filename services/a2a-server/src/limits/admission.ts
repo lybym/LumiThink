@@ -166,7 +166,14 @@ export function limitsAwareExecutor(
     });
 
     if (decision.outcome === 'refused') {
-      // AC 1: explicit rejection, NO worker starts (§3 SUBMITTED -> REJECTED).
+      // AC 1: explicit rejection, NO worker starts. NOTE (review #108 r1 P0):
+      // when this executor runs INSIDE the dispatch-lease decorator the task
+      // has already been claimed → its public state is `working`, and
+      // publishing REJECTED there would be an illegal snapshot that gets
+      // discarded, stranding the task forever. The capacity pre-check in the
+      // lease layer handles the common case BEFORE the claim; this fallback
+      // settles honestly as FAILED (working → failed is legal) with the
+      // capacity reason on the wire.
       recorder.emit({
         level: 'warn',
         event: 'admission.decided',
@@ -182,7 +189,7 @@ export function limitsAwareExecutor(
         statusUpdate(
           taskId,
           contextId,
-          TaskState.TASK_STATE_REJECTED,
+          TaskState.TASK_STATE_FAILED,
           capacityRejectionMessage(decision.reason),
         ),
       );
