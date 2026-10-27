@@ -75,6 +75,15 @@ import { DshWorkerRuntime } from './runtime/dsh-worker-runtime.ts';
 import { DshWorkerExecutor } from './runtime/dsh-worker-executor.ts';
 import { DeletionLedger } from './recovery/deletion-ledger.ts';
 import { runStartupRecovery, type StartupRecoveryReport } from './recovery/startup-recovery.ts';
+import { AdmissionScheduler } from './limits/scheduler.ts';
+import { limitsAwareExecutor, type LeaseAware } from './limits/admission.ts';
+import {
+  ObservabilityRecorder,
+  jsonLineSink,
+  type LoadReport,
+  type ObservabilitySink,
+} from './limits/observability.ts';
+import { buildLoadReport } from './limits/load-report.ts';
 import {
   IdentityController,
   StreamRegistry,
@@ -112,6 +121,14 @@ export interface StartA2aServiceOptions {
    * limits are P1-09/#91; tests inject denials here.
    */
   quotaGate?: QuotaGate;
+  /**
+   * Structured observability sink (P1-09 AC 3). Omitted = one JSON line per
+   * event on stdout. Tests pass a capture sink. The recorder NEVER writes
+   * message content or credentials — see src/limits/observability.ts.
+   */
+  observabilitySink?: ObservabilitySink;
+  /** Injectable clock (tests; also drives `uptimeMs` in the load report). */
+  now?: () => number;
 }
 
 export interface StartedA2aService {
@@ -147,6 +164,17 @@ export interface StartedA2aService {
   ownsDeletionLedger: boolean;
   /** Resolves when the server has fully closed (after close()). */
   closed: Promise<void>;
+  /**
+   * AC 1/AC 2 bounded-resource state (P1-09): the admission scheduler holds
+   * every capacity fact. Exposed for the load report and for tests that need
+   * to prove no slot/lease leaked.
+   */
+  admission: {
+    scheduler: AdmissionScheduler;
+    recorder: ObservabilityRecorder;
+    /** AC 4: measured load report (SQLite lock, Outbox backlog, worker memory). */
+    loadReport(): LoadReport;
+  };
 }
 
 function buildIdentityController(options: StartA2aServiceOptions): {
@@ -174,6 +202,23 @@ export async function startA2aService(
   options: StartA2aServiceOptions,
 ): Promise<StartedA2aService> {
   const { config } = options;
+  const nowMs = options.now ?? (() => Date.now());
+  const startedAtMs = nowMs();
+  // P1-09 (issue #91): structured, content-minimized observability (AC 3).
+  // The recorder drops any non allow-listed field, so a caller passing a body
+  // string can never leak it into the log stream.
+  const recorder = new ObservabilityRecorder({
+    sinks: [
+      options.observabilitySink ??
+        jsonLineSink((line) => {
+          console.log(line);
+        }),
+    ],
+    now: nowMs,
+  });
+  // P1-09 (issue #91): the bounded admission scheduler (AC 1/AC 2). Limits
+  // come from config (defaults = frozen §13.4 initial protection values).
+  const scheduler = new AdmissionScheduler({ limits: config.limits, now: nowMs });
   // P1-02 (#84): the default store is the SQLite Task Manager — the single
   // authoritative write path over the unified repository. There is NO second
   // store: when a caller passes its own TaskStore, that store replaces the
@@ -189,7 +234,13 @@ export async function startA2aService(
   if (options.taskStore !== undefined) {
     authoritativeStore = options.taskStore;
   } else {
-    authoritativeStore = new SqliteTaskManager({ dbPath: config.dbPath });
+    // P1-09 (AC 4): the store's bounded write-lock wait is the SAME value
+    // the load report publishes (limits.sqlite.busyTimeoutMs), so the two can
+    // never drift apart.
+    authoritativeStore = new SqliteTaskManager({
+      dbPath: config.dbPath,
+      busyTimeoutMs: config.limits.sqlite.busyTimeoutMs,
+    });
     ownsTaskStore = true;
   }
   // P1-04 (#86): the idempotency gate and the dispatch lease are
@@ -219,13 +270,23 @@ export async function startA2aService(
         'runtime mode dsh-worker builds its own executor; do not pass executor explicitly',
       );
     }
+    // P1-09 (§13.4 row "Worker 内存"): the declared ceiling becomes the
+    // worker's V8 heap cap. It is reported as 'v8_heap_flag' + hardLimit:false
+    // — never pretended to be an OS-level limit (see memoryEnforcement()).
+    // §13.4 also requires the § execution deadline to be enforceable by the
+    // runtime watchdog, so the watchdog timeout is the smaller of both.
+    const watchdogTimeoutMs = Math.min(
+      config.dshWorker.executionTimeoutMs,
+      config.limits.execution.maxExecutionMs,
+    );
     runtime = new DshWorkerRuntime({
       workerEntryPath: config.dshWorker.entryPath,
-      executionTimeoutMs: config.dshWorker.executionTimeoutMs,
+      executionTimeoutMs: watchdogTimeoutMs,
       helloTimeoutMs: config.dshWorker.helloTimeoutMs,
       lostContactMs: config.dshWorker.lostContactMs,
       cancelGraceMs: config.dshWorker.cancelGraceMs,
       workerEnv: config.dshWorker.workerEnv,
+      workerMemoryLimitBytes: config.limits.worker.memoryLimitBytes,
     });
     innerExecutor = new DshWorkerExecutor({ runtime, taskManager: sqliteTaskManager });
   } else {
@@ -233,11 +294,50 @@ export async function startA2aService(
       options.executor ??
       new SyntheticExecutor({ authorizationGate: (taskId) => identity.executorGate(taskId) });
   }
-  const executor = leaseDispatchExecutor({
+  /**
+   * Household attribution for admission (P1-09). The authoritative binding
+   * lives in the identity store; a task with no resolvable binding is
+   * attributed to its own task scope, which keeps per-household caps from
+   * silently merging unrelated tasks into one bucket.
+   */
+  const householdOf = (taskId: string): string => {
+    try {
+      const binding = identity.store.taskBinding(taskId);
+      if (binding !== undefined && binding.householdId !== null) return binding.householdId;
+    } catch {
+      // fall through to the per-task scope
+    }
+    return 'task-scope:' + taskId;
+  };
+  // P1-09 (issue #91): bound the ACTUAL execution — slot admission, the
+  // §13.4 execution deadline, and the single leak-proof release point. It
+  // sits ABOVE the concrete executor and BELOW the dispatch-lease decorator,
+  // so the lease/settlement semantics stay repository-owned.
+  const boundedExecutor = limitsAwareExecutor({
     inner: innerExecutor,
+    scheduler,
+    limits: config.limits,
+    recorder,
+    householdOf,
+    now: nowMs,
+  }) as AgentExecutor & Partial<LeaseAware>;
+
+  const executor = leaseDispatchExecutor({
+    inner: boundedExecutor,
     taskManager: sqliteTaskManager,
     authorizationGate: (taskId) => identity.executorGate(taskId),
     quotaGate: options.quotaGate,
+    capacityPreflight:
+      sqliteTaskManager === undefined
+        ? undefined
+        : ({ taskId, contextId }) =>
+            scheduler.wouldRejectNowForCapacity({
+              taskId,
+              contextId,
+              householdId: householdOf(taskId),
+              tokensToReserve: config.limits.modelBudget.maxTokensPerTask,
+              maxWaitMs: config.limits.admissionWaitMs,
+            }),
     leaseTtlMs: config.dispatchLeaseTtlMs,
   });
 
@@ -351,8 +451,58 @@ export async function startA2aService(
       agentName: LUMITHINK_AGENT_NAME,
     }),
   );
+  // P1-09 (#91, AC 4): the load report is an OPERATIONAL surface, not an
+  // A2A method — it lives on its own authenticated path so it never widens
+  // the locked protocol surface. It is mounted AFTER two-tier auth (so it
+  // needs a real credential) and answers from the CONTROL lane, which keeps
+  // it responsive while generation slots are saturated (AC 1).
+  app.get('/ops/load-report', async (req, res) => {
+    if (req.lumithinkAuth === undefined) {
+      res.status(401).json({ error: 'authentication required' });
+      return;
+    }
+    const permit = await scheduler.acquireControl(config.limits.control.controlHandlingDeadlineMs);
+    if (permit === null) {
+      // Bounded control handling: never hang behind a saturated control lane.
+      recorder.emit({
+        level: 'warn',
+        event: 'control.handled',
+        decision: 'deny',
+        reason: 'control_lane_deadline',
+        durationMs: config.limits.control.controlHandlingDeadlineMs,
+      });
+      res.status(503).json({
+        error: 'control_lane_busy',
+        detail: 'the reserved control lane did not free up within controlHandlingDeadlineMs',
+      });
+      return;
+    }
+    try {
+      const report = loadReportNow();
+      recorder.emit({ event: 'load.report', decision: 'allow', reason: 'served' });
+      res.status(200).json(report);
+    } finally {
+      permit.release();
+    }
+    return;
+  });
   app.use('/', jsonRpcHandler({ requestHandler, userBuilder: lumithinkUserBuilder }));
   app.use('/', jsonRpcParseErrorHandler());
+
+  /**
+   * AC 4 load report. Built on demand from live measurement surfaces; the
+   * operational route and StartedA2aService.admission.loadReport() share it.
+   */
+  const loadReportNow = (): LoadReport =>
+    buildLoadReport({
+      runtimeMode: config.runtimeMode,
+      limits: config.limits,
+      scheduler: scheduler.snapshot(),
+      taskManager: sqliteTaskManager,
+      runtime,
+      startedAtMs,
+      now: nowMs,
+    });
 
   const server = http.createServer(app);
   const closed = new Promise<void>((resolve, reject) => {
@@ -388,10 +538,22 @@ export async function startA2aService(
     recovery,
     ownsDeletionLedger: deletionLedger !== undefined,
     closed,
+    admission: {
+      scheduler,
+      recorder,
+      // AC 4: every number is read from a live measurement surface at call
+      // time (never cached at startup).
+      loadReport: loadReportNow,
+    },
   };
 }
 
 export async function stopA2aService(service: StartedA2aService): Promise<void> {
+  // P1-09 (AC 1): stop admitting BEFORE the listener drops. Queued waiters
+  // receive an explicit scheduler_closed refusal (settled REJECTED by the
+  // admission wrapper) instead of a timeout; held tickets are released by
+  // their own execution paths, never by the shutdown.
+  service.admission?.scheduler.close();
   if (service.server.listening) {
     // Force-close lingering sockets (e.g. SSE streams whose client generator
     // was abandoned mid-stream) before close(): the validation service is an

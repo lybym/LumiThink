@@ -526,6 +526,8 @@ export class SqliteTaskManager implements TaskStore {
   private inWriteTransaction = false;
   private closed = false;
   private testFailurePoint: TestFailurePoint | null = null;
+  /** P1-09 (AC 4) measured write-lock pressure (not an estimate). */
+  private readonly writeMetrics = { transactions: 0, maxWaitMs: 0, maxDurationMs: 0, busyCount: 0 };
 
   constructor(options: SqliteTaskManagerOptions) {
     if (typeof options.dbPath !== 'string' || options.dbPath.length === 0) {
@@ -559,11 +561,19 @@ export class SqliteTaskManager implements TaskStore {
       throw new TaskManagerError('invalid_input', 'nested write transaction');
     }
     this.inWriteTransaction = true;
+    const startedAtMs = this.now();
+    let lockAcquiredAtMs: number | null = null;
     try {
       // BEGIN IMMEDIATE is the first lock acquisition point: a busy write
       // lock surfaces HERE (bounded by busy_timeout) and is wrapped into the
       // typed write_lock_busy error below.
       this.db.exec('BEGIN IMMEDIATE');
+      // P1-09 (issue #91, AC 4): the wait for the write lock is MEASURED —
+      // BEGIN IMMEDIATE only returns once the lock is held, so its duration
+      // is exactly the observed lock wait (bounded by busy_timeout).
+      lockAcquiredAtMs = this.now();
+      this.writeMetrics.transactions += 1;
+      this.writeMetrics.maxWaitMs = Math.max(this.writeMetrics.maxWaitMs, lockAcquiredAtMs - startedAtMs);
       const result = fn();
       if (result instanceof Promise) {
         throw new TaskManagerError(
@@ -582,6 +592,10 @@ export class SqliteTaskManager implements TaskStore {
       throw this.wrapSqliteError(error);
     } finally {
       this.inWriteTransaction = false;
+      this.writeMetrics.maxDurationMs = Math.max(
+        this.writeMetrics.maxDurationMs,
+        this.now() - startedAtMs,
+      );
     }
   }
 
@@ -600,6 +614,7 @@ export class SqliteTaskManager implements TaskStore {
       err?.errcode === 6 ||
       /database is locked|database table is locked/i.test(err?.message ?? '');
     if (isBusyLock) {
+      this.writeMetrics.busyCount += 1;
       return new TaskManagerError(
         'write_lock_busy',
         `SQLite write lock not acquired within busyTimeoutMs=${this.busyTimeoutMs} ` +
@@ -626,6 +641,22 @@ export class SqliteTaskManager implements TaskStore {
     if (this.closed) {
       throw new TaskManagerError('invalid_input', 'repository is closed');
     }
+  }
+
+  /**
+   * P1-09 (issue #91, AC 4): MEASURED SQLite write-lock pressure for the
+   * load report. `maxWaitMs` is the observed BEGIN IMMEDIATE wait (which is
+   * bounded by busy_timeout by construction); `maxDurationMs` is the longest
+   * whole write transaction; `busyCount` counts bounded busy failures.
+   */
+  writeLockMetrics(): {
+    transactions: number;
+    maxWaitMs: number;
+    maxDurationMs: number;
+    busyCount: number;
+    busyTimeoutMs: number;
+  } {
+    return { ...this.writeMetrics, busyTimeoutMs: this.busyTimeoutMs };
   }
 
   close(): void {
@@ -1839,6 +1870,33 @@ export class SqliteTaskManager implements TaskStore {
   }
 
   /** Table counts — failure-injection tests assert zero after rollbacks. */
+  /**
+   * P1-09 (issue #91, AC 4): MEASURED Outbox backlog for the load report.
+   * Read-only aggregation over the committed Outbox rows — an un-published
+   * row is exactly "积压" (P1-06 replays them with stable ids; #88's
+   * `readOutboxAfter` + the cutpoint is the delivery mechanism, this is the
+   * observation of how far behind delivery is).
+   */
+  outboxBacklog(): {
+    unpublishedRows: number;
+    tasksWithBacklog: number;
+    oldestUnpublishedAgeMs: number;
+  } {
+    this.assertOpen();
+    const row = this.db
+      .prepare(
+        'SELECT COUNT(*) AS n, COUNT(DISTINCT task_id) AS tasks, MIN(created_at_ms) AS oldest ' +
+          'FROM a2a_outbox WHERE published_at_ms IS NULL',
+      )
+      .get() as { n: number; tasks: number; oldest: number | null };
+    const oldest = row.oldest;
+    return {
+      unpublishedRows: row.n,
+      tasksWithBacklog: row.tasks,
+      oldestUnpublishedAgeMs: oldest === null ? 0 : Math.max(0, this.now() - oldest),
+    };
+  }
+
   stats(): {
     conversations: number;
     tasks: number;

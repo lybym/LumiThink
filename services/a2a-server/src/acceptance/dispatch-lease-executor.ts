@@ -37,8 +37,10 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { AgentExecutor, ExecutionEventBus, RequestContext } from '@a2a-js/sdk/server';
-import { TaskState, type TaskStatusUpdateEvent } from '@a2a-js/sdk';
+import { Role, TaskState, type Message, type TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import type { SqliteTaskManager } from '../task-manager/sqlite-task-manager.ts';
+import { type LimitsRejectionReason } from '../limits/scheduler.ts';
+import { capacityRejectionMessage } from '../limits/admission.ts';
 
 export type QuotaGate = (taskId: string) => { allowed: boolean; reason?: string };
 
@@ -91,6 +93,20 @@ export interface LeaseDispatchExecutorOptions {
    * failures surface here (default: stderr diagnostic).
    */
   onSettlementError?: (error: unknown, context: { taskId: string; executionId: string; phase: 'fallback' | 'executor_error' }) => void;
+  /**
+   * P1-09 (issue #91 review P0): IMMEDIATE capacity pre-check run BEFORE the
+   * dispatch lease is claimed. When the bounded scheduler would refuse this
+   * request outright (queue full / budget exhausted at zero wait), the task
+   * is still in `submitted` — settling REJECTED there is a legal transition
+   * and leaves NO dangling row. Without this pre-check the refusal fired
+   * only AFTER the claim (inside the limits-aware executor), where
+   * working → rejected is an illegal snapshot and the task stayed `working`
+   * forever.
+   */
+  capacityPreflight?: (request: {
+    taskId: string;
+    contextId: string;
+  }) => LimitsRejectionReason | null;
   /** Injectable clock (tests). */
   now?: () => number;
 }
@@ -99,15 +115,41 @@ function statusUpdate(
   taskId: string,
   contextId: string,
   state: TaskState,
+  message?: Message,
 ): { kind: 'statusUpdate'; data: TaskStatusUpdateEvent } {
   return {
     kind: 'statusUpdate',
     data: {
       taskId,
       contextId,
-      status: { state, message: undefined, timestamp: new Date().toISOString() },
+      status: { state, message, timestamp: new Date().toISOString() },
       metadata: undefined,
     },
+  };
+}
+
+/** Readable agent status message (same shape as the recovery settlement). */
+function capacityRejectionStatusMessage(
+  contextId: string,
+  taskId: string,
+  text: string,
+): Message {
+  return {
+    messageId: `capacity-${randomUUID()}`,
+    contextId,
+    taskId,
+    role: Role.ROLE_AGENT,
+    parts: [
+      {
+        content: { $case: 'text', value: text },
+        metadata: undefined,
+        filename: '',
+        mediaType: 'text/plain',
+      },
+    ],
+    metadata: undefined,
+    extensions: [],
+    referenceTaskIds: [],
   };
 }
 
@@ -138,6 +180,29 @@ export function leaseDispatchExecutor(options: LeaseDispatchExecutorOptions): Ag
           const quota = options.quotaGate(taskId);
           if (!quota.allowed) {
             eventBus.publish(statusUpdate(taskId, contextId, TaskState.TASK_STATE_REJECTED));
+            return;
+          }
+        }
+
+        // 1b. P1-09 capacity pre-check BEFORE the claim (review #108 r1 P0):
+        //     a refusal here settles on `submitted` where REJECTED is legal.
+        //     Claiming first would strand the task in `working` forever
+        //     (working → rejected is an illegal snapshot and gets discarded).
+        if (options.capacityPreflight) {
+          const reason = options.capacityPreflight({ taskId, contextId });
+          if (reason !== null) {
+            eventBus.publish(
+              statusUpdate(
+                taskId,
+                contextId,
+                TaskState.TASK_STATE_REJECTED,
+                capacityRejectionStatusMessage(
+                  contextId,
+                  taskId,
+                  capacityRejectionMessage(reason),
+                ),
+              ),
+            );
             return;
           }
         }
