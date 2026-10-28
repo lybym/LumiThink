@@ -60,6 +60,7 @@ on:
       - 'tests/domain/voice/bridge/stream-gate-sink.spec.ts'
       - 'poc/dsh-child/src/**'
       - 'tests/deploy/test_gateway_bridge_tts.py'
+      - 'tests/deploy/test_tts_overlay_rebuild.py'
       - '.github/workflows/e2e-07-gateway-wiring-gate.yml'
   push:
     branches: [main]
@@ -75,6 +76,7 @@ on:
       - 'tests/domain/voice/bridge/stream-gate-sink.spec.ts'
       - 'poc/dsh-child/src/**'
       - 'tests/deploy/test_gateway_bridge_tts.py'
+      - 'tests/deploy/test_tts_overlay_rebuild.py'
       - '.github/workflows/e2e-07-gateway-wiring-gate.yml'
   workflow_dispatch:
 
@@ -105,13 +107,18 @@ jobs:
             deploy/xiaozhi/gateway_bridge/lumithink_llm.py \
             deploy/xiaozhi/gateway_bridge/install_bridge.py \
             deploy/xiaozhi/tts_stub.py \
+            deploy/xiaozhi/tts_overlay/install_tts_overlay.py \
+            deploy/xiaozhi/tts_overlay/tts_dual_stream_contract.py \
             deploy/xiaozhi/probe_e2e07.py \
             deploy/xiaozhi/probe_e2e09.py \
             deploy/xiaozhi/probe_e2e11.py
-          echo "py_compile OK (module, installer, stub, probes)"
+          echo "py_compile OK (module, installers, stub, overlay fixture, probes)"
 
       - name: Bridge yields text once and preserves delivery accounting
         run: python3 tests/deploy/test_gateway_bridge_tts.py
+
+      - name: TTS overlay rebuild — installer drill + dual-stream session contract (P0-01 #79)
+        run: python3 tests/deploy/test_tts_overlay_rebuild.py
 
       - name: gateway-bridge tier template — bridge LLM only, loopback, token by env name
         shell: bash
