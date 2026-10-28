@@ -23,9 +23,15 @@
 #      (<target>/main/xiaozhi-server/core/providers/tts/).
 #
 # Semantics:
-#   - install    hash-verify → backup-once (first backup wins) → copy →
-#                deterministic receipt JSON (no timestamps, no abs paths);
-#                idempotent (same-hash dest → verify + receipt sync only).
+#   - install    hash-verify → backup-once (first backup wins) → atomic
+#                write (temp + os.replace; an interrupted run can never
+#                leave a truncated dest/backup/receipt) → deterministic
+#                receipt JSON (no timestamps, no abs paths, LF-pinned;
+#                replacedSha256 records the hash of whatever content this
+#                install overwrote — the audit trail for discarded
+#                pre-overlay or drifted state); idempotent (same-hash dest
+#                → verify; a lost receipt is recreated, an existing one
+#                keeps its audit fields).
 #   - verify-only  read-only: dest present AND hash matches the pin.
 #   - rollback   restore the pre-overlay state (backup if one exists, else
 #                remove a fresh install), then drop the receipt; idempotent.
@@ -46,7 +52,7 @@
 import argparse
 import hashlib
 import json
-import shutil
+import os
 import sys
 from pathlib import Path
 
@@ -78,6 +84,29 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _atomic_write(dest: Path, data: bytes) -> None:
+    """Temp file + os.replace: an interrupted write can never leave a
+    truncated target (review P2-2). Same-directory temp keeps the replace
+    atomic on the target volume."""
+    tmp = dest.with_name(dest.name + ".tmp-install")
+    with tmp.open("wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, dest)
+
+
+def _atomic_write_text(dest: Path, text: str) -> None:
+    """LF-pinned text write (newline="\\n") so the receipt's bytes stay
+    platform-independent regardless of the host OS (review P2-2)."""
+    tmp = dest.with_name(dest.name + ".tmp-install")
+    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, dest)
+
+
 def _server_root(target: Path) -> Path:
     return target / "main" / "xiaozhi-server"
 
@@ -94,16 +123,23 @@ def _receipt(target: Path) -> Path:
     return target / RECEIPT_NAME
 
 
-def _write_receipt(target: Path, installed_sha: str) -> None:
+def _write_receipt(target: Path, installed_sha: str, replaced_sha) -> None:
+    """Deterministic receipt (sort_keys, no timestamps, no absolute paths).
+
+    replacedSha256 = hash of the content overwritten by THIS install
+    (null on a fresh install) — the audit trail for discarded pre-overlay
+    content, including drifted states (review P2-3).
+    """
     backup_rel = DEST_REL + BACKUP_SUFFIX if _backup(target).is_file() else None
     payload = {
         "providerType": PROVIDER_TYPE,
         "pinnedSha256": RUNTIME_OVERLAY_SHA256,
         "installedSha256": installed_sha,
         "backup": backup_rel,
+        "replacedSha256": replaced_sha,
     }
-    _receipt(target).write_text(
-        json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    _atomic_write_text(
+        _receipt(target), json.dumps(payload, sort_keys=True, indent=2) + "\n"
     )
 
 
@@ -168,22 +204,36 @@ def main() -> int:
 
     dest = _dest(target)
     if dest.is_file() and sha256_of(dest) == RUNTIME_OVERLAY_SHA256:
-        # Idempotent: already the pinned artifact — sync the receipt only.
-        _write_receipt(target, overlay_sha)
+        # Idempotent: already the pinned artifact — recreate a lost receipt
+        # only (an existing receipt keeps the audit fields recorded by the
+        # run that actually wrote the overlay).
+        if not _receipt(target).is_file():
+            _write_receipt(target, overlay_sha, None)
         print(f"{_TAG} verify: overlay already installed at {DEST_REL} (hash matches pin)")
         return 0
+
+    # Audit trail: hash whatever content this install is about to replace
+    # (the pre-overlay module on first install, or drifted content on a
+    # re-install) so discarded state stays traceable (review P2-3).
+    replaced_sha = sha256_of(dest) if dest.is_file() else None
+    if replaced_sha is not None:
+        print(f"{_TAG} replacing existing content at {DEST_REL} (sha256 {replaced_sha})")
 
     # Backup-once: the FIRST pre-overlay state is the rollback point; a
     # drifted later state never overwrites the original backup.
     backup = _backup(target)
     if dest.is_file() and not backup.exists():
-        shutil.copyfile(dest, backup)
+        _atomic_write(backup, dest.read_bytes())
         print(f"{_TAG} backed up pre-overlay state -> {DEST_REL + BACKUP_SUFFIX}")
     elif dest.is_file() and backup.exists():
-        print(f"{_TAG} backup already present, keeping the original rollback point ({DEST_REL + BACKUP_SUFFIX})")
+        print(
+            f"{_TAG} backup already present, keeping the original rollback point "
+            f"({DEST_REL + BACKUP_SUFFIX}); the replaced drifted content is audited "
+            "by its hash above and in the receipt"
+        )
 
-    shutil.copyfile(overlay, dest)
-    _write_receipt(target, overlay_sha)
+    _atomic_write(dest, overlay.read_bytes())
+    _write_receipt(target, overlay_sha, replaced_sha)
     print(f"{_TAG} installed {DEST_REL} (sha256 {overlay_sha})")
     print(f"{_TAG} receipt -> {RECEIPT_NAME} (selection undecided: adoption/replay verification stays with #81/#80)")
     return 0
@@ -212,7 +262,7 @@ def _rollback(target: Path) -> int:
     receipt = _receipt(target)
     if backup.is_file():
         # Pre-overlay state existed: restore it and drop the rollback bookkeeping.
-        shutil.copyfile(backup, dest)
+        _atomic_write(dest, backup.read_bytes())
         backup.unlink()
         if receipt.is_file():
             receipt.unlink()

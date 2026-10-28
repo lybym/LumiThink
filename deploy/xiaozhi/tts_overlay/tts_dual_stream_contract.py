@@ -28,6 +28,26 @@
 #     start_session closes a still-active prior session first
 #     (activate_session guard) before opening the new one.
 #
+# PROVENANCE SCOPE — S1 disclosure (review P1-1, 2026-10-28):
+#   The verification coverage above is NOT uniform across S1–S6, and this
+#   must be read by #80 (selection matrix) and #81 (migration diffing):
+#   - S2–S5 are verbatim-verified against BOTH pinned trees: the official
+#     v0.9.8 source (blob 0e5c7d2e @ 8f2dda09) and the pinned v0.9.7
+#     baseline (27399a2f).
+#   - S1 (lazy session creation gated on the first VALID text) is NOT
+#     upstream-verifiable: BOTH pinned versions call start_session
+#     UNCONDITIONALLY inside the FIRST branch (eager session creation, no
+#     empty/whitespace-text gate — verified verbatim in both blobs).
+#     S1 is reconstructed ONLY from the operator-side runtime record
+#     (record-e2e08-machine-face.md §2026-10-25: 恢复双流会话和首个有效文本
+#     触发建会话), i.e. it encodes the vendor-overlay refinement as
+#     RECORDED, not vanilla upstream behavior.
+#   - Consequences: #81's diffing must treat an S1 divergence from vanilla
+#     upstream as the EXPECTED vendor-overlay signature, not an anomaly;
+#     #80's selection matrix must not model vanilla v0.9.8 with S1's
+#     empty-turn session economics (upstream opens the session at FIRST and
+#     closes it at LAST regardless of text validity).
+#
 # What this file is NOT:
 #   - NOT the vendor overlay module. The repo deliberately contains NO vendor
 #     overlay files; the runtime overlay artifact stays operator-side and is
@@ -106,7 +126,10 @@ class DualStreamProviderContract:
     Locked semantics (OVERLAY.md §2):
       S1 lazy session creation — the FIRST item (and any empty/whitespace
          item) NEVER opens a session; the first VALID text of the turn opens
-         exactly one (首个有效文本触发建会话);
+         exactly one (首个有效文本触发建会话). PROVENANCE SCOPE: this is the
+         recorded vendor-overlay refinement, NOT vanilla upstream behavior —
+         both pinned upstream versions open the session unconditionally at
+         FIRST (see the header PROVENANCE SCOPE note);
       S2 one dual-stream session per turn — every later TEXT item of the same
          session_id reuses the open session (the v20 per-text-item independent
          session is structurally absent);

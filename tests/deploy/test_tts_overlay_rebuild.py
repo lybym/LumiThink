@@ -120,6 +120,10 @@ class InstallerDrill(unittest.TestCase):
             self.assertEqual(receipt["pinnedSha256"], SYNTH_PIN)
             self.assertEqual(receipt["installedSha256"], SYNTH_PIN)
             self.assertEqual(receipt["backup"], installer.DEST_REL + installer.BACKUP_SUFFIX)
+            self.assertEqual(
+                receipt["replacedSha256"], hashlib.sha256(PRE_OVERLAY).hexdigest(),
+                "the receipt must audit the hash of the replaced pre-overlay content (review P2-3)",
+            )
 
     def test_reinstall_is_idempotent_and_keeps_the_original_backup(self):
         with tempfile_dir() as tmp:
@@ -193,6 +197,7 @@ class InstallerDrill(unittest.TestCase):
             self.assertEqual(self._install(target, overlay)[0], 0)
             receipt = json.loads((target / installer.RECEIPT_NAME).read_text(encoding="utf-8"))
             self.assertIsNone(receipt["backup"], "a fresh install has no pre-overlay backup")
+            self.assertIsNone(receipt["replacedSha256"], "a fresh install replaces nothing (review P2-3)")
             code, out, _ = self._rollback(target)
             self.assertEqual(code, 0)
             self.assertIn("fresh install", out)
@@ -219,6 +224,74 @@ class InstallerDrill(unittest.TestCase):
             code, _, err = self._run(target, overlay, "--acknowledge-undecided-selection")
             self.assertEqual(code, 1)
             self.assertIn("TTS provider directory missing", err)
+
+    def test_rollback_refuses_when_server_root_is_missing(self):
+        # Review P2-5: the layout guard precedes the rollback branch — a
+        # rollback against a non-checkout path is a usage error (exit 1),
+        # never a silent "nothing to roll back".
+        with tempfile_dir() as tmp:
+            target = tmp / "not-a-checkout"
+            target.mkdir()
+            code, _, err = self._run(target, None, "--rollback")
+            self.assertEqual(code, 1)
+            self.assertIn("pinned server root not found", err)
+
+    def test_rollback_works_when_receipt_was_externally_deleted(self):
+        # Review P2-5: the backup file alone is a sufficient rollback point —
+        # an externally deleted receipt must not block the restore.
+        with tempfile_dir() as tmp:
+            target = make_tree(tmp)
+            overlay = tmp / "overlay.py"
+            overlay.write_bytes(SYNTH_OVERLAY)
+            self.assertEqual(self._install(target, overlay)[0], 0)
+            (target / installer.RECEIPT_NAME).unlink()
+            code, out, _ = self._rollback(target)
+            self.assertEqual(code, 0)
+            self.assertEqual(dest_of(target).read_bytes(), PRE_OVERLAY)
+            self.assertFalse(backup_of(target).exists())
+            self.assertIn("rolled back", out)
+
+    def test_reinstall_of_drifted_content_is_audited(self):
+        # Review P2-3: re-installing over a drifted (non-pin) dest must leave
+        # the discarded content's SHA-256 in BOTH stdout and the receipt.
+        with tempfile_dir() as tmp:
+            target = make_tree(tmp)
+            first = tmp / "overlay-v1.py"
+            first.write_bytes(SYNTH_OVERLAY)
+            self.assertEqual(self._install(target, first)[0], 0)
+            drifted = b"# operator local drift\n"
+            dest_of(target).write_bytes(drifted)  # external drift after install
+            second = tmp / "overlay-v2.py"
+            second.write_bytes(b"P0-01-SYNTHETIC-OVERLAY-V2\n")
+            second_sha = hashlib.sha256(second.read_bytes()).hexdigest()
+            code, out, _ = self._run(target, second, "--acknowledge-undecided-selection", pin=second_sha)
+            self.assertEqual(code, 0)
+            drift_sha = hashlib.sha256(drifted).hexdigest()
+            self.assertIn("replacing existing content", out)
+            self.assertIn(drift_sha, out, "the discarded drifted content must be hashed to stdout")
+            receipt = json.loads((target / installer.RECEIPT_NAME).read_text(encoding="utf-8"))
+            self.assertEqual(receipt["installedSha256"], second_sha)
+            self.assertEqual(receipt["replacedSha256"], drift_sha)
+            # The original rollback point (pre-overlay state) is untouched.
+            self.assertEqual(backup_of(target).read_bytes(), PRE_OVERLAY)
+
+    def test_interrupted_install_self_heals(self):
+        # Review test gap: a partially-written dest (simulated external
+        # truncation) must fail verify-only, be repaired by a re-install
+        # (atomic replace), and roll back cleanly afterwards.
+        with tempfile_dir() as tmp:
+            target = make_tree(tmp)
+            overlay = tmp / "overlay.py"
+            overlay.write_bytes(SYNTH_OVERLAY)
+            self.assertEqual(self._install(target, overlay)[0], 0)
+            dest_of(target).write_bytes(SYNTH_OVERLAY[:10])  # simulated truncation
+            code, _, _ = self._verify(target)
+            self.assertEqual(code, 1, "a truncated dest must fail verify-only")
+            self.assertEqual(self._install(target, overlay)[0], 0, "a re-install must repair the truncation")
+            code, _, _ = self._verify(target)
+            self.assertEqual(code, 0)
+            self.assertEqual(self._rollback(target)[0], 0)
+            self.assertEqual(dest_of(target).read_bytes(), PRE_OVERLAY, "rollback restores the original state")
 
 
 class RecordedPinConsistency(unittest.TestCase):
@@ -348,6 +421,7 @@ class tempfile_dir:
         import tempfile
 
         self._shutil = shutil
+        base = None  # review P2-4: pre-bind so a mkdtemp failure still reaches the fallback
         try:
             base = Path(tempfile.mkdtemp(prefix="lumi-tts-drill-"))
             os.makedirs(base.joinpath(*self.NESTED), exist_ok=True)
