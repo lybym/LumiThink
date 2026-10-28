@@ -1,7 +1,7 @@
 # LumiThink Gateway Bridge — 上游 fork patch 登记（E2E-07，issue #57）
 
-> 服务端基线：`xinnan-tech/xiaozhi-esp32-server` @ `27399a2fb64b5910196f438a256ce0a9f868481f`
->（= tag v0.9.7，单一事实源 `deploy/xiaozhi/version.env`）。
+> 服务端基线：`xinnan-tech/xiaozhi-esp32-server` @ `8f2dda09cf18f1c1ece0f906eee4cc2fabb7fb58`
+>（= tag v0.9.8，2026-10-28 D1 选型决定；单一事实源 `deploy/xiaozhi/version.env`）。
 > 本文件是 fork patch 的评审记录；机器强制的镜像在
 > `deploy/xiaozhi/gateway_bridge/install_bridge.py`（逐字锚点、恰好一次、
 > 漂移即拒绝）。任何 patch 更换锚点 = 更换基线 = 必须重跑
@@ -42,6 +42,14 @@
 ```
 
 ## 已核验的上游事实（2026-10-17，逐字核验 @ 27399a2）
+
+> **2026-10-28 D1 换基线复核**：仓库 pin 收敛至 v0.9.8 @ `8f2dda09` 后，5 个登记
+> 锚点已对 `8f2dda09` 的上游原文**逐字复核**——`abortHandle.py` /
+> `sendAudioHandle.py` / `connection.py` / `aliyunbl_stream.py` /
+> `alibl_endpoint.py` / `alibl_stream.py` / `tts/base.py` 在 v0.9.7→v0.9.8 间
+> **无改动**（上游 compare 核对）；唯一改动的 `helloHandle.py`（官方 v0.9.8 唤醒
+> 音频修复）内锚点 `    await conn.websocket.send(json.dumps(conn.welcome_msg))`
+> 仍逐字存活。以下 2026-10-17 核验记录按当时 pin 原样保留。
 
 - `core/utils/llm.py::create_instance`：按 `type` 加载
   `core/providers/llm/<class_name>/<class_name>.py` 并实例化 `LLMProvider(config)`

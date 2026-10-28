@@ -14,11 +14,11 @@
 # Fail-closed guards (each refusal exits non-zero and writes NOTHING):
 #   1. HASH PIN  — the overlay file's SHA-256 must equal the recorded pin;
 #      any drift means the artifact is no longer the reviewed one.
-#   2. OPT-IN    — install requires --acknowledge-undecided-selection: the
-#      v0.9.7 (repo pin) vs v0.9.8 (runtime record) selection is UNDECIDED
-#      (#80 owns it); replaying the overlay must stay an explicit,
-#      operator-acknowledged act. This entry is NEVER wired into
-#      bootstrap.sh, which keeps installing the pinned v0.9.7 baseline.
+#   2. OPT-IN    — install requires --acknowledge-selection-v0.9.8: the D1
+#      selection is DECIDED (v0.9.8, 2026-10-28, #79/#80 record) but
+#      replaying the overlay must stay an explicit, operator-acknowledged
+#      act — adoption/replay verification is #81's. This entry is NEVER
+#      wired into bootstrap.sh, which keeps installing the pinned baseline.
 #   3. LAYOUT    — the target must carry the pinned checkout shape
 #      (<target>/main/xiaozhi-server/core/providers/tts/).
 #
@@ -40,7 +40,7 @@
 #   python3 deploy/xiaozhi/tts_overlay/install_tts_overlay.py \
 #     --target /opt/xiaozhi-esp32-server \
 #     --overlay-file /path/from/operator/backup/huoshan_double_stream.py \
-#     --acknowledge-undecided-selection
+#     --acknowledge-selection-v0.9.8
 #   python3 deploy/xiaozhi/tts_overlay/install_tts_overlay.py \
 #     --target /opt/xiaozhi-esp32-server --verify-only
 #   python3 deploy/xiaozhi/tts_overlay/install_tts_overlay.py \
@@ -67,11 +67,13 @@ RECEIPT_NAME = "lumi-tts-overlay-receipt.json"
 # vendor dual-stream module + official v0.9.8 rework, operator-side copy.
 RUNTIME_OVERLAY_SHA256 = "471a726c66a46b0bee606e7aa689597f1c75997e2372dbfb58841a03c36a4723"
 
-# The repo pins v0.9.7 (deploy/xiaozhi/version.env); the overlay targets the
-# v0.9.8 runtime record. Selection is UNDECIDED until #80 closes — install
-# therefore demands an explicit acknowledgement, and the runtime-recorded
-# result can never count as candidate acceptance by itself.
-ACK_FLAG = "--acknowledge-undecided-selection"
+# The repo pin is v0.9.8 (deploy/xiaozhi/version.env, D1 selection decided
+# 2026-10-28) and the overlay targets that same baseline. Replaying the
+# runtime-recorded artifact is still an explicit operator act — adoption/
+# replay verification is #81's, and the runtime-recorded result can never
+# count as candidate acceptance by itself. Install therefore demands an
+# explicit acknowledgement.
+ACK_FLAG = "--acknowledge-selection-v0.9.8"
 
 _TAG = "[lumi-tts-overlay]"
 
@@ -152,10 +154,11 @@ def main() -> int:
     parser.add_argument("--verify-only", action="store_true", help="verify the installed overlay hash without writing")
     parser.add_argument("--rollback", action="store_true", help="restore the pre-overlay state and drop the receipt")
     parser.add_argument(
-        "--acknowledge-undecided-selection",
+        "--acknowledge-selection-v0.9.8",
+        dest="acknowledge_selection_v098",
         action="store_true",
-        help="explicit opt-in: the v0.9.7 vs v0.9.8 selection is UNDECIDED (#80); "
-        "installing the overlay is an acknowledged operator act, never a default",
+        help="explicit opt-in: the D1 selection is decided (v0.9.8, 2026-10-28, #79/#80) "
+        "and replaying the overlay is an acknowledged operator act, never a default",
     )
     args = parser.parse_args()
 
@@ -170,10 +173,11 @@ def main() -> int:
     if args.verify_only:
         return _verify(target)
 
-    if not args.acknowledge_undecided_selection:
+    if not args.acknowledge_selection_v098:
         print(
-            f"{_TAG} REFUSED: install requires {ACK_FLAG} — the v0.9.7 vs v0.9.8 "
-            "selection is undecided (#80); replay must be an explicit operator act",
+            f"{_TAG} REFUSED: install requires {ACK_FLAG} — the D1 selection "
+            "(v0.9.8, decided 2026-10-28, #79/#80) keeps replay an explicit "
+            "operator act, never a default",
             file=sys.stderr,
         )
         return 2
@@ -235,7 +239,7 @@ def main() -> int:
     _atomic_write(dest, overlay.read_bytes())
     _write_receipt(target, overlay_sha, replaced_sha)
     print(f"{_TAG} installed {DEST_REL} (sha256 {overlay_sha})")
-    print(f"{_TAG} receipt -> {RECEIPT_NAME} (selection undecided: adoption/replay verification stays with #81/#80)")
+    print(f"{_TAG} receipt -> {RECEIPT_NAME} (selection decided 2026-10-28: v0.9.8; adoption/replay verification stays with #81)")
     return 0
 
 

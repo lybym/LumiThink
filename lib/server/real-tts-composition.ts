@@ -60,7 +60,8 @@ export const REAL_TTS_PROVIDER_ID = "aliyun-bailian-cosyvoice-dual-stream" as co
 
 /**
  * The vendor WSS endpoint the PINNED xiaozhi commit defaults to inside
- * core/utils/alibl_endpoint.py (27399a2f…, `DEFAULT_WS_URL`) — the value
+ * core/utils/alibl_endpoint.py (8f2dda09… — the file is unchanged
+ * v0.9.7→v0.9.8, re-checked 2026-10-28, `DEFAULT_WS_URL`) — the value
  * used when the deploy template omits `ws_url` (which it deliberately does).
  * The activation record must name exactly this value: if the pin changes it,
  * activation fails until the egress review is re-performed. Note: this is

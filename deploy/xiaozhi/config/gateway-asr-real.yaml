@@ -6,7 +6,7 @@
 #   - Secret 值永不回显、不进 Git/日志/CI（渲染产物 0600）。
 #
 # 【档位语义】本档位 = E2E-04 gateway-minimal 档位 + 唯一变更：ASR 换成小智
-# 已钉版本（27399a2f…，version.env 单一事实源）Provider 扩展点上的**真实流式
+# 已钉版本（8f2dda09…，version.env 单一事实源）Provider 扩展点上的**真实流式
 # ASR 供应商**。启用本档位 = 供应商安全/保留/外发评审已完成
 # （docs/VOICE_HARDWARE.md §3 + docs/adr/0009-real-asr-provider-transient-channel.md）
 # 后的显式配置变更；**禁用 = 重渲染 gateway-minimal 档位**（bootstrap --template

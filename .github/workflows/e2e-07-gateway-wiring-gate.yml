@@ -182,7 +182,16 @@ jobs:
           assert numbers == ["1/5", "2/5", "3/5", "4/5", "5/5"], numbers
           for i in range(1, 6):
               assert f"{i}/5" in doc, f"fork-patches.md missing patch {i}/5"
-          assert "27399a2fb64b5910196f438a256ce0a9f868481f" in doc, "registry must name the pinned commit"
+          # The registry must cite the CURRENT pin (version.env single source
+          # of truth): a pin bump without re-registering the baseline fails
+          # here (drift = re-verify the anchors, runbook §3.7).
+          commit = ""
+          for line in open("deploy/xiaozhi/version.env", encoding="utf-8"):
+              line = line.strip()
+              if line.startswith("XIAOZHI_SERVER_COMMIT="):
+                  commit = line.split("=", 1)[1]
+          assert re.fullmatch(r"[0-9a-f]{40}", commit), "version.env must carry a 40-hex server commit pin"
+          assert commit in doc, "registry must name the pinned commit"
           print("fork-patch registry consistent (5 patches, pinned commit named)")
           PY
 

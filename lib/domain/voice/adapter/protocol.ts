@@ -41,9 +41,17 @@
  * Sources (read 2026-10-15, unauthorized to change at runtime):
  * - firmware protocol doc at tag v2.5.2 of 78/xiaozhi-esp32;
  * - xinnan-tech/xiaozhi-esp32-server abort/hello/connection handling at the
- *   pinned main commit (latest tag at evaluation time: v0.9.7).
- * Server/firmware compatibility and private OTA are NOT device-verified
- * (未实机验证) — this constant only fixes what the CONTRACT was written for.
+ *   pinned main commit (latest tag at contract-authoring time: v0.9.7).
+ *
+ * 2026-10-28 re-evaluation (issue #79 D1 selection convergence, record:
+ * docs/reviews/2026-10-28-p0-01-d1-decision-and-matrix-update.md): the pin
+ * converged to v0.9.8 @ 8f2dda09 — basis = the 2026-10-25 runtime-side
+ * v0.9.8 dual-stream regression + machine-face record
+ * (deploy/xiaozhi/record-e2e08-machine-face.md) + this PR's repo-side
+ * consistency convergence (requirements pin subset; fork-patch anchors
+ * re-verified at the new pin on 2026-10-28). Device verification is still
+ * FALSE: formal on-device acceptance remains with the P0 Gate (#82)
+ * operator window — this constant only fixes what the CONTRACT covers.
  */
 export const XIAOZHI_GATEWAY_BASELINE = Object.freeze({
   firmwareRepo: "78/xiaozhi-esp32",
@@ -69,9 +77,9 @@ export const XIAOZHI_GATEWAY_BASELINE = Object.freeze({
     frameDurationMs: 60,
   }),
   serverRepo: "xinnan-tech/xiaozhi-esp32-server",
-  serverRef: "main@27399a2fb64b5910196f438a256ce0a9f868481f",
-  serverTag: "v0.9.7",
-  evaluatedAt: "2026-10-15",
+  serverRef: "main@8f2dda09cf18f1c1ece0f906eee4cc2fabb7fb58",
+  serverTag: "v0.9.8",
+  evaluatedAt: "2026-10-28",
   deviceVerified: false,
 } as const);
 

@@ -8,7 +8,7 @@
 
 | 层 | 钉死值 | 溯源 |
 | --- | --- | --- |
-| 自建服务端 | `xinnan-tech/xiaozhi-esp32-server` @ `27399a2fb64b5910196f438a256ce0a9f868481f`（评估时最新 tag `v0.9.7`） | VOICE_GATEWAY_PROTOCOL §1 评估基线；非浮动 tag |
+| 自建服务端 | `xinnan-tech/xiaozhi-esp32-server` @ `8f2dda09cf18f1c1ece0f906eee4cc2fabb7fb58`（= tag `v0.9.8`；2026-10-28 D1 选型决定，记录见 [docs/reviews/2026-10-28-p0-01-d1-decision-and-matrix-update.md](../../docs/reviews/2026-10-28-p0-01-d1-decision-and-matrix-update.md)；回滚基线 v0.9.7 `27399a2f` 可由 git 历史复原） | VOICE_GATEWAY_PROTOCOL §1 评估基线（2026-10-28 复评收敛）；非浮动 tag |
 | 固件协议基线 | `78/xiaozhi-esp32` tag `v2.5.2`（commit `49b4380b…`） | 同上；适配层合同钉死于 `XIAOZHI_GATEWAY_BASELINE` |
 | 测试固件 | `v2.5.2_nulllab-ai-vox-v3`（AI-VOX3 机芯盒；本 issue 只记录差异，不改写固件） | §7 |
 | 运行时 | Python `3.10`；依赖 pin 见 `deploy/xiaozhi/requirements-gateway-minimal.txt`（上游 requirements 的子集 + onnxruntime 显式补齐） | 上游 requirements.txt @ pinned commit |
@@ -92,7 +92,7 @@ sudo systemctl reload caddy
 
 ## 3.5 gateway-asr-real 档位：真实流式 ASR 供应商（E2E-05，issue #55）
 
-> 启用本档位 = 在小智已钉版本（§1，`27399a2f…`）的 Provider 扩展点（`selected_module.ASR`）接入**一个评审过的真实流式 ASR 供应商**。本节与 [docs/adr/0009-real-asr-provider-transient-channel.md](../../docs/adr/0009-real-asr-provider-transient-channel.md)、[VOICE_HARDWARE §3](../../docs/VOICE_HARDWARE.md) 共同构成启用前提；**未完成评审 = 保持 gateway-minimal 档位**（fail-closed：模板/env 缺任何一项渲染即拒绝）。
+> 启用本档位 = 在小智已钉版本（§1，`8f2dda09…`）的 Provider 扩展点（`selected_module.ASR`）接入**一个评审过的真实流式 ASR 供应商**。本节与 [docs/adr/0009-real-asr-provider-transient-channel.md](../../docs/adr/0009-real-asr-provider-transient-channel.md)、[VOICE_HARDWARE §3](../../docs/VOICE_HARDWARE.md) 共同构成启用前提；**未完成评审 = 保持 gateway-minimal 档位**（fail-closed：模板/env 缺任何一项渲染即拒绝）。
 
 **首供应商（唯一评审路径）**：`ASR: AliyunBLStreamASR`（`type: aliyunbl_stream`，阿里云百炼 Paraformer 实时）。钉死 commit 的该 provider 硬编码 `wss://dashscope.aliyuncs.com/api-ws/v1/inference`（duplex WebSocket 流式）；上行合同 = 设备 Opus 16 kHz 单声道 → 服务端解码 PCM 16 kHz（模板 `sample_rate: 16000`、`format: pcm`）；端点检测 = 本地 SileroVAD + 供应商侧 `max_sentence_silence: 200`（VAD 断句；手动模式上游自动放宽 6000 ms）。钉死版本升级若改动该硬编码端点/provider 形状 = 换基线（§1）+ **重跑外发评审**（CI 合并后扫描会因形状漂移失败）。
 
@@ -130,7 +130,7 @@ sudo XIAOZHI_AUTH_KEY="$(sudo grep -oP '(?<=^XIAOZHI_AUTH_KEY=).*' /etc/xiaozhi/
 
 ## 3.6 gateway-tts-real 档位：真实 TTS 供应商（E2E-06，issue #56）
 
-> 启用本档位 = 在小智已钉版本（§1，`27399a2f…`）的 Provider 扩展点（`selected_module.TTS`）接入**一个评审过的真实 TTS 供应商**。本节与 [docs/adr/0010-real-tts-provider-dual-stream.md](../../docs/adr/0010-real-tts-provider-dual-stream.md)、[VOICE_HARDWARE §3](../../docs/VOICE_HARDWARE.md) 共同构成启用前提；**未完成评审 = 保持 gateway-minimal 档位**（fail-closed：模板/env 缺任何一项渲染即拒绝）。
+> 启用本档位 = 在小智已钉版本（§1，`8f2dda09…`）的 Provider 扩展点（`selected_module.TTS`）接入**一个评审过的真实 TTS 供应商**。本节与 [docs/adr/0010-real-tts-provider-dual-stream.md](../../docs/adr/0010-real-tts-provider-dual-stream.md)、[VOICE_HARDWARE §3](../../docs/VOICE_HARDWARE.md) 共同构成启用前提；**未完成评审 = 保持 gateway-minimal 档位**（fail-closed：模板/env 缺任何一项渲染即拒绝）。
 
 **首供应商（唯一评审路径）**：`TTS: AliBLStreamTTS`（`type: alibl_stream`，阿里云百炼 CosyVoice 双流 TTS，上游标注 `InterfaceType.DUAL_STREAM`；与 §3.5 的真实 ASR 同供应商族——安全/保留/外发评审、dashscope 锚点与 API-Key 生命周期同源）。模板刻意省略 `ws_url`：钉死 commit 的 `core/utils/alibl_endpoint.py` 默认 `wss://dashscope.aliyuncs.com/api-ws/v1/inference/`（尾斜杠为钉死默认值原样；`resolve_ws_url` fail-closed 只接受阿里云官方 WSS 推理端点）——**该端点是外发评审锚点，任何模板覆盖 `ws_url` = 重跑评审**（CI/测试断言模板无覆盖）。供应商事实逐字核验 @ pinned commit：`model: cosyvoice-v2`、`voice: longxiaochun_v2`、`format: pcm`、`api_key` 缺失即 raise（fail-loud）、请求携带 `sample_rate: conn.sample_rate`（下行协商值，永不供应商侧改写）。合成、Opus 编码与流式下发全部由钉死服务端完成；LumiThink 协议面不变（帧数+摘要，无音频字节）。**ASR/LLM 保持回环占位：TTS 评审不隐含 ASR/LLM 评审**（真实 ASR 用 §3.5 档位；组合档位留待后续 Issue 显式评审）。
 
@@ -207,17 +207,17 @@ python3 deploy/xiaozhi/gateway_bridge/install_bridge.py \
 冻结矩阵 §2 补丁 9（部署侧独有：恢复双流会话 + 首个有效文本触发建会话）的**仓库侧可重建交付**在 `deploy/xiaozhi/tts_overlay/`：[OVERLAY.md](tts_overlay/OVERLAY.md)（评审记录：组成、来源哈希、语义合同 S1–S6、未验证边界）、`install_tts_overlay.py`（安装入口）、`tts_dual_stream_contract.py`（上游夹具——记录语义的可执行规格，脚本化 vendor stub，零外发零凭据零音频）；维护测试 `tests/deploy/test_tts_overlay_rebuild.py`（CI：`e2e-07-gateway-wiring-gate.yml`）。
 
 ```bash
-# 安装（哈希钉死核对 + 显式确认选型未决 + 备份一次 + receipt）：
+# 安装（哈希钉死核对 + 显式确认选型已决的重放 + 备份一次 + receipt）：
 python3 deploy/xiaozhi/tts_overlay/install_tts_overlay.py \
   --target /opt/xiaozhi-esp32-server \
   --overlay-file <运营者本地备份>/huoshan_double_stream.py \
-  --acknowledge-undecided-selection
+  --acknowledge-selection-v0.9.8
 # 只读核验 / 回滚（无需确认旗标；回滚幂等）：
 python3 deploy/xiaozhi/tts_overlay/install_tts_overlay.py --target /opt/xiaozhi-esp32-server --verify-only
 python3 deploy/xiaozhi/tts_overlay/install_tts_overlay.py --target /opt/xiaozhi-esp32-server --rollback
 ```
 
-**纪律**：覆盖工件（厂商双流模块 + 官方 v0.9.8 重整，SHA-256 `471a726c…`，见 OVERLAY.md §1）**不入库**（仓库不含厂商覆盖文件），重建时由运营者本地提供、安装入口逐字节哈希核对，漂移即拒绝；不带 `--acknowledge-undecided-selection` 的安装以退出码 2 拒绝——**版本选型（v0.9.7 vs v0.9.8）未决（#80），重放必须是运营者显式行为**；本入口**永不**接入 `bootstrap.sh`（bootstrap 继续安装钉死的 v0.9.7 基线），仓库钉死基线与 gateway-* 档位模板不受本交付影响。回滚点为首次安装的 `<dest>.before-overlay`（首个备份不被后续漂移覆盖）；`<target>/lumi-tts-overlay-receipt.json` 记录确定性 receipt（无时间戳）。诊断：全部输出带 `[lumi-tts-overlay]` 前缀；拒绝路径（哈希漂移 / 缺确认 / 布局缺失）stderr 明示原因且**写前核对，任何拒绝不落盘**。**未验证边界**：部署侧采纳/重放与迁移验证未执行（#81，选型 #80 先行）；历史运行结果**不自动视为候选验收**；夹具不是厂商行为或设备/A2A/实机验收证据（`not_performed`；P0 Gate 判定归 #82）。
+**纪律**：覆盖工件（厂商双流模块 + 官方 v0.9.8 重整，SHA-256 `471a726c…`，见 OVERLAY.md §1）**不入库**（仓库不含厂商覆盖文件），重建时由运营者本地提供、安装入口逐字节哈希核对，漂移即拒绝；不带 `--acknowledge-selection-v0.9.8` 的安装以退出码 2 拒绝——**版本选型已决（2026-10-28：v0.9.8，D1 决定记录），重放仍是运营者显式行为**（采纳/迁移验证归 #81）；本入口**永不**接入 `bootstrap.sh`（bootstrap 继续安装钉死基线，现版本.env 已为 v0.9.8 @ `8f2dda09`），仓库钉死基线与 gateway-* 档位模板不受本交付影响。回滚点为首次安装的 `<dest>.before-overlay`（首个备份不被后续漂移覆盖）；`<target>/lumi-tts-overlay-receipt.json` 记录确定性 receipt（无时间戳）。诊断：全部输出带 `[lumi-tts-overlay]` 前缀；拒绝路径（哈希漂移 / 缺确认 / 布局缺失）stderr 明示原因且**写前核对，任何拒绝不落盘**。**未验证边界**：部署侧采纳/重放与迁移验证未执行（#81）；历史运行结果**不自动视为候选验收**；夹具不是厂商行为或设备/A2A/实机验收证据（`not_performed`；P0 Gate 判定归 #82）。
 
 ## 4. gateway-minimal 档位：明确的"禁用"语义（AC 2）
 

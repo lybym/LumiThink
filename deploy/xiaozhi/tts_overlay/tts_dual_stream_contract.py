@@ -11,7 +11,8 @@
 #
 # Provenance (verified verbatim against the upstream repo on 2026-10-28):
 #   - Interface contract: main/xiaozhi-server/core/providers/tts/base.py
-#     @ 27399a2fb64b5910196f438a256ce0a9f868481f (pinned commit; blob
+#     @ 27399a2fb64b5910196f438a256ce0a9f868481f (v0.9.7 baseline; the file
+#     is unchanged v0.9.7→v0.9.8 — same blob
 #     34b20a626ec5a9d3cb24557a0a665df529401700) — TTSProviderBase carries the
 #     async session-lifecycle hooks start_session/finish_session (pass-through
 #     at base) and close(); main/xiaozhi-server/core/utils/tts.py
@@ -31,9 +32,9 @@
 # PROVENANCE SCOPE — S1 disclosure (review P1-1, 2026-10-28):
 #   The verification coverage above is NOT uniform across S1–S6, and this
 #   must be read by #80 (selection matrix) and #81 (migration diffing):
-#   - S2–S5 are verbatim-verified against BOTH pinned trees: the official
-#     v0.9.8 source (blob 0e5c7d2e @ 8f2dda09) and the pinned v0.9.7
-#     baseline (27399a2f).
+#   - S2–S5 are verbatim-verified against BOTH upstream trees: the official
+#     v0.9.8 source (blob 0e5c7d2e @ 8f2dda09) and the v0.9.7 baseline
+#     (27399a2f — the repo pin until the 2026-10-28 D1 selection decision).
 #   - S1 (lazy session creation gated on the first VALID text) is NOT
 #     upstream-verifiable: BOTH pinned versions call start_session
 #     UNCONDITIONALLY inside the FIRST branch (eager session creation, no

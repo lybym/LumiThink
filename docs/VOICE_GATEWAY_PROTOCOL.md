@@ -19,7 +19,7 @@
 | 层 | 固定基线 | 依据（2026-10-15 查阅） |
 | --- | --- | --- |
 | 端侧固件协议 | `78/xiaozhi-esp32` tag **`v2.5.2`**，WebSocket 协议文档（该 tag 内 `docs/websocket.md`） | <https://github.com/78/xiaozhi-esp32/blob/v2.5.2/docs/websocket.md> |
-| 自建服务端 | `xinnan-tech/xiaozhi-esp32-server`，评估时 main 提交 **`27399a2fb64b5910196f438a256ce0a9f868481f`**（最新 tag `v0.9.7`）；适配层语义核对 `abortHandle.py` / `helloHandle.py` / `connection.py` | <https://github.com/xinnan-tech/xiaozhi-esp32-server> |
+| 自建服务端 | `xinnan-tech/xiaozhi-esp32-server`，main 提交 **`8f2dda09cf18f1c1ece0f906eee4cc2fabb7fb58`**（= tag `v0.9.8`；2026-10-28 D1 选型收敛，复评见 §3 复评条目；初始评估基线 2026-10-15 @ `27399a2fb64b5910196f438a256ce0a9f868481f`/`v0.9.7`，可由 git 历史复原）；适配层语义核对 `abortHandle.py` / `helloHandle.py` / `connection.py` | <https://github.com/xinnan-tech/xiaozhi-esp32-server> |
 | 上行音频 | Opus，16 kHz，单声道，60 ms 帧（firmware hello `audio_params`） | 同上协议文档 §1/§8 |
 | 下行音频 | Opus，**由服务端 hello 协商**（文档注明服务端可用 24 kHz）——适配层不写死采样率 | 同上协议文档 §8.3 |
 | 代码内钉死 | `XIAOZHI_GATEWAY_BASELINE`（`lib/domain/voice/adapter/protocol.ts`），schema 测试断言版本/提交不可漂移 | `tests/domain/voice/adapter/protocol.spec.ts` |
@@ -92,6 +92,10 @@ v1.0 中 `asr_final` 文本在 Adapter 内即刻降为 FNV-1a 摘要并丢弃—
 ## 3. 兼容矩阵（v2.5.2 线协议 × Adapter 合同）
 
 状态含义：`合同+合成已验` = 本 PR 的 schema/行为测试覆盖（纯合成数据）；`未实机验证` = 需要 R5 硬件/真实服务端才能确认，本 PR 不写 PASS。
+
+### 2026-10-28 基线复评（D1 版本选型收敛，issue #79）
+
+仓库 pin 由 v0.9.7 @ `27399a2f` 收敛至 **v0.9.8 @ `8f2dda09`**（决定记录：[2026-10-28 D1 决定与矩阵更新](reviews/2026-10-28-p0-01-d1-decision-and-matrix-update.md)；单一事实源 `deploy/xiaozhi/version.env`）。复评依据 = 2026-10-25 运行侧 v0.9.8 重整回归 + [机器面记录](../deploy/xiaozhi/record-e2e08-machine-face.md)（批次 #6 3/3 轮干净、LANE-1 GREEN）+ 本仓库侧一致性收敛（`requirements-gateway-minimal.txt` 按上游 v0.9.8 requirements.txt 原文重排 11 个 pin；5 个 fork patch 锚点对 `8f2dda09` 逐字复核——`abortHandle.py`/`sendAudioHandle.py`/`connection.py` 及 ASR/TTS 供应商端点文件在两钉点间无改动，唯一改动的 `helloHandle.py` 锚点仍逐字存活）。本复评只收敛**仓库侧**一致性与合同锚点：实机正式验收仍归 P0 Gate（#82）运营者窗口，`deviceVerified: false` 维持，不据此宣称部署收敛或 Gate 通过。
 
 | v2.5.2 报文 | 方向 | Adapter 合同映射 | 状态 |
 | --- | --- | --- | --- |
@@ -174,7 +178,7 @@ node --experimental-strip-types --test-isolation=none --test \
 
 **Linux 自建服务端 / ASR / TTS / OTA（R5 前置）**
 
-- [x] 单模块服务端部署与版本钉死（评估基线 `27399a2`，升级需重跑本矩阵）——**E2E-04（issue #54）已交付部署面**：钉死 checkout、gateway-minimal 档位（VAD 仅本地、ASR/LLM/TTS 显式缺省）、healthcheck + 模拟设备 hello/abort 探针、鉴权/重启/损坏配置负例与干净环境 CI 冒烟（`deploy/xiaozhi/`、`e2e-04-xiaozhi-deployment-gate.yml`）。**口径：私有服务端已验证，真实设备仍待 #E2E-08**；本行不标注供应商接入与实机 OTA 完成。
+- [x] 单模块服务端部署与版本钉死（初始评估基线 `27399a2`；2026-10-28 D1 收敛至 `8f2dda09`/v0.9.8，见 §1/§3 复评条目；升级需重跑本矩阵）——**E2E-04（issue #54）已交付部署面**：钉死 checkout、gateway-minimal 档位（VAD 仅本地、ASR/LLM/TTS 显式缺省）、healthcheck + 模拟设备 hello/abort 探针、鉴权/重启/损坏配置负例与干净环境 CI 冒烟（`deploy/xiaozhi/`、`e2e-04-xiaozhi-deployment-gate.yml`）。**口径：私有服务端已验证，真实设备仍待 #E2E-08**；本行不标注供应商接入与实机 OTA 完成。
 - [x] 首个真实流式 ASR Provider 的钉死扩展点配置与评审门禁——**E2E-05（issue #55）已交付配置/评审/证据面**（[ADR-0009](./adr/0009-real-asr-provider-transient-channel.md)）：`gateway-asr-real` 档位（AliyunBLStreamASR @ pinned commit 扩展点、16 kHz 上行、duplex 流式、转写不落盘三闸、`bootstrap.sh --template` 显式选档/禁用）、fail-closed 激活记录（评审锚点端点逐字校验）+ 内容无关证据合同（置信度如实标注不上线）、重复 final 窗口化去重与五族流式故障回归（`real-asr-stream.spec.ts`）、CI 渲染/合并后扫描（不启动、零真实出网）。**口径：部署配置面与合成证据已验证，真实供应商转写质量/实机行为/儿童数据评审未完成**——告知同意流程与真实数据评审仍以下行未勾选项为准。
 - [ ] 第三方 ASR/TTS/LLM 供应商安全与保留评估、告知同意流程（[VOICE_HARDWARE §3](./VOICE_HARDWARE.md)）——E2E-05 交付了首供应商（百炼 Paraformer 实时）的配置面与评审锚点/激活门禁；E2E-06 交付了首 TTS 供应商（百炼 CosyVoice 双流，[ADR-0010](./adr/0010-real-tts-provider-dual-stream.md)）的配置面与评审锚点/激活门禁；**监护人告知同意流程、真实数据评审与供应商侧保留核实仍未完成**。
 - [ ] 私有 OTA 激活/升级/回滚演练；断网-重连-重激活全链路。
