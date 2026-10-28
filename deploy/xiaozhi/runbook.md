@@ -202,6 +202,23 @@ python3 deploy/xiaozhi/gateway_bridge/install_bridge.py \
 
 **运维要点**：内部传输仅限同宿主（UDS 0600，无 TCP 选项）；桥故障 = 当轮 fail-closed（无回答、无内置 LLM 回退），设备协议面不受影响；服务重启后桥随服务进程重连，网关自动失效旧租约并续接受信会话；监听/审计全内容无关，句文本只存在于瞬态帧路径与 TTS 队列。CI 证据：`e2e-07-gateway-wiring-gate.yml`（全链路 + 三个负例 + 重启续接 + **E2E-08 增量：real 档接线环**——同一钉死服务端以 `LUMITHINK_GATEWAY_AGENT=real` 重启网关宿主并重跑全链路，真实锁定版 DSH worker 子进程在环内应答；运营者复现 = 上述第 3 步加该 env 重启宿主即可，READY 行 `agent=real` 为选择确认）。启动器 `scripts/xiaozhi/gateway-host.ts` 由 scoped 项目 `scripts/xiaozhi/tsconfig.json` 静态类型检查（`pnpm run typecheck:gateway-host`，接入同一 workflow）。**未验证边界**：真实固件设备（#E2E-08，§11）、真实 ASR 音频上行、真实供应商组合档位。
 
+## 3.8 v0.9.8 TTS 双流覆盖：仓库可重建交付（P0-01 #79；显式 opt-in）
+
+冻结矩阵 §2 补丁 9（部署侧独有：恢复双流会话 + 首个有效文本触发建会话）的**仓库侧可重建交付**在 `deploy/xiaozhi/tts_overlay/`：[OVERLAY.md](tts_overlay/OVERLAY.md)（评审记录：组成、来源哈希、语义合同 S1–S6、未验证边界）、`install_tts_overlay.py`（安装入口）、`tts_dual_stream_contract.py`（上游夹具——记录语义的可执行规格，脚本化 vendor stub，零外发零凭据零音频）；维护测试 `tests/deploy/test_tts_overlay_rebuild.py`（CI：`e2e-07-gateway-wiring-gate.yml`）。
+
+```bash
+# 安装（哈希钉死核对 + 显式确认选型未决 + 备份一次 + receipt）：
+python3 deploy/xiaozhi/tts_overlay/install_tts_overlay.py \
+  --target /opt/xiaozhi-esp32-server \
+  --overlay-file <运营者本地备份>/huoshan_double_stream.py \
+  --acknowledge-undecided-selection
+# 只读核验 / 回滚（无需确认旗标；回滚幂等）：
+python3 deploy/xiaozhi/tts_overlay/install_tts_overlay.py --target /opt/xiaozhi-esp32-server --verify-only
+python3 deploy/xiaozhi/tts_overlay/install_tts_overlay.py --target /opt/xiaozhi-esp32-server --rollback
+```
+
+**纪律**：覆盖工件（厂商双流模块 + 官方 v0.9.8 重整，SHA-256 `471a726c…`，见 OVERLAY.md §1）**不入库**（仓库不含厂商覆盖文件），重建时由运营者本地提供、安装入口逐字节哈希核对，漂移即拒绝；不带 `--acknowledge-undecided-selection` 的安装以退出码 2 拒绝——**版本选型（v0.9.7 vs v0.9.8）未决（#80），重放必须是运营者显式行为**；本入口**永不**接入 `bootstrap.sh`（bootstrap 继续安装钉死的 v0.9.7 基线），仓库钉死基线与 gateway-* 档位模板不受本交付影响。回滚点为首次安装的 `<dest>.before-overlay`（首个备份不被后续漂移覆盖）；`<target>/lumi-tts-overlay-receipt.json` 记录确定性 receipt（无时间戳）。诊断：全部输出带 `[lumi-tts-overlay]` 前缀；拒绝路径（哈希漂移 / 缺确认 / 布局缺失）stderr 明示原因且**写前核对，任何拒绝不落盘**。**未验证边界**：部署侧采纳/重放与迁移验证未执行（#81，选型 #80 先行）；历史运行结果**不自动视为候选验收**；夹具不是厂商行为或设备/A2A/实机验收证据（`not_performed`；P0 Gate 判定归 #82）。
+
 ## 4. gateway-minimal 档位：明确的"禁用"语义（AC 2）
 
 `deploy/xiaozhi/config/gateway-minimal.yaml`（渲染进 `data/.config.yaml`）。

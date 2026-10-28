@@ -14,7 +14,7 @@
 | --- | --- | --- | --- | --- |
 | 自建服务端 | `xinnan-tech/xiaozhi-esp32-server` @ `27399a2fb64b5910196f438a256ce0a9f868481f`（评估 tag `v0.9.7`，非浮动）；单一事实源 [`deploy/xiaozhi/version.env`](../../deploy/xiaozhi/version.env)，与 Adapter 合同 `XIAOZHI_GATEWAY_BASELINE`（`lib/domain/voice/adapter/protocol.ts`）的一致性由 `tests/deploy/xiaozhi-deployment.spec.ts` 机器强制 | 运行记录为 `v0.9.8` / `8f2dda09cf18f1c1ece0f906eee4cc2fabb7fb58`（来源：预核对记录） | **RUNTIME_RECORDED → PENDING_DECISION**：版本选型（v0.9.7 vs v0.9.8）未决；迁移必须一并核对 installer、覆盖注册表、协议扩展点与回滚，不能只改版本号 | #80（选型与兼容矩阵）；#81（迁移与重建）；#82（Gate 汇总） |
 | 端侧固件 | `78/xiaozhi-esp32` @ `v2.5.2` / `49b4380b3faa0ceadd28a3e78aaf0f311c46c57e`；测试固件 `v2.5.2_nulllab-ai-vox-v3`（AI-VOX3 机芯盒，只记录不改写）（version.env） | 2026-10-18 串口实测 `2.5.2`、AFE AEC 开启、hello ack 正常（[机器面记录](../../deploy/xiaozhi/record-e2e08-machine-face.md)） | **REPO_FROZEN**（仓库/实机记录一致；正式实机验收仍归 P0 Gate 之后） | #82（Gate）；运营者实机窗口 |
-| TTS 供应商与覆盖 | 仓库模板唯一评审路径 `alibl_stream`（阿里云百炼 CosyVoice 双流，[runbook §3.6](../../deploy/xiaozhi/runbook.md)）；仓库**不含**任何厂商覆盖文件 | 运行目录另有火山 seed-tts-2.0 双流覆盖模块，SHA-256 `471a726c66a46b0bee606e7aa689597f1c75997e2372dbfb58841a03c36a4723`；其上叠有官方 v0.9.8 TTS 双流重整（见 §2 补丁 9） | **RUNTIME_RECORDED → PENDING_DELIVERY**：v0.9.8 TTS 覆盖、上游夹具与维护测试未形成仓库可重建交付；历史运行结果不能自动视为候选验收 | #81（重建基线）；#80（版本选型先行） |
+| TTS 供应商与覆盖 | 仓库模板唯一评审路径 `alibl_stream`（阿里云百炼 CosyVoice 双流，[runbook §3.6](../../deploy/xiaozhi/runbook.md)）；仓库**不含**任何厂商覆盖文件；v0.9.8 双流重整的**仓库可重建交付已形成**（[tts_overlay/](../../deploy/xiaozhi/tts_overlay/OVERLAY.md)：上游夹具 + 维护测试 + 哈希钉死安装入口，2026-10-28） | 运行目录另有火山 seed-tts-2.0 双流覆盖模块，SHA-256 `471a726c66a46b0bee606e7aa689597f1c75997e2372dbfb58841a03c36a4723`（该 pin 已被 tts_overlay 安装入口镜像）；其上叠有官方 v0.9.8 TTS 双流重整（见 §2 补丁 9） | **REPO_DELIVERED → 部署采纳 PENDING**：重建链（夹具/测试/安装入口）已入库；部署侧重放与迁移验证未执行（选型未决前不得先行重放）；历史运行结果不能自动视为候选验收 | #81（重放/迁移）；#80（版本选型先行） |
 | 运行配置来源 | 仓库侧权威：`version.env`（版本）、`render_config.py` + `config/gateway-*.yaml` 模板（配置形状）、`env/*.example`（凭据 shapes only，值不入库）、[runbook](../../deploy/xiaozhi/runbook.md)（操作合同） | launcher 实际在 `data/lumithink-runtime/lumithink` 启动；`gateway.env` 单引号 + LF、BINDINGS 用容器路径；密钥/令牌仅宿主侧文件与进程 env；运行目录顶层同名备用 `gateway-host.ts` / `real-agent-port.ts` **不是**执行代码权威（勿与仓库 `scripts/xiaozhi/gateway-host.ts` 混淆） | **RUNTIME_RECORDED**：选定文件的路径与哈希清单保存在本地备份（见 §5），仓库侧未重放核对 | #81（隔离目录重建核对） |
 | 服务端运行时/工具链 | Python 3.10（version.env）；Node 24.x / pnpm 10.34.7 锁定（package.json；本机 Node 24.22.1 未升锁文件） | CI 锁定 Node 24.21.0 / pnpm 10.34.7（预核对记录） | **REPO_FROZEN**（一致性已核对） | — |
 | 安装与回滚 | 仓库侧 `bootstrap.sh`（钉死安装、fail-closed）+ [runbook §8 回滚](../../deploy/xiaozhi/runbook.md)；v0.9.7 基线安装器语义已评审 | v0.9.8 运行目录的安装器、覆盖注册表与回滚路径未核对 | **PENDING_VERIFICATION** | #81（重建与回滚演练）；#82（Gate） |
@@ -33,7 +33,7 @@
 | 6 | 日志最小化（致命异常只记固定原因；不打印异常正文/堆栈/控制回复/Worker stderr 正文） | **MERGED**（PR #94） | 同上（子进程错误带合成私人标记的泄漏断言） | 运行目录未采纳；迁移验证 PENDING | #81 |
 | 7 | 有限空闲回收（120 s 默认限额；排除启动中/控制请求中/活动执行；quarantine 通知 Bridge，允许同逻辑会话重建） | **MERGED**（PR #94，`c889dc9`） | 空闲回收验证（重建成功且不杀静默活动轮次） | 部署仍关闭回收（Infinity）；**统一配置决策 PENDING**：需先验证部署侧长闲置、容量与多用户行为 | #81（验证）；#82（Gate 判定） |
 | 8 | Bridge 重注册补丁（部署侧独有：保存 hello 参数，`connection_unknown` 时重注册、重试一次） | **未入库** | 仅运行侧记录；四要素（凭据、会话归属、重复网关重启、幂等重试）**未验证** | **PENDING_VERIFICATION**：验证通过前不得并入统一实现 | #81（隔离环境先行验证）；运营者提供部署侧补丁证据 |
-| 9 | 官方 v0.9.8 TTS 双流重整（部署侧独有：恢复双流会话 + 首个有效文本触发建会话，取代 v20 逐文本项独立会话） | **未入库** | 运行目录重整记录（[机器面记录 §2026-10-25 基线整理说明](../../deploy/xiaozhi/record-e2e08-machine-face.md)） | **PENDING_DELIVERY**：上游夹具、维护测试与安装入口需形成仓库可重建交付；版本选型未决前不得先行重放 | #81（重建）；#80（版本选型先行） |
+| 9 | 官方 v0.9.8 TTS 双流重整（部署侧独有：恢复双流会话 + 首个有效文本触发建会话，取代 v20 逐文本项独立会话） | **REPO_DELIVERED（2026-10-28）**：可重建交付入库 [deploy/xiaozhi/tts_overlay/](../../deploy/xiaozhi/tts_overlay/OVERLAY.md)——上游合同夹具（对官方 v0.9.8 源码逐字核验后重建的可执行规格）+ 维护测试（`tests/deploy/test_tts_overlay_rebuild.py`，CI 接入 e2e-07 gate）+ 哈希钉死显式 opt-in 安装入口（备份一次/回滚/确定性 receipt）；厂商覆盖工件本身仍不入库 | 运行目录重整记录（[机器面记录 §2026-10-25 基线整理说明](../../deploy/xiaozhi/record-e2e08-machine-face.md)）；18 项维护测试本地通过 | **PENDING_ADOPTION**：部署侧重放/迁移未执行；版本选型未决前不得先行重放（安装入口默认拒绝，需显式确认） | #81（重放/迁移）；#80（版本选型先行） |
 
 > 补丁 1–7 的本地验证基线：23 项针对性验证（桥接 3、部署合同 4、Worker 启动/失败/空闲回收 10、网关进程退出 6）+ 根回归 980 PASS / 0 FAIL / 8 SKIP（POSIX 场景由 Linux CI 覆盖）+ TypeScript 检查；均为脚本 Worker 与合成供应商证据，**不代表真实儿童数据、语音设备或 A2A 验收**。
 
@@ -45,7 +45,7 @@
 | D2 | 部署 Worker 关闭回收 vs 仓库有限回收 | 配置分裂 | **影响复现 → 阻断 P0 Gate** 直至统一配置并留长闲置恢复证据 | #81、#82 |
 | D3 | Bridge 重注册补丁未验证（补丁 8） | 仅部署侧 | **影响 hello 恢复路径复现 → 阻断 P0 Gate** 直至四要素验证 | #81 |
 | D4 | 运行目录未采纳致命异常退出/日志最小化（补丁 5/6） | 现网行为与仓库语义不一致 | 迁移验证 PENDING；未收敛前不得宣称基线一致 | #81 |
-| D5 | v0.9.8 TTS 重整无仓库可重建交付（补丁 9） | 重建链缺失 | **影响复现 → 阻断 P0 Gate** 直至交付形成 | #81、#80 |
+| D5 | v0.9.8 TTS 重整无仓库可重建交付（补丁 9） | 重建链已形成（2026-10-28：[tts_overlay/](../../deploy/xiaozhi/tts_overlay/OVERLAY.md) 夹具/维护测试/安装入口入库）；部署侧采纳与重放未执行 | 仓库侧缺口已关闭；**部署侧重放未收敛前仍阻断 P0 Gate**（选型 #80 → 迁移 #81 → Gate #82） | #81、#80 |
 | D6 | `sentence_start` 拓扑偏差（真实双流路径不外显逐句 DTO；CI stub 保持完整契约） | 已记录（机器面记录） | 不阻断本轮；历史验证只适用当时版本 | E2E-09/§14 加固 |
 | D7 | teardown 重叠限制（探针超时拆除后残留供应商会话可撞并发限额） | 批次 #6 以 45 s settle 规避 | 归打断可靠性加固，不阻断本轮 | E2E-09/§14 |
 | D8 | 同 API Key 的 ASR/TTS 并发实验不覆盖高并发与长时配额 | 局限已记录（v20 节） | 诚实局限，P1-09 资源项另行测量 | #87 以后的 P1-09 |
@@ -76,6 +76,6 @@
 
 ## 7. 本矩阵的覆盖声明
 
-- **仓库侧已完成**：版本矩阵、补丁去向矩阵、偏差台账、hello 三态复核、PR #76 处置记录（本文档）；备份分支集成与生命周期加固（PR #94）。
-- **PENDING（不得宣称完成）**：版本选型与迁移（#80/#81）、部署 Worker 回收统一配置（#81）、Bridge 重注册验证（#81）、运行目录采纳致命退出/日志最小化（#81）、v0.9.8 TTS 可重建交付（#81/#80）、隔离重建与回滚演练（#81）、P0 Gate 判定（#82）。
+- **仓库侧已完成**：版本矩阵、补丁去向矩阵、偏差台账、hello 三态复核、PR #76 处置记录（本文档）；备份分支集成与生命周期加固（PR #94）；v0.9.8 TTS 双流重整的仓库可重建交付（2026-10-28：[tts_overlay/](../../deploy/xiaozhi/tts_overlay/OVERLAY.md) 上游夹具 + 维护测试 + 显式 opt-in 安装入口，补丁 9 的 D5 仓库侧缺口关闭）。
+- **PENDING（不得宣称完成）**：版本选型与迁移（#80/#81）、部署侧采纳 v0.9.8 TTS 重整与重放验证（#81，选型 #80 先行；tts_overlay 安装入口默认拒绝静默重放）、部署 Worker 回收统一配置（#81）、Bridge 重注册验证（#81）、运行目录采纳致命退出/日志最小化（#81）、隔离重建与回滚演练（#81）、P0 Gate 判定（#82）。
 - 每项 PENDING 均标注负责人联动；影响复现的未解决偏差（D1–D3、D5）在收敛前**阻断 P0 Gate**。本任务不批准正式发布，不切换现有 UDS。
