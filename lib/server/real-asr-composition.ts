@@ -53,7 +53,8 @@ export const REAL_ASR_PROVIDER_ID = "aliyun-bailian-paraformer-realtime" as cons
 
 /**
  * The vendor WebSocket endpoint the PINNED xiaozhi commit hard-codes inside
- * core/providers/asr/aliyunbl_stream.py (27399a2f…, `self.ws_url`). The
+ * core/providers/asr/aliyunbl_stream.py (8f2dda09… — the file is unchanged
+ * v0.9.7→v0.9.8, re-checked 2026-10-28, `self.ws_url`). The
  * activation record must name exactly this value: if the pin changes it,
  * activation fails until the egress review is re-performed.
  */
@@ -319,7 +320,7 @@ export function buildRealAsrEvidenceRecord(refs: {
     metrics: Object.freeze({ ...refs.metrics, asrFinalAcceptMs: Object.freeze({ ...refs.metrics.asrFinalAcceptMs }) }),
     confidence: Object.freeze({
       onWire: false as const,
-      note: "provider confidence not exposed on the pinned server wire (stt carries text only, commit 27399a2f)",
+      note: "provider confidence not exposed on the pinned server wire (stt carries text only, commit 8f2dda09)",
     }),
     leakageScanClean: refs.leakageScanClean,
   });

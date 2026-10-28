@@ -202,9 +202,11 @@ test("gateway-asr-real tier template: reviewed streaming ASR selected at the pin
       );
     }
   }
-  // The review anchor must stay documented in the file (drift = re-review).
+  // The review anchor must stay documented in the file (drift = re-review):
+  // the pinned-commit citation must track the CURRENT version.env pin.
   assert.ok(raw.includes("wss://dashscope.aliyuncs.com/api-ws/v1/inference"));
-  assert.ok(raw.includes("27399a2f"));
+  const pins = parseVersionEnv(read("deploy/xiaozhi/version.env"));
+  assert.ok(raw.includes((pins.get("XIAOZHI_SERVER_COMMIT") ?? "").slice(0, 8)));
 });
 
 test("gateway-asr-real render placeholder contract: the four injected keys, only on active lines", () => {
@@ -471,9 +473,11 @@ test("gateway-tts-real tier template: reviewed TTS selected at the pinned extens
       );
     }
   }
-  // The review anchor must stay documented in the file (drift = re-review).
+  // The review anchor must stay documented in the file (drift = re-review):
+  // the pinned-commit citation must track the CURRENT version.env pin.
   assert.ok(raw.includes("wss://dashscope.aliyuncs.com/api-ws/v1/inference/"));
-  assert.ok(raw.includes("27399a2f"));
+  const pins = parseVersionEnv(read("deploy/xiaozhi/version.env"));
+  assert.ok(raw.includes((pins.get("XIAOZHI_SERVER_COMMIT") ?? "").slice(0, 8)));
 });
 
 test("gateway-tts-real render placeholder contract: the four injected keys, only on active lines", () => {

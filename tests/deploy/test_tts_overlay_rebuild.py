@@ -14,7 +14,8 @@ mechanics drills run against a monkeypatched synthetic pin; the real pin's
 consistency across installer / OVERLAY.md / the 2026-10-25 reconciliation
 record is asserted textually. Passing here proves the rebuildable delivery's
 behavior — NOT vendor behavior, NOT device acceptance, NOT deployment
-adoption (that stays with #81, selection with #80).
+adoption (adoption/replay verification stays with #81; the D1 selection was
+decided 2026-10-28: v0.9.8).
 """
 
 import contextlib
@@ -87,7 +88,7 @@ class InstallerDrill(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def _install(self, target: Path, overlay: Path):
-        return self._run(target, overlay, "--acknowledge-undecided-selection")
+        return self._run(target, overlay, "--acknowledge-selection-v0.9.8")
 
     def _verify(self, target: Path, pin=SYNTH_PIN):
         return self._run(target, None, "--verify-only", pin=pin)
@@ -95,7 +96,7 @@ class InstallerDrill(unittest.TestCase):
     def _rollback(self, target: Path):
         return self._run(target, None, "--rollback")
 
-    def test_install_requires_the_undecided_selection_ack(self):
+    def test_install_requires_the_selection_ack(self):
         with tempfile_dir() as tmp:
             target = make_tree(tmp)
             overlay = tmp / "overlay.py"
@@ -167,7 +168,7 @@ class InstallerDrill(unittest.TestCase):
             # The REAL recorded pin + a synthetic file: the hash guard (not
             # the opt-in guard) is what must refuse here — hence the ack flag
             # IS supplied, and the refusal still happens before any write.
-            code, _, err = self._run(target, overlay, "--acknowledge-undecided-selection", pin=RECORDED_PIN)
+            code, _, err = self._run(target, overlay, "--acknowledge-selection-v0.9.8", pin=RECORDED_PIN)
             self.assertEqual(code, 1)
             self.assertIn("does not match the recorded pin", err)
             self.assertEqual(dest_of(target).read_bytes(), PRE_OVERLAY, "a refused install must not change the module")
@@ -221,7 +222,7 @@ class InstallerDrill(unittest.TestCase):
             (target / "main" / "xiaozhi-server").mkdir(parents=True)
             overlay = tmp / "overlay.py"
             overlay.write_bytes(SYNTH_OVERLAY)
-            code, _, err = self._run(target, overlay, "--acknowledge-undecided-selection")
+            code, _, err = self._run(target, overlay, "--acknowledge-selection-v0.9.8")
             self.assertEqual(code, 1)
             self.assertIn("TTS provider directory missing", err)
 
@@ -264,7 +265,7 @@ class InstallerDrill(unittest.TestCase):
             second = tmp / "overlay-v2.py"
             second.write_bytes(b"P0-01-SYNTHETIC-OVERLAY-V2\n")
             second_sha = hashlib.sha256(second.read_bytes()).hexdigest()
-            code, out, _ = self._run(target, second, "--acknowledge-undecided-selection", pin=second_sha)
+            code, out, _ = self._run(target, second, "--acknowledge-selection-v0.9.8", pin=second_sha)
             self.assertEqual(code, 0)
             drift_sha = hashlib.sha256(drifted).hexdigest()
             self.assertIn("replacing existing content", out)

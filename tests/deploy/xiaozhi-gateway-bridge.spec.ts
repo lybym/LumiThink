@@ -15,6 +15,16 @@ import { readFileSync } from "node:fs";
 
 const read = (path: string): string => readFileSync(path, "utf8");
 
+// The fork-patch registry must cite the CURRENT pin (deploy/xiaozhi/version.env
+// is the single source of truth): a pin bump without re-registering the
+// baseline fails here (drift = re-verify the anchors, runbook §3.7).
+const pinnedCommit =
+  read("deploy/xiaozhi/version.env")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("XIAOZHI_SERVER_COMMIT="))
+    ?.split("=")[1] ?? "";
+
 test("gateway-bridge tier template: the bridge LLM is the ONLY selected LLM, token by env name", () => {
   const raw = read("deploy/xiaozhi/config/gateway-bridge.yaml");
 
@@ -104,7 +114,8 @@ test("fork-patch registry: five registered patches, pinned commit named, machine
   const doc = read("deploy/xiaozhi/fork-patches.md");
   const installer = read("deploy/xiaozhi/gateway_bridge/install_bridge.py");
 
-  assert.match(doc, /27399a2fb64b5910196f438a256ce0a9f868481f/, "registry must name the pinned commit");
+  assert.match(pinnedCommit, /^[0-9a-f]{40}$/, "version.env must carry a 40-hex server commit pin");
+  assert.match(doc, new RegExp(pinnedCommit), "registry must name the pinned commit");
   for (let i = 1; i <= 5; i += 1) {
     assert.ok(doc.includes(`${i}/5`), `fork-patches.md missing patch ${i}/5`);
   }
