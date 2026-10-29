@@ -1,0 +1,6 @@
+# P2-03 (issue #115): the XiaozhiA2AProvider rides the OFFICIAL A2A Python
+# SDK, locked to the same verified version as the P1-11 interop probe
+# (docs/reviews/2026-10-25-p0-02-a2a-sdk-compat-matrix.md). No other runtime
+# dependency is admitted — see tests/test_structure_redline.py, which fails
+# the build if a vendor/model SDK import ever appears.
+a2a-sdk==1.2.3

@@ -20,12 +20,14 @@ on:
     paths:
       - 'services/a2a-server/**'
       - 'services/dsh-a2a-client/**'
+      - 'services/xiaozhi-a2a-provider/**'
       - '.github/workflows/p1-a2a-server-gate.yml'
   push:
     branches: [main]
     paths:
       - 'services/a2a-server/**'
       - 'services/dsh-a2a-client/**'
+      - 'services/xiaozhi-a2a-provider/**'
       - '.github/workflows/p1-a2a-server-gate.yml'
   workflow_dispatch:
 
@@ -183,3 +185,72 @@ jobs:
       - name: Real-link integration suite (real a2a-server + dsh-worker subprocesses)
         working-directory: services/dsh-a2a-client
         run: pnpm run test:integration
+
+  # P2-03 (issue #115): the XiaozhiA2AProvider (services/xiaozhi-a2a-provider,
+  # third isolated package — ADR-0013 precedent) drives the REAL a2a-server
+  # through the official a2a-sdk==1.2.3 Python client with a synthetic
+  # xiaozhi_device credential bootstrap: full voice-turn chain (real
+  # dsh-worker subprocesses), device-interrupt cancel with worker stop
+  # evidence, SSE-disconnect recovery (snapshot rebuild + resubscribe),
+  # identity negatives and the source-level vendor red line. Zero skips: a
+  # missing interpreter/SDK/Node is an explicit failure.
+  xiaozhi-a2a-provider:
+    name: Xiaozhi A2A provider gate (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install exact pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Install exact Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Assert the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_node="$(node --version)"
+          actual_pnpm="$(pnpm --version)"
+          echo "node=${actual_node} pnpm=${actual_pnpm}"
+          [ "${actual_node}" = "v${NODE_VERSION}" ]
+          [ "${actual_pnpm}" = "${PNPM_VERSION}" ]
+
+      - name: Prove the clean-environment contract (no real credentials/data)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL must stay unset in the Xiaozhi provider gate"
+            exit 1
+          fi
+          for key in DEEPSEEK_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY; do
+            if [ -n "${!key:-}" ]; then
+              echo "::error::${key} must stay unset in the Xiaozhi provider gate"
+              exit 1
+            fi
+          done
+          echo "clean environment confirmed"
+
+      - name: Frozen-lockfile install (a2a-server, integration target)
+        working-directory: services/a2a-server
+        run: pnpm install --frozen-lockfile
+
+      - name: Install exact Python 3.12 (official a2a-sdk client)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the locked official Python SDK (a2a-sdk==1.2.3)
+        run: python -m pip install --disable-pip-version-check a2a-sdk==1.2.3
+
+      - name: Provider suite (contract + provider + red line + real link, zero skips)
+        run: python -m unittest discover -s services/xiaozhi-a2a-provider/tests -t services/xiaozhi-a2a-provider -v
