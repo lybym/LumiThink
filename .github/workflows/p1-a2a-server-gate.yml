@@ -19,11 +19,13 @@ on:
   pull_request:
     paths:
       - 'services/a2a-server/**'
+      - 'services/dsh-a2a-client/**'
       - '.github/workflows/p1-a2a-server-gate.yml'
   push:
     branches: [main]
     paths:
       - 'services/a2a-server/**'
+      - 'services/dsh-a2a-client/**'
       - '.github/workflows/p1-a2a-server-gate.yml'
   workflow_dispatch:
 
@@ -108,3 +110,76 @@ jobs:
       - name: Protocol suite (official SDK client round-trip, errors, SSE, contracts)
         working-directory: services/a2a-server
         run: pnpm test
+
+  # P2-02 (issue #114): the DSH A2A Client (services/dsh-a2a-client, the
+  # second isolated package — ADR-0013 precedent, ADR-0018 Appendix B) must
+  # frozen-install, typecheck and pass its unit/contract suite PLUS the
+  # real-link integration suite (it spawns the REAL a2a-server entry from
+  # the sibling package in dsh-worker mode with file SQLite and a synthetic
+  # two-credential bootstrap). Installation surfaces stay separate: each
+  # isolated package installs from its own lockfile in its own directory.
+  dsh-a2a-client:
+    name: DSH A2A client gate (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install exact pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Install exact Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Assert the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_node="$(node --version)"
+          actual_pnpm="$(pnpm --version)"
+          echo "node=${actual_node} pnpm=${actual_pnpm}"
+          [ "${actual_node}" = "v${NODE_VERSION}" ]
+          [ "${actual_pnpm}" = "${PNPM_VERSION}" ]
+
+      - name: Prove the clean-environment contract (no real credentials/data)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL must stay unset in the DSH A2A client gate"
+            exit 1
+          fi
+          for key in DEEPSEEK_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY; do
+            if [ -n "${!key:-}" ]; then
+              echo "::error::${key} must stay unset in the DSH A2A client gate"
+              exit 1
+            fi
+          done
+          echo "clean environment confirmed"
+
+      - name: Frozen-lockfile install (a2a-server, integration target)
+        working-directory: services/a2a-server
+        run: pnpm install --frozen-lockfile
+
+      - name: Frozen-lockfile install (dsh-a2a-client, isolated package)
+        working-directory: services/dsh-a2a-client
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (isolated tsconfig)
+        working-directory: services/dsh-a2a-client
+        run: pnpm run typecheck
+
+      - name: Unit/contract suite (in-process mock, ADR-0018 Appendix A methodology)
+        working-directory: services/dsh-a2a-client
+        run: pnpm test
+
+      - name: Real-link integration suite (real a2a-server + dsh-worker subprocesses)
+        working-directory: services/dsh-a2a-client
+        run: pnpm run test:integration

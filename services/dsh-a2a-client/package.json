@@ -1,0 +1,22 @@
+{
+  "name": "@lumithink/dsh-a2a-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "P2-02 (issue #114) LumiThink DSH A2A Client: official @a2a-js/sdk@1.3.0 lightweight client adapter for the external working DSH. Implements the ADR-0018 five hard constraints (credential binding via the official AuthenticationHandler face, persistent messageId/taskId ledger before-send and on-arrival, independent cancel context per TASK_LIFECYCLE §7.4, §5.3 first-response-loss recovery, structured input-required/auth-required handles). External client boundary only: no household database access, no internal runtime, no UDS. Synthetic data only; no real credentials; not the working-DSH production registration (operator-side work, PENDING).",
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-isolation=none tests/ledger.spec.ts tests/config.spec.ts tests/client-send.spec.ts tests/client-cancel.spec.ts tests/client-multiturn.spec.ts tests/client-recovery.spec.ts tests/client-auth.spec.ts tests/client-stream.spec.ts",
+    "test:integration": "node --test --test-isolation=none tests/integration/dsh-client-integration.spec.ts"
+  },
+  "dependencies": {
+    "@a2a-js/sdk": "1.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3"
+  }
+}

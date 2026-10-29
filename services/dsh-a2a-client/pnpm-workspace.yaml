@@ -1,0 +1,11 @@
+# Single-package project file; in pnpm >=10 it also hosts install settings.
+# Same rationale as services/a2a-server and poc/a2a-compat (docs/adr/0013
+# isolated-package precedent): the isolated junction layout breaks ESM
+# resolution on this Windows sandbox. A hoisted (npm-like) layout keeps the
+# pinned dependency graph from pnpm-lock.yaml while keeping resolution
+# portable. This file also fully isolates this package from the root
+# pnpm-workspace.yaml settings (overrides, hoist:false, onlyBuiltDependencies)
+# — the root stays a frozen, dependency-surface-locked workspace and the root
+# dependency surface is unchanged by this package (ADR-0013 discipline,
+# reused by ADR-0018 Appendix B for the client half).
+nodeLinker: hoisted
