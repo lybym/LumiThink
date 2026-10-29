@@ -1,4 +1,4 @@
-"""XiaozhiA2AProvider (P2-03, issue #115).
+"""XiaozhiA2AProvider (P2-03, issue #115; delivery watermark layer P2-04, #116).
 
 The lightweight voice-channel adapter of A2A_DESIGN §10.1: it converts
 LumiThink A2A Server tasks (status + artifact stream) into the text
@@ -57,6 +57,19 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Generator, Iterable, List, Optional
 
+from .delivery_ledger import (
+    DELIVERY_STATE_COMPLETE,
+    DELIVERY_STATE_PARTIAL_STOPPED,
+    DELIVERY_STATE_UNCERTAIN,
+    DeliveryLedgerError,
+    FileDeliveryLedger,
+    MemoryDeliveryLedger,
+    STATUS_DUPLICATE,
+    STATUS_RECORDED,
+    STATUS_STALE_GENERATION,
+    STOP_DEVICE_ABORT,
+    STOP_DEVICE_CLOSED,
+)
 from .output_contract import (
     AnswerStreamAccumulator,
     ContractViolation,
@@ -75,6 +88,7 @@ DEFAULT_MAX_PROMPT_CHARS = 512   # same transient cap as the UDS bridge
 QUEUE_SOFT_TIMEOUT_S = 0.25
 MAX_RESEND_ATTEMPTS = 1          # §5.3 first-response-loss recovery, bounded
 MAX_RESUBSCRIBE_ATTEMPTS = 1     # §9.3 reconnect, bounded
+CRITICAL_PUSH_RETRY_S = 2.0      # P2-05 fix: settlement frames retry before an honest drop
 
 # Enumerated, content-free failure reasons (stable evidence vocabulary).
 REASON_SESSION_NOT_REGISTERED = "session_not_registered"
@@ -92,6 +106,7 @@ REASON_TASK_NOT_FOUND = "task_not_found"
 REASON_CONTEXT_ACCESS_DENIED = "context_access_denied"
 REASON_CONFLICT = "message_id_conflict"
 REASON_SERVER_ERROR = "server_error"
+REASON_DELIVERY_WATERMARK_UNRELIABLE = "delivery_watermark_unreliable"
 
 # Presentation of the delivery status (A2A_DESIGN §10.2/§9.3).
 PRESENTATION_COMPLETE = "complete"
@@ -207,6 +222,21 @@ def _text_of_parts(parts: Iterable[Any]) -> str:
     return "".join(chunks)
 
 
+@dataclass(frozen=True)
+class _DeliveredFragment:
+    """The §9.3 identity of one delivered fragment (never the text itself).
+
+    Rides through the bounded queue so the consumer thread can persist the
+    channel-delivery watermark exactly when the text leaves the generator.
+    """
+
+    artifact_id: str
+    chunk_id: str
+    start_byte: int
+    end_byte: int
+    sha256: str
+
+
 @dataclass
 class TurnOutcome:
     """Content-free, per-turn evidence (what the channel may record)."""
@@ -231,6 +261,14 @@ class TurnOutcome:
     resubscribed: bool = False
     resend_recovered: bool = False
     error_reason: Optional[str] = None
+    # -- P2-04 channel-delivery watermark face (issue #116) ---------------
+    generation: int = 0
+    delivery_stopped: bool = False
+    delivery_stop_reason: Optional[str] = None
+    filtered_after_stop_fragments: int = 0
+    stale_generation_fragments: int = 0
+    watermark_write_failures: int = 0
+    queue_full_drops: int = 0
 
 
 @dataclass
@@ -250,10 +288,12 @@ class _TurnController:
         self.deadline = deadline
         self.queue: "queue.Queue[tuple]" = queue.Queue(maxsize=64)
         self.cancel_requested = threading.Event()
+        self.playback_stopped = threading.Event()  # local immediate 止播标记 (P2-04)
         self.consumer_gone = threading.Event()
         self.cancel_reason: Optional[str] = None
         self.task_id = ""
         self.context_id = ""
+        self.generation = 0  # channel-delivery generation (ledger.begin_turn)
         self.outcome = TurnOutcome(session_id=session_id, message_id=message_id)
         self.accumulator = AnswerStreamAccumulator("")
 
@@ -264,35 +304,71 @@ class _TurnController:
             self.outcome.cancel_requested = True
             logger.info("[%s] cancel intent recorded (%s) task=%s", TAG, reason, self.task_id or "pending")
 
+    def stop_playback(self, reason: str) -> None:
+        """Local immediate delivery/playback stop marker (issue #116 AC 3).
+
+        Recorded BEFORE the CancelTask goes out (§10.3 step 1: 小智立即止播);
+        late stream fragments are filtered against this marker.
+        """
+        if not self.playback_stopped.is_set():
+            self.playback_stopped.set()
+            self.outcome.delivery_stopped = True
+            self.outcome.delivery_stop_reason = reason
+            logger.info(
+                "[%s] local playback/delivery stop recorded (%s) task=%s", TAG,
+                reason, self.task_id or "pending",
+            )
+
     def remaining(self) -> float:
         return max(0.05, self.deadline - time.monotonic())
 
     def expired(self) -> bool:
         return time.monotonic() >= self.deadline
 
-    def push_text(self, text: str) -> bool:
-        """Bounded handoff to the consumer; False when nobody is consuming."""
+    def push_text(self, text: str, meta: Optional[_DeliveredFragment] = None) -> bool:
+        """Bounded handoff to the consumer; False when nobody is consuming.
+
+        ``meta`` carries the §9.3 fragment identity so the consumer thread
+        can persist the delivery watermark exactly when the text leaves the
+        generator (the honest delivery point — §10.2 渠道交付).
+        """
         while True:
             if self.consumer_gone.is_set() or self.expired():
                 return False
             try:
-                self.queue.put(("text", text), timeout=QUEUE_SOFT_TIMEOUT_S)
+                self.queue.put(("text", text, meta), timeout=QUEUE_SOFT_TIMEOUT_S)
                 return True
             except queue.Full:
                 continue
 
+    def _push_critical(self, item: tuple, kind: str) -> None:
+        """Bounded-retry handoff of a settlement frame (P2-03 review P2-⑤).
+
+        A silently dropped ``end``/``error`` frame used to leave no trace;
+        the fix retries briefly, then records the drop on the outcome and
+        logs it (content-free) — the generator's worker-exit detection stays
+        the fallback, and the evidence is now honest.
+        """
+        deadline = time.monotonic() + CRITICAL_PUSH_RETRY_S
+        while True:
+            try:
+                self.queue.put(item, timeout=QUEUE_SOFT_TIMEOUT_S)
+                return
+            except queue.Full:
+                if self.consumer_gone.is_set() or time.monotonic() >= deadline:
+                    self.outcome.queue_full_drops += 1
+                    logger.error(
+                        "[%s] settlement frame dropped after bounded retry (kind=%s, drops=%d) task=%s",
+                        TAG, kind, self.outcome.queue_full_drops, self.task_id or "unknown",
+                    )
+                    return
+
     def push_end(self) -> None:
-        try:
-            self.queue.put(("end", self.outcome), timeout=QUEUE_SOFT_TIMEOUT_S)
-        except queue.Full:  # pragma: no cover - the drain loop keeps up
-            pass
+        self._push_critical(("end", self.outcome, None), "end")
 
     def push_error(self, error: ProviderTurnError) -> None:
         self.outcome.error_reason = error.reason
-        try:
-            self.queue.put(("error", error), timeout=QUEUE_SOFT_TIMEOUT_S)
-        except queue.Full:  # pragma: no cover
-            pass
+        self._push_critical(("error", error, None), "error")
 
 
 class XiaozhiA2AProvider:
@@ -313,7 +389,13 @@ class XiaozhiA2AProvider:
       ``request_timeout_s`` (30), ``max_prompt_chars`` (512);
     - ``continue_session_context``: continue the session's A2A context
       across turns (default True; new messageId + existing contextId → a
-      new task in the same context, A2A_DESIGN §9.2).
+      new task in the same context, A2A_DESIGN §9.2);
+    - ``delivery_ledger_path`` (P2-04): path of the durable channel-delivery
+      watermark ledger (FileDeliveryLedger, atomic-write JSON — A2A_DESIGN
+      §10.2/§11 and TASK_LIFECYCLE §6.2). When omitted, a process-local
+      MemoryDeliveryLedger is used (honest for the process lifetime; durable
+      deployments MUST wire a file path). A corrupt/unwritable ledger fails
+      construction (fail-closed, reason ``delivery_ledger_unusable``).
 
     ``client_factory`` / ``cancel_client_factory`` are injection seams
     returning duck-typed async clients (``send_message/get_task/cancel_task/
@@ -389,6 +471,29 @@ class XiaozhiA2AProvider:
         self._lock = threading.Lock()
         self._agent_card: Any = None
         self._last_outcomes: Dict[str, TurnOutcome] = {}
+
+        # -- P2-04 channel-delivery watermark ledger (issue #116) ----------
+        ledger_path = config.get("delivery_ledger_path")
+        if ledger_path is not None:
+            if not isinstance(ledger_path, str) or not ledger_path.strip():
+                raise ProviderConfigError(
+                    "delivery_ledger_path_invalid",
+                    "delivery_ledger_path must be a non-empty string when provided",
+                )
+            try:
+                self._delivery_ledger = FileDeliveryLedger(ledger_path)
+            except DeliveryLedgerError as error:
+                raise ProviderConfigError(
+                    "delivery_ledger_unusable",
+                    "the channel-delivery ledger refuses to open (fail-closed): "
+                    "{} — repair or move aside the ledger file".format(error.reason),
+                ) from error
+        else:
+            self._delivery_ledger = MemoryDeliveryLedger()
+            logger.info(
+                "[%s] delivery ledger is process-local (wire delivery_ledger_path for a durable watermark)", TAG,
+            )
+
         # Fail fast on a missing official SDK (the ZERO-SKIP contract: a
         # missing interpreter/SDK must be an explicit, remedied error —
         # never a silent degradation). The import stays lazy at module load
@@ -418,7 +523,9 @@ class XiaozhiA2AProvider:
         """Device WebSocket closed: stop local playback bookkeeping only.
 
         This never cancels the A2A task (§10.3: disconnect ≠ cancel); the
-        server-side execution deadline owns any orphaned execution.
+        server-side execution deadline owns any orphaned execution. The
+        delivery watermark records the stop as "uncertain" (§10.2: 反馈不足
+        时记录交付不确定).
         """
         with self._lock:
             state = self._sessions.pop(session_id, None)
@@ -427,6 +534,8 @@ class XiaozhiA2AProvider:
         controller = state.controller
         if controller is not None:
             controller.consumer_gone.set()
+            controller.stop_playback(STOP_DEVICE_CLOSED)
+            self._record_ledger_stop(session_id, STOP_DEVICE_CLOSED, DELIVERY_STATE_UNCERTAIN)
             logger.info(
                 "[%s] device session closed session=%s task=%s (playback stops; no cancel sent)",
                 TAG, session_id, controller.task_id or "unknown",
@@ -437,20 +546,35 @@ class XiaozhiA2AProvider:
     def lumi_on_abort(self, session_id: str) -> Dict[str, Any]:
         """Device interrupt: records the cancel intent (never blocks/raises).
 
-        The actual CancelTask runs on the turn worker through an INDEPENDENT
-        short-timeout client (§7.4). The returned snapshot is content-free.
+        The local stop-playback marker is set FIRST (§10.3 step 1: 小智立即
+        止播，清理旧轮音频队列), the durable delivery stop lands in the
+        ledger, and the actual CancelTask runs on the turn worker through an
+        INDEPENDENT short-timeout client (§7.4). The returned snapshot is
+        content-free.
         """
         with self._lock:
             state = self._sessions.get(session_id)
             controller = state.controller if state is not None else None
         if controller is None:
             return {"status": "no_active_turn", "sessionId": session_id}
+        controller.stop_playback(STOP_DEVICE_ABORT)
+        self._record_ledger_stop(session_id, STOP_DEVICE_ABORT, DELIVERY_STATE_PARTIAL_STOPPED)
         controller.request_cancel("device_abort")
         return {
             "status": "cancel_intent_recorded",
             "sessionId": session_id,
             "taskId": controller.task_id,
+            "playbackStopped": True,
         }
+
+    def _record_ledger_stop(self, session_id: str, reason: str, delivery_state: str) -> None:
+        """Durable stop marker; the interrupt path never raises on ledger damage."""
+        try:
+            self._delivery_ledger.record_stop(session_id, reason, delivery_state)
+        except DeliveryLedgerError as error:
+            logger.warning(
+                "[%s] delivery stop marker failed reason=%s session=%s", TAG, error.reason, session_id
+            )
 
     def last_outcome(self, session_id: str) -> Optional[TurnOutcome]:
         """The most recent content-free turn outcome for the session."""
@@ -460,6 +584,20 @@ class XiaozhiA2AProvider:
             return state.controller.outcome
         with self._lock:
             return self._last_outcomes.get(session_id)
+
+    def delivery_summary(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """The content-free channel-delivery record of the latest turn.
+
+        A2A_DESIGN §10.2's optional delivery-digest face: delivered
+        fragments/bytes, stop reason, delivery state, and the READ-ONLY
+        observed terminal Task flags (playback completion is recorded next
+        to — never instead of — the Task state). Missing = unknown, and it
+        never blocks the agent.
+        """
+        try:
+            return self._delivery_ledger.delivery_summary(session_id)
+        except DeliveryLedgerError:  # pragma: no cover - defensive
+            return None
 
     def response(
         self,
@@ -497,6 +635,18 @@ class XiaozhiA2AProvider:
             deadline=time.monotonic() + self._turn_timeout_s,
         )
         controller.context_id = state.context_id if self._continue_context else ""
+        # P2-04: a new voice turn invalidates the previous turn's delivery
+        # watermark (ledger generation bump — issue #116 AC 5). A failing
+        # ledger fails the turn explicitly: delivering without any watermark
+        # basis would make the reconnect gate meaningless.
+        try:
+            controller.generation = self._delivery_ledger.begin_turn(session_id)
+            controller.outcome.generation = controller.generation
+        except DeliveryLedgerError as error:
+            raise ProviderTurnError(
+                REASON_DELIVERY_WATERMARK_UNRELIABLE,
+                "delivery ledger unusable at turn start ({})".format(error.reason),
+            ) from error
         with self._lock:
             state.controller = controller
         worker = threading.Thread(
@@ -516,12 +666,14 @@ class XiaozhiA2AProvider:
                     except Exception:  # a broken callback must not kill the turn
                         logger.warning("[%s] cancel_check callback raised; ignored", TAG)
                 try:
-                    kind, payload = controller.queue.get(timeout=QUEUE_SOFT_TIMEOUT_S)
+                    kind, payload, meta = controller.queue.get(timeout=QUEUE_SOFT_TIMEOUT_S)
                 except queue.Empty:
                     if not worker.is_alive() and controller.queue.empty():
                         break
                     continue
                 if kind == "text":
+                    if meta is not None and not self._gate_channel_delivery(controller, meta):
+                        continue  # duplicate / stale-generation: never handed over twice
                     yield payload
                 elif kind == "end":
                     return
@@ -563,6 +715,62 @@ class XiaozhiA2AProvider:
                 if isinstance(content, str) and content.strip():
                     return content.strip()
         return ""
+
+    # -- channel-delivery watermark (P2-04, issue #116) --------------------
+
+    def _gate_channel_delivery(self, controller: _TurnController, meta: _DeliveredFragment) -> bool:
+        """The final delivery gate, exactly when text leaves the generator.
+
+        The §9.3 accumulator already enforced dedup/continuity/digest; this
+        gate persists the consumer-side watermark under the stable ids
+        (issue #116 AC 1) and blocks what must never reach the consumer:
+
+        - ``stale_generation`` — a fragment of a superseded turn (AC 5: old
+          content never enters the new turn);
+        - ledger ``duplicate`` — defensive second delivery of the same
+          stable fragment.
+
+        A ledger WRITE failure cannot un-deliver a §9.3-validated fragment,
+        so delivery proceeds, the failure is counted (watermark uncertainty
+        is honest — §10.2) and the reconnect gate will fail closed if the
+        durable copy is actually damaged.
+        """
+        outcome = controller.outcome
+        try:
+            status = self._delivery_ledger.record_delivery(
+                session_id=controller.session_id,
+                generation=controller.generation,
+                task_id=controller.task_id,
+                artifact_id=meta.artifact_id,
+                chunk_id=meta.chunk_id,
+                start_byte=meta.start_byte,
+                end_byte=meta.end_byte,
+                sha256=meta.sha256,
+            )
+        except DeliveryLedgerError as error:
+            outcome.watermark_write_failures += 1
+            logger.warning(
+                "[%s] delivery watermark record failed reason=%s task=%s (delivery uncertainty recorded)",
+                TAG, error.reason, controller.task_id or "unknown",
+            )
+            return True
+        if status == STATUS_STALE_GENERATION:
+            outcome.stale_generation_fragments += 1
+            logger.warning(
+                "[%s] stale-generation fragment blocked task=%s (old-turn content never enters a new turn)",
+                TAG, controller.task_id or "unknown",
+            )
+            return False
+        if status == STATUS_DUPLICATE:
+            outcome.duplicate_fragments += 1
+            logger.warning(
+                "[%s] ledger-duplicate fragment blocked task=%s", TAG, controller.task_id or "unknown"
+            )
+            return False
+        if status == STATUS_RECORDED:
+            outcome.delivered_fragments += 1
+            outcome.delivered_bytes += max(0, meta.end_byte - meta.start_byte)
+        return True
 
     # -- official SDK wiring (lazy; zero third-party imports at module load)
 
@@ -869,11 +1077,34 @@ class XiaozhiA2AProvider:
             if result.duplicate:
                 controller.outcome.duplicate_fragments += 1
                 return
-            if controller.outcome.fenced or controller.cancel_requested.is_set():
-                return  # fenced runs and interrupted turns never play further
-            controller.outcome.delivered_fragments += 1
-            controller.outcome.delivered_bytes += len(result.new_text.encode("utf-8"))
-            controller.push_text(result.new_text)
+            if (
+                controller.outcome.fenced
+                or controller.cancel_requested.is_set()
+                or controller.playback_stopped.is_set()
+            ):
+                # Fenced runs, interrupted turns and locally stopped playback
+                # never deliver further (issue #116 AC 3): late arrivals are
+                # counted and durably recorded, never played (§6.2 已发入网络
+                # 或已播放的内容不能撤回，应由渠道进一步止播).
+                controller.outcome.filtered_after_stop_fragments += 1
+                if controller.task_id:
+                    try:
+                        self._delivery_ledger.record_filtered(
+                            controller.session_id, controller.task_id, controller.generation
+                        )
+                    except DeliveryLedgerError:
+                        pass  # the outcome counter above stays the honest record
+                return
+            controller.push_text(
+                result.new_text,
+                _DeliveredFragment(
+                    artifact_id=result.artifact_id,
+                    chunk_id=result.chunk_id,
+                    start_byte=result.start_byte,
+                    end_byte=result.end_byte,
+                    sha256=result.sha256,
+                ),
+            )
         elif which == "status_update":
             status = response.status_update
             controller.outcome.state = _state_name(status.status.state)
@@ -963,6 +1194,42 @@ class XiaozhiA2AProvider:
             controller.outcome.presentation = PRESENTATION_FAILED
         else:
             controller.outcome.presentation = PRESENTATION_ERROR
+        self._record_settlement_observation(controller)
+
+    def _record_settlement_observation(self, controller: _TurnController) -> None:
+        """Persists the settlement as a channel-side READ-ONLY observation.
+
+        播放完成 ≠ Task 完成 (issue #116 AC 4): the observed Task state and
+        the lumithinkResult flags land NEXT TO the delivery state in the
+        ledger — never instead of it, and never fed back into any task
+        authority (the server-side SQLite store stays the only lifecycle
+        authority, the P2-02 boundary statement).
+        """
+        if not controller.task_id:
+            return
+        presentation = controller.outcome.presentation
+        if presentation == PRESENTATION_COMPLETE:
+            delivery_state = DELIVERY_STATE_COMPLETE
+        elif presentation in (PRESENTATION_COMPLETED_SUPPRESSED, PRESENTATION_CANCELED):
+            delivery_state = DELIVERY_STATE_PARTIAL_STOPPED
+        else:
+            delivery_state = DELIVERY_STATE_UNCERTAIN
+        try:
+            self._delivery_ledger.record_task_observation(
+                session_id=controller.session_id,
+                task_id=controller.task_id,
+                generation=controller.generation,
+                task_state=controller.outcome.state,
+                answer_complete=controller.outcome.answer_complete,
+                output_suppressed_after_cancel=controller.outcome.output_suppressed_after_cancel,
+                delivery_state=delivery_state,
+            )
+        except DeliveryLedgerError as error:
+            controller.outcome.watermark_write_failures += 1
+            logger.warning(
+                "[%s] settlement observation record failed reason=%s task=%s",
+                TAG, error.reason, controller.task_id,
+            )
 
     # -- cancel (§7.4: independent context) --------------------------------
 
@@ -1137,6 +1404,24 @@ class XiaozhiA2AProvider:
                 ProviderTurnError(REASON_RECOVERY_EXHAUSTED, "resubscribe budget exhausted")
             )
             return "done"
+        # P2-04 reconnect gate (issue #116 AC 8): continuing delivery after a
+        # disconnect requires a RELIABLE consumption watermark. A damaged or
+        # vanished durable ledger means fail-closed — stop the automatic
+        # continuation, surface the explicit recovery state, never replay
+        # from scratch (TASK_LIFECYCLE §6.2 / A2A_DESIGN §9.3).
+        try:
+            self._delivery_ledger.verify_integrity(controller.session_id)
+        except DeliveryLedgerError as error:
+            logger.error(
+                "[%s] DELIVERY WATERMARK UNRELIABLE reason=%s task=%s "
+                "(explicit recovery state; no automatic replay, no cancel sent)",
+                TAG, error.reason, controller.task_id,
+            )
+            raise ProviderTurnError(
+                REASON_DELIVERY_WATERMARK_UNRELIABLE,
+                "no reliable consumption watermark; manual/upper-layer recovery required "
+                "(no automatic full replay)",
+            ) from error
         try:
             sub_stream = await turn_client.subscribe(
                 sdk["SubscribeToTaskRequest"](id=controller.task_id)

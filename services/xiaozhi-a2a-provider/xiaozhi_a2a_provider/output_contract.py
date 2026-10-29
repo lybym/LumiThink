@@ -141,13 +141,23 @@ def artifact_is_playable(artifact_metadata: object) -> bool:
 
 @dataclass
 class IngestResult:
-    """Outcome of one TaskArtifactUpdateEvent against the contract."""
+    """Outcome of one TaskArtifactUpdateEvent against the contract.
+
+    For a playable NEW fragment the ``lumithinkOutput`` identity fields
+    (``chunk_id``/``start_byte``/``end_byte``/``sha256``) ride along so the
+    channel-delivery watermark (P2-04) can persist the delivery record
+    under the §9.3 stable ids — the ledger never receives the text itself.
+    """
 
     artifact_id: str
     playable: bool
     duplicate: bool
     new_text: str
     artifact_complete: bool
+    chunk_id: str = ""
+    start_byte: int = 0
+    end_byte: int = 0
+    sha256: str = ""
 
 
 @dataclass
@@ -226,6 +236,8 @@ class AnswerStreamAccumulator:
                 return IngestResult(
                     artifact_id=artifact_id, playable=True, duplicate=True, new_text="",
                     artifact_complete=last_chunk,
+                    chunk_id=chunk.chunk_id, start_byte=chunk.start_byte,
+                    end_byte=chunk.end_byte, sha256=chunk.sha256,
                 )
             self.violations += 1
             raise ContractViolation(
@@ -260,6 +272,10 @@ class AnswerStreamAccumulator:
             duplicate=False,
             new_text=text,
             artifact_complete=bool(last_chunk),
+            chunk_id=chunk.chunk_id,
+            start_byte=chunk.start_byte,
+            end_byte=chunk.end_byte,
+            sha256=chunk.sha256,
         )
 
     def rebuild_from_snapshot(self, artifact_id: str, artifact_metadata: object, aggregated_text: str) -> None:
