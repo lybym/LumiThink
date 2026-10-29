@@ -77,10 +77,13 @@ pnpm run typecheck            # 根工作区类型检查 exit 0（根 tsconfig e
 
 CI 承载：`.github/workflows/p1-a2a-server-gate.yml` 新增 `dsh-a2a-client` job（同 pinned 工具链 24.21.0/10.34.7；两个隔离包各自 frozen install，安装面互不混合；clean-environment 契约同服务端 job——无 DATABASE_URL、无供应商凭据；单元 + 真实链路集成两步）；触发 paths 增加 `services/dsh-a2a-client/**`。
 
-## 6. 提交
+## 6. 提交与 CI
 
 - `feat(a2a): DSH A2A client package — official SDK adapter with durable ledger, §7.4 cancel propagation, §5.3 recovery (Refs #114)`（内容：services/dsh-a2a-client/**、根 package.json script、CI job）
 - `feat(a2a): P2-02 implementation record (Refs #114)`（docs/reviews）
+- `fix(a2a): integration restart test uses true crash stop (SIGKILL) — graceful stop settles sessions 'service_shutdown' before the scan (Refs #114)`（重启恢复用例的平台语义修正：优雅停机会先以 service_shutdown 结算会话，启动扫描无行可弃；真崩溃语义才能测到 §9 恢复路径——本地 Windows TerminateProcess 恰为崩溃语义，Linux CI 的 SIGTERM 不是，故显式 SIGKILL）
+
+CI（PR checks，HEAD 全绿）：`p1-a2a-server-gate.yml` 两个 job 全过——`A2A validation service`（含 Python 3.12 + `a2a-sdk==1.2.3` 的 python-interop 全量，本地环境缺口由此闭环）与新增 `DSH A2A client gate`（frozen install × 2 → typecheck → 单元 39 → 真实链路集成 5）；其余根回归 job（Root baseline / Release evals / Upgrade-rollback / Web mock E2E / Deployment / Linux smoke）全过。
 
 ## 7. 局限（如实）
 
