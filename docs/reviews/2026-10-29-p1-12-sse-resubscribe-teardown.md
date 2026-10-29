@@ -92,7 +92,7 @@ A 泊住（`cancel-test` 场景：任务已领取、`working`、断流不取消�
 
 ### 4.3 全量套件与类型检查
 
-〔实测 2026-10-29：`pnpm --dir services/a2a-server test` —— **191 tests / 189 pass / 2 fail / 0 skipped / 0 cancelled**；唯二失败即 `python-sdk-interop` 两例（本机无 ≥3.10 Python 解释器：`No Python interpreter found for the official a2a-sdk interop probe`——ZERO-SKIP 设计的显式失败，非本次改动引入；CI 由 setup-python 3.12 + `pip install a2a-sdk==1.2.3` 执行同一套件会绿）。其余 189 例含 stream-resilience、acceptance-idempotency、protocol-errors、p1-07-cancel、official-client-roundtrip、identity-service-acl 等全部既有断言全绿。〕根 `pnpm run typecheck`：**exit 0**。锁文件无变化（`@a2a-js/sdk` 未升级；仅 `services/a2a-server/package.json` 的 test 枚举追加新 spec）。
+〔实测 2026-10-29：`pnpm --dir services/a2a-server test` —— **191 tests / 189 pass / 2 fail / 0 skipped / 0 cancelled**；唯二失败即 `python-sdk-interop` 两例（本机无 ≥3.10 Python 解释器：`No Python interpreter found for the official a2a-sdk interop probe`——ZERO-SKIP 设计的显式失败，非本次改动引入；CI 由 setup-python 3.12 + `pip install a2a-sdk==1.2.3` 执行同一套件会绿）。其余 189 例含 stream-resilience、acceptance-idempotency、protocol-errors、p1-07-cancel、official-client-roundtrip、identity-service-acl 等全部既有断言全绿。〕类型检查：**`services/a2a-server` `tsc --noEmit` exit 0**（CI 门）与**根 `pnpm run typecheck` exit 0** 双绿（首推曾因服务级 tsconfig 的提升函数声明不继承控制流收窄报 TS18048，已修复并复验——见 git 历史 fix(a2a) CI typecheck 提交）。锁文件无变化（`@a2a-js/sdk` 未升级；仅 `services/a2a-server/package.json` 的 test 枚举追加新 spec）。
 
 ## 5. 版本边界与局限
 
