@@ -313,9 +313,12 @@ function loadDshClientModule(): Promise<DshClientModule> {
         }
       });
     }
-    // @ts-ignore -- cross-package import resolved at RUNTIME (junction above);
-    // the a2a-server typecheck surface does not install the sibling package.
-    const mod = (await import('../../dsh-a2a-client/src/index.ts')) as unknown as DshClientModule;
+    // Non-literal specifier: tsc cannot resolve it statically (the sibling
+    // package is NOT installed on the a2a-server gate's typecheck surface),
+    // so the sibling's sources never enter the typecheck graph; Node resolves
+    // the absolute file URL at runtime, after the junction above exists.
+    const clientModuleUrl = new URL('../../dsh-a2a-client/src/index.ts', import.meta.url).href;
+    const mod = (await import(clientModuleUrl)) as unknown as DshClientModule;
     assert.equal(typeof mod.DshA2aClient, 'function', 'dsh-a2a-client exports DshA2aClient');
     return mod;
   })();
