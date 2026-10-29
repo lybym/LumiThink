@@ -226,6 +226,15 @@ class TestFileLedgerPersistence(unittest.TestCase):
             FileDeliveryLedger(self.path)
         self.assertEqual(caught.exception.reason, "ledger_corrupt")
 
+    def test_older_version_refuses_to_open(self):
+        # 版本严格性对称（P2-05 review）：打开与完整性闸门同为精确版本匹配——
+        # 过旧（或 0/负数）与过新同样拒绝。
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump({"version": DELIVERY_LEDGER_SCHEMA_VERSION - 1, "sessions": {}}, handle)
+        with self.assertRaises(DeliveryLedgerError) as caught:
+            FileDeliveryLedger(self.path)
+        self.assertEqual(caught.exception.reason, "ledger_corrupt")
+
     def test_unrecognized_shape_refuses_to_open(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump({"version": 1, "records": {}}, handle)
@@ -279,6 +288,29 @@ class TestIntegrityGate(unittest.TestCase):
         with self.assertRaises(DeliveryLedgerError) as caught:
             ledger.verify_integrity("s1")
         self.assertEqual(caught.exception.reason, "ledger_corrupt")
+
+    def test_pruned_session_on_disk_fails_closed(self):
+        # P2-05 review 钉死（fail-closed 语义）：磁盘文档合法且版本正确、但
+        # 已不含被跟踪 session（外部剪除/改写历史）——消费水位无法对持久副本
+        # 举证，完整性闸门拒绝并给出专用 reason（不静默重写内存视图）。
+        ledger = FileDeliveryLedger(self.path)
+        ledger.begin_turn("s1")
+        record(ledger)
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump({"version": DELIVERY_LEDGER_SCHEMA_VERSION, "sessions": {}}, handle)
+        with self.assertRaises(DeliveryLedgerError) as caught:
+            ledger.verify_integrity("s1")
+        self.assertEqual(caught.exception.reason, "session_missing_from_durable_ledger")
+
+    def test_valid_disk_document_still_containing_session_passes(self):
+        ledger = FileDeliveryLedger(self.path)
+        ledger.begin_turn("s1")
+        record(ledger)
+        with open(self.path, "r", encoding="utf-8") as handle:
+            doc = json.load(handle)
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)  # externally rewritten but complete
+        ledger.verify_integrity("s1")  # no raise
 
     def test_missing_file_with_no_tracked_session_passes(self):
         ledger = FileDeliveryLedger(os.path.join(self.directory, "fresh.json"))

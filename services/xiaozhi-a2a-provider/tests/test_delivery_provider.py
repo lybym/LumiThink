@@ -21,6 +21,7 @@ from xiaozhi_a2a_provider import provider as provider_module
 from xiaozhi_a2a_provider.delivery_ledger import (
     DELIVERY_STATE_PARTIAL_STOPPED,
     DELIVERY_STATE_UNCERTAIN,
+    LEDGER_REASON_ANOMALY,
     DeliveryLedgerError,
     MemoryDeliveryLedger,
 )
@@ -223,6 +224,90 @@ class TestDeliveryGate(unittest.TestCase):
         outcome = provider.last_outcome(session_id)
         # …but the uncertainty is counted honestly (§10.2 交付不确定).
         self.assertGreaterEqual(outcome.watermark_write_failures, 2)
+
+    def test_gate_fences_on_ledger_protocol_anomaly(self):
+        # P2-05 review fix: a durable-layer protocol anomaly (same stable id
+        # with a different range/digest, or a watermark rewind) escalates to
+        # the §9.3 fence — the fragment is refused and recorded, NOT played.
+        class _AnomalyLedger(MemoryDeliveryLedger):
+            def record_delivery(self, *args, **kwargs):
+                raise DeliveryLedgerError(
+                    LEDGER_REASON_ANOMALY, "synthetic stable-id anomaly"
+                )
+
+        provider = make_provider(FakeA2AClient())
+        provider._delivery_ledger = _AnomalyLedger()
+        session_id = "sess-gate-anomaly"
+        controller = self._controller(provider, session_id)
+        meta = _DeliveredFragment("answer-example", "answer#chunk-1", 0, 9, sha256_hex(CHUNK_1))
+        self.assertFalse(provider._gate_channel_delivery(controller, meta))
+        self.assertTrue(controller.outcome.fenced)
+        self.assertIn("same_id_different_delivery", controller.outcome.contract_reasons)
+        self.assertEqual(controller.outcome.error_reason, "output_contract_fence")
+        self.assertEqual(controller.outcome.delivered_fragments, 0)
+        self.assertEqual(controller.queue.qsize(), 0)  # nothing handed over
+
+    def test_ledger_anomaly_fences_turn_but_settlement_stays_honest(self):
+        # Full-turn shape (DETERMINISTIC: the terminal status is gated behind
+        # the fence landing — the anomaly hook releases it): the fenced turn
+        # delivers NOTHING, consumption continues to terminal so the task
+        # settlement stays honest, and the delivery record refuses to claim
+        # "complete" for a fenced turn.
+        release = threading.Event()
+
+        class _AnomalyLedger(MemoryDeliveryLedger):
+            def record_delivery(self, *args, **kwargs):
+                release.set()  # the fence has landed; let the terminal through
+                raise DeliveryLedgerError(
+                    LEDGER_REASON_ANOMALY, "synthetic stable-id anomaly"
+                )
+
+        client = FakeA2AClient()
+        client.queue_send([
+            task_frame(),
+            artifact_event("answer#chunk-1", CHUNK_1, 0, append=False),
+            status_event(TaskState.TASK_STATE_WORKING),
+            status_event(TaskState.TASK_STATE_COMPLETED),
+        ], gates={3: release})
+        client.queue_get(snapshot_task(
+            TaskState.TASK_STATE_COMPLETED,
+            artifacts=[answer_artifact(FULL_ANSWER)],
+            metadata={"lumithinkResult": {"version": 1, "outputSuppressedAfterCancel": False, "answerComplete": True}},
+        ))
+        provider = make_provider(client)
+        provider._delivery_ledger = _AnomalyLedger()
+        session_id = "sess-gate-anomaly-turn"
+        provider.lumi_on_hello(session_id)
+        texts = drain(provider, session_id, [{"role": "user", "content": "你好"}])
+        self.assertEqual(texts, [])  # fenced: zero delivery
+        outcome = provider.last_outcome(session_id)
+        self.assertTrue(outcome.fenced)
+        self.assertEqual(outcome.contract_violations, 1)
+        self.assertEqual(outcome.presentation, PRESENTATION_COMPLETE)  # task truth unchanged
+        self.assertEqual(outcome.delivered_fragments, 0)
+        summary = provider.delivery_summary(session_id)
+        self.assertEqual(summary["deliveryState"], DELIVERY_STATE_UNCERTAIN)  # fenced ≠ complete
+        self.assertEqual(summary["deliveredFragments"], 0)
+
+    def test_already_queued_fragment_still_delivered_after_stop_marker(self):
+        # 消费侧契约（Test gap 收口）：本地止播标记过滤的是"来源侧迟到"片段；
+        # 标记前已入队（已移交消费方）的片段在消费侧仍被交付并记录水位——
+        # 已发入内容不能撤回，由渠道清空自己的队列（§10.3/§6.2）。
+        provider = make_provider(FakeA2AClient())
+        session_id = "sess-gate-queued"
+        controller = self._controller(provider, session_id)
+        meta = _DeliveredFragment("answer-example", "answer#chunk-1", 0, 9, sha256_hex(CHUNK_1))
+        self.assertTrue(controller.push_text(CHUNK_1, meta))  # handed off BEFORE the marker
+        controller.stop_playback("device_abort")
+        kind, payload, queued_meta = controller.queue.get_nowait()
+        self.assertEqual(kind, "text")
+        self.assertIs(queued_meta, meta)
+        self.assertTrue(provider._gate_channel_delivery(controller, queued_meta))
+        self.assertEqual(controller.outcome.delivered_fragments, 1)
+        self.assertEqual(controller.outcome.filtered_after_stop_fragments, 0)
+        summary = provider.delivery_summary(session_id)
+        self.assertEqual(summary["deliveredFragments"], 1)
+        self.assertEqual(summary["filteredAfterStop"], 0)
 
 
 class TestReconnectGate(unittest.TestCase):

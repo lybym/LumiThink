@@ -63,6 +63,7 @@ from .delivery_ledger import (
     DELIVERY_STATE_UNCERTAIN,
     DeliveryLedgerError,
     FileDeliveryLedger,
+    LEDGER_REASON_ANOMALY,
     MemoryDeliveryLedger,
     STATUS_DUPLICATE,
     STATUS_RECORDED,
@@ -748,6 +749,20 @@ class XiaozhiA2AProvider:
                 sha256=meta.sha256,
             )
         except DeliveryLedgerError as error:
+            if error.reason == LEDGER_REASON_ANOMALY:
+                # Durable-layer protocol anomaly (same stable id re-delivered
+                # with a different range/digest, or a watermark rewind): the
+                # §9.3 fence discipline is the backstop here too — the
+                # fragment is NEVER played from a fenced stream, and the
+                # breach is recorded with an enumerated, content-free reason.
+                self._fence_on_violation(
+                    controller, ContractViolation(error.reason, error.detail)
+                )
+                return False
+            # Disk-level failures (ledger_unwritable ...) cannot un-deliver a
+            # §9.3-validated fragment: delivery proceeds with the uncertainty
+            # counted (§10.2 交付不确定) and the reconnect gate will fail
+            # closed if the durable copy is actually damaged.
             outcome.watermark_write_failures += 1
             logger.warning(
                 "[%s] delivery watermark record failed reason=%s task=%s (delivery uncertainty recorded)",
@@ -1208,7 +1223,12 @@ class XiaozhiA2AProvider:
         if not controller.task_id:
             return
         presentation = controller.outcome.presentation
-        if presentation == PRESENTATION_COMPLETE:
+        if controller.outcome.fenced:
+            # A fenced turn's delivery cannot be called complete even when
+            # the task itself completed: the channel refused part of the
+            # admitted stream (§9.3) — the delivery record stays honest.
+            delivery_state = DELIVERY_STATE_UNCERTAIN
+        elif presentation == PRESENTATION_COMPLETE:
             delivery_state = DELIVERY_STATE_COMPLETE
         elif presentation in (PRESENTATION_COMPLETED_SUPPRESSED, PRESENTATION_CANCELED):
             delivery_state = DELIVERY_STATE_PARTIAL_STOPPED

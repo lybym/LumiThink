@@ -46,6 +46,14 @@ from typing import Dict, Optional
 
 DELIVERY_LEDGER_SCHEMA_VERSION = 1
 
+# Public, enumerated ledger reasons (stable evidence vocabulary; the provider
+# fences on the protocol-anomaly class and degrades-with-counting on the
+# write-failure one).
+LEDGER_REASON_CORRUPT = "ledger_corrupt"
+LEDGER_REASON_UNWRITABLE = "ledger_unwritable"
+LEDGER_REASON_ANOMALY = "same_id_different_delivery"
+LEDGER_REASON_SESSION_MISSING = "session_missing_from_durable_ledger"
+
 # record_delivery outcomes (stable evidence vocabulary).
 STATUS_RECORDED = "recorded"
 STATUS_DUPLICATE = "duplicate"
@@ -58,9 +66,10 @@ DELIVERY_STATE_COMPLETE = "complete"
 DELIVERY_STATE_PARTIAL_STOPPED = "partial_stopped"
 DELIVERY_STATE_UNCERTAIN = "uncertain"
 
-_REASON_CORRUPT = "ledger_corrupt"
-_REASON_UNWRITABLE = "ledger_unwritable"
-_REASON_ANOMALY = "same_id_different_delivery"
+_REASON_CORRUPT = LEDGER_REASON_CORRUPT
+_REASON_UNWRITABLE = LEDGER_REASON_UNWRITABLE
+_REASON_ANOMALY = LEDGER_REASON_ANOMALY
+_REASON_SESSION_MISSING = LEDGER_REASON_SESSION_MISSING
 
 
 class DeliveryLedgerError(Exception):
@@ -350,11 +359,14 @@ class FileDeliveryLedger(_DeliveryLedgerBase):
                 _REASON_CORRUPT,
                 "delivery ledger file has an unrecognized shape: {}".format(self._path),
             )
-        if parsed["version"] > DELIVERY_LEDGER_SCHEMA_VERSION:
+        if parsed["version"] != DELIVERY_LEDGER_SCHEMA_VERSION:
+            # Version strictness is SYMMETRIC with the integrity gate: there
+            # is exactly one schema version — anything older or newer is a
+            # damaged/foreign document and refuses to open (fail-closed).
             raise DeliveryLedgerError(
                 _REASON_CORRUPT,
-                "delivery ledger schema version {} is NEWER than this build "
-                "supports ({}); refusing to open (fail-closed)".format(
+                "delivery ledger schema version {} is not supported by this "
+                "build ({}); refusing to open (fail-closed)".format(
                     parsed["version"], DELIVERY_LEDGER_SCHEMA_VERSION
                 ),
             )
@@ -386,15 +398,25 @@ class FileDeliveryLedger(_DeliveryLedgerBase):
     def verify_integrity(self, session_id: str) -> None:
         """Re-reads the durable document FRESH FROM DISK; fail-closed gate.
 
-        Called by the provider before resuming a stream after a disconnect:
-        a broken or vanished durable copy while this session is tracked
-        (the in-memory document knows the session) means "no reliable
-        consumption watermark" — the caller must stop the automatic
-        continuation (never replay from scratch) and surface an explicit
-        recovery state (TASK_LIFECYCLE §6.2 / A2A_DESIGN §9.3).
+        Called by the provider before resuming a stream after a disconnect.
+        The in-memory "tracked" flag is snapshotted under the lock (the only
+        shared state read here); the file itself is re-read without the
+        lock — it is only ever replaced atomically by THIS process, so a
+        reader sees either the old or the new document, never a partial one.
+
+        Fail-closed conditions while the session is tracked: the file
+        vanished; the durable copy is damaged or of an unexpected
+        shape/version; or the durable copy no longer CONTAINS the tracked
+        session (externally pruned/rewritten history — the consumption
+        watermark can no longer be proven from the durable copy). The caller
+        must then stop the automatic continuation (never replay from
+        scratch) and surface an explicit recovery state (TASK_LIFECYCLE §6.2
+        / A2A_DESIGN §9.3).
         """
+        with self._lock:
+            tracked = session_id in self._doc["sessions"]
         if not os.path.exists(self._path):
-            if session_id in self._doc["sessions"]:
+            if tracked:
                 raise DeliveryLedgerError(
                     _REASON_CORRUPT,
                     "delivery ledger file vanished while session {!r} is tracked; "
@@ -419,4 +441,14 @@ class FileDeliveryLedger(_DeliveryLedgerBase):
                 _REASON_CORRUPT,
                 "delivery ledger file has an unexpected shape or version while "
                 "session {!r} is tracked".format(session_id),
+            )
+        if tracked and session_id not in parsed["sessions"]:
+            # A valid, schema-correct durable document that no longer knows
+            # this session: history was externally pruned/rewritten. The
+            # watermark cannot be proven against the durable copy — fail
+            # closed instead of silently re-persisting the in-memory view.
+            raise DeliveryLedgerError(
+                _REASON_SESSION_MISSING,
+                "delivery ledger no longer contains the tracked session {!r}; "
+                "no reliable consumption watermark".format(session_id),
             )
