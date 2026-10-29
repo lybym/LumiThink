@@ -23,7 +23,8 @@
     "test:a2a-compat": "pnpm --dir poc/a2a-compat run test",
     "test:a2a-python": "pnpm --dir services/a2a-server run test:python-interop",
     "test:a2a-server": "pnpm --dir services/a2a-server install --frozen-lockfile && pnpm --dir services/a2a-server run typecheck && pnpm --dir services/a2a-server run test",
-    "test:dsh-a2a-client": "pnpm --dir services/a2a-server install --frozen-lockfile && pnpm --dir services/dsh-a2a-client install --frozen-lockfile && pnpm --dir services/dsh-a2a-client run typecheck && pnpm --dir services/dsh-a2a-client run test && pnpm --dir services/dsh-a2a-client run test:integration"
+    "test:dsh-a2a-client": "pnpm --dir services/a2a-server install --frozen-lockfile && pnpm --dir services/dsh-a2a-client install --frozen-lockfile && pnpm --dir services/dsh-a2a-client run typecheck && pnpm --dir services/dsh-a2a-client run test && pnpm --dir services/dsh-a2a-client run test:integration",
+    "test:xiaozhi-a2a-provider": "pnpm --dir services/a2a-server install --frozen-lockfile && python -m unittest discover -s services/xiaozhi-a2a-provider/tests -t services/xiaozhi-a2a-provider -v"
   },
   "dependencies": {
     "@prisma/client": "6.19.3",
