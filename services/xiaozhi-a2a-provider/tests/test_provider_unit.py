@@ -627,6 +627,51 @@ class TestTurnGuards(unittest.TestCase):
         self.assertFalse(outcome.cancel_requested)
         hang.set()
 
+    def test_device_closed_stops_playback_without_cancel(self):
+        # §10.3: the device going away is NOT a cancel intent — local
+        # playback bookkeeping stops, the turn worker detaches quietly, and
+        # the server-side execution keeps its own deadline.
+        client = FakeA2AClient()
+        parked = threading.Event()  # the scripted stream stays open (task active)
+        client.queue_send([
+            task_frame(TaskState.TASK_STATE_WORKING),
+            artifact_event("answer#chunk-1", CHUNK_1, 0, append=False),
+        ], park_until=parked)
+        provider = make_provider(client)
+        session_id = "sess-closed"
+        provider.lumi_on_hello(session_id)
+        texts = []
+        gen = provider.response(session_id, [{"role": "user", "content": "你好"}])
+        for text in gen:
+            texts.append(text)
+            provider.lumi_on_device_closed(session_id)  # device drops mid-turn
+        parked.set()  # release the parked stream fixture after the turn ended
+
+        self.assertEqual(texts, [CHUNK_1])  # playback stopped at the drop
+        outcome = provider.last_outcome(session_id)
+        # Honest delivery-uncertain presentation: no terminal state was ever
+        # observed, no error fabricated, NO cancel sent.
+        self.assertEqual(outcome.presentation, PRESENTATION_ERROR)
+        self.assertIsNone(outcome.error_reason)
+        self.assertEqual(outcome.state, "TASK_STATE_WORKING")
+        self.assertFalse(outcome.cancel_requested)
+        self.assertEqual(len(client.cancel_calls), 0)
+        # Resource cleanup: the turn client was closed (stream detached).
+        self.assertIn(("aclose", None), client.calls)
+
+    def test_device_closed_unregisters_session_and_is_idempotent(self):
+        client = FakeA2AClient()
+        provider = make_provider(client)
+        session_id = "sess-closed-reg"
+        provider.lumi_on_hello(session_id)
+        provider.lumi_on_device_closed(session_id)
+        provider.lumi_on_device_closed(session_id)  # second close: harmless no-op
+        # The hello gate is gone: a new turn fails closed until re-hello.
+        with self.assertRaises(ProviderTurnError) as caught:
+            drain(provider, session_id, [{"role": "user", "content": "你好"}])
+        self.assertEqual(caught.exception.reason, "session_not_registered")
+        self.assertEqual(client.calls, [])
+
     def test_context_continuation_uses_new_message_id_same_context(self):
         client = FakeA2AClient()
         happy_script(client)

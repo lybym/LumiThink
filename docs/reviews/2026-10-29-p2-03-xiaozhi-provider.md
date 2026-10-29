@@ -31,7 +31,7 @@
 | 首响应丢失恢复（§5.3） | 首帧未达即断 → 同 messageId 字节级重发 1 次 → 原任务；重发仍败 → 显式失败 | 单测 `test_first_response_loss_recovers_via_identical_resend` |
 | 播放完成 ≠ Task 完成；COMPLETED + `outputSuppressedAfterCancel=true` 呈现"执行完成但回答未完整交付" | 终态经 GetTask 读 `lumithinkResult` 旗标确认（§7.2：不凭状态事件推断完整回答）；呈现映射：complete / completed_but_suppressed / canceled / failed；旗标 suppressed 时绝不回放 | 单测 `test_suppressed_completion_presented_without_replay`；全链 `answer_complete=true` 经真实快照旗标 |
 | 服务不可达/超时/取消失败模式有明确行为与日志（无正文泄漏） | 枚举 reason：`server_unreachable`（卡发现失败）/`turn_timeout`（不取消、交由服务端截止）/`credential_rejected`（401/403 与 -32000，遍历 SDK 异常链识别）/`recovery_exhausted`；日志只含 id 与 reason；token 不落日志/异常/盘（捕获式断言） | 单测 `test_turn_timeout_never_cancels`、`test_token_never_reaches_logs`；全链 `test_server_unreachable_is_explicit` |
-| 设备断连 ≠ 取消 | `lumi_on_device_closed` 只停本地消费记账，绝不发取消 | 单测行为断言（device_closed 路径） |
+| 设备断连 ≠ 取消 | `lumi_on_device_closed` 只停本地消费记账并注销会话（需重新 hello 才能再起轮），绝不发取消；行为由 `test_device_closed_stops_playback_without_cancel`（止播不取消 + 流客户端关闭 + 交付不确定呈现）与 `test_device_closed_unregisters_session_and_is_idempotent`（注销 fail-closed + 幂等 no-op）断言 | 单测 `test_provider_unit.TestTurnGuards` 两项 |
 | 结构红线：零直连模型供应商路径 | AST 全包扫描：import 白名单 = stdlib ∪ {`a2a`,`httpx`,`google`}；URL/密钥常量黑名单；核心模块在屏蔽三方 import 下独立可导入；缺 SDK = 显式 `official_sdk_missing`（附补救指引），绝不静默跳过 | `test_structure_redline` 5 项 |
 
 ## 3. 身份面（对照 ADR-0014 / identity-service-acl 语义）
@@ -42,9 +42,9 @@
 
 ## 4. 测试架构与结果（本地，2026-10-29）
 
-两层，stdlib unittest，**56 测试 0 失败 0 跳过（8.8s）**：
+两层，stdlib unittest，**58 测试 0 失败 0 跳过**：
 
-1. **契约/单元层（46）**：`test_output_contract`（19，纯 stdlib）+ `test_provider_unit`（22，注入式 fake 客户端，锁定 SDK runtime 形状构造事件）+ `test_structure_redline`（5，AST 守卫 + 独立导入 + 缺 SDK 显式失败）。
+1. **契约/单元层（48）**：`test_output_contract`（19，纯 stdlib）+ `test_provider_unit`（24，注入式 fake 客户端，锁定 SDK runtime 形状构造事件；含 `lumi_on_device_closed` 止播不取消/注销 fail-closed 两项行为测试）+ `test_structure_redline`（5，AST 守卫 + 独立导入 + 缺 SDK 显式失败）。
 2. **真实链路层（10）**：`tests/server_harness.py` 以真实 Node 子进程启动 `services/a2a-server/src/main.ts`（dsh-worker 模式 + 文件 SQLite + xiaozhi_device 三凭据 bootstrap：设备/监护人/过期）；`test_full_chain`（4：完成链/打断取消/断流恢复/不可达）+ `test_identity_negatives`（6）。断言证据跨进程直读 SQLite（`a2a_tasks`/`a2a_executions`/`a2a_identity_task_bindings`，只读连接）。
 
 ```powershell
@@ -52,7 +52,7 @@
 $env:PYTHONPATH='C:\CODE\_a2a-compat-verify\pylibs'
 $env:LUMITHINK_XIAOZHI_PROVIDER_NODE_BIN='<node.exe>'
 python -m unittest discover -s services/xiaozhi-a2a-provider/tests -t services/xiaozhi-a2a-provider -v
-#   → Ran 56 tests ... OK（0 skipped）
+#   → Ran 58 tests ... OK（0 skipped）
 pnpm run test:a2a-server   # 回归：187 tests，187 pass / 0 fail / 0 skipped（125s；LUMITHINK_A2A_PYTHON+PYTHONPATH 注入后 python-interop 全过）
 pnpm run typecheck         # 根工作区 typecheck exit 0
 ```
