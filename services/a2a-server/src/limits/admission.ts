@@ -25,7 +25,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentExecutor, ExecutionEventBus, RequestContext } from '@a2a-js/sdk/server';
 import { Role, TaskState } from '@a2a-js/sdk';
-import type { TaskStatusUpdateEvent } from '@a2a-js/sdk';
+import type { Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import type { A2aLimitsConfig } from './config.ts';
 import type { AdmissionScheduler, LimitsRejectionReason } from './scheduler.ts';
 import type { ObservabilityRecorder } from './observability.ts';
@@ -126,6 +126,16 @@ export interface LimitsAwareExecutorOptions {
   householdOf: (taskId: string) => string;
   /** Tokens reserved up front: estimated input + maximum output (§13.4). */
   tokensToReserve?: (taskId: string, contextId: string) => number;
+  /**
+   * P1-12 (issue #121): loads the CURRENT persisted task snapshot so an
+   * admission refusal can publish the Task event BEFORE its FAILED
+   * statusUpdate. A bare statusUpdate as the first event of a fresh stream
+   * is rejected by the locked SDK's stream-pattern guard with the opaque
+   * -32004 "Received statusUpdate before initial 'Message'/'Task' event.",
+   * masking the capacity reason. When the loader is omitted (or the
+   * snapshot is unavailable) the historical bare-statusUpdate shape is kept.
+   */
+  taskSnapshotLoader?: (taskId: string) => Promise<Task | undefined>;
   /** Injectable clock (tests). */
   now?: () => number;
 }
@@ -174,6 +184,9 @@ export function limitsAwareExecutor(
       // lease layer handles the common case BEFORE the claim; this fallback
       // settles honestly as FAILED (working → failed is legal) with the
       // capacity reason on the wire.
+      // P1-12 (#121): the FAILED statusUpdate is preceded by the persisted
+      // task snapshot — a fresh stream must not open with a statusUpdate
+      // (locked SDK stream-pattern guard, -32004).
       recorder.emit({
         level: 'warn',
         event: 'admission.decided',
@@ -185,6 +198,16 @@ export function limitsAwareExecutor(
         waitedMs: decision.waitedMs,
         tokensReserved: tokensToReserve,
       });
+      if (options.taskSnapshotLoader !== undefined) {
+        try {
+          const snapshot = await options.taskSnapshotLoader(taskId);
+          if (snapshot !== undefined) {
+            eventBus.publish({ kind: 'task', data: snapshot });
+          }
+        } catch {
+          // Best-effort snapshot; the FAILED settlement below still applies.
+        }
+      }
       eventBus.publish(
         statusUpdate(
           taskId,

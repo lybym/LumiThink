@@ -34,6 +34,7 @@ import { jsonRpcErrorBody, type ErrorInfo } from '../error-map.ts';
 import { IdentityError, type AuthContext, type AuditEntry } from './model.ts';
 import { Authorizer, denialMessageOf } from './authorizer.ts';
 import type { IdentityStore } from './identity-store.ts';
+import type { StreamTeardownHandle } from '../stream-teardown.ts';
 
 const ERROR_INFO_TYPE = 'type.googleapis.com/google.rpc.ErrorInfo';
 
@@ -118,8 +119,18 @@ export class StreamRegistry {
 /** SDK `User` implementation carrying the server-resolved AuthContext. */
 export class LumithinkA2aUser implements User {
   readonly auth: AuthContext;
-  constructor(auth: AuthContext) {
+  /**
+   * P1-12 (issue #121): the request's SSE disconnect handle (streaming
+   * methods only). The locked SDK's context builder copies `user` into the
+   * ServerCallContext, which is the only correlation channel between the
+   * HTTP response and the stream generator — the SDK accepts no abort
+   * signal and exposes no disconnect hook on this path (verified against
+   * the 1.3.0 bundle).
+   */
+  readonly streamTeardown?: StreamTeardownHandle;
+  constructor(auth: AuthContext, streamTeardown?: StreamTeardownHandle) {
     this.auth = auth;
+    this.streamTeardown = streamTeardown;
   }
   get isAuthenticated(): boolean {
     return true;
@@ -139,6 +150,13 @@ export class LumithinkA2aUser implements User {
 declare module 'express-serve-static-core' {
   interface Request {
     lumithinkAuth?: AuthContext;
+    /**
+     * P1-12 (issue #121): per-request SSE disconnect handle for streaming
+     * methods, attached by the composition root's teardown middleware and
+     * carried into the SDK call context through the user builder. Undefined
+     * for non-streaming requests.
+     */
+    lumithinkStreamTeardown?: StreamTeardownHandle;
   }
 }
 
@@ -263,7 +281,7 @@ export function lumithinkUserBuilder(req: Request): Promise<User> {
     // Unreachable when requireTwoTierAuth ran; fail closed anyway.
     return Promise.reject(new IdentityError('unknown_credential', 'request was not authenticated'));
   }
-  return Promise.resolve(new LumithinkA2aUser(auth));
+  return Promise.resolve(new LumithinkA2aUser(auth, req.lumithinkStreamTeardown));
 }
 
 /**

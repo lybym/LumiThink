@@ -37,7 +37,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { AgentExecutor, ExecutionEventBus, RequestContext } from '@a2a-js/sdk/server';
-import { Role, TaskState, type Message, type TaskStatusUpdateEvent } from '@a2a-js/sdk';
+import { Role, TaskState, type Message, type Task, type TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import type { SqliteTaskManager } from '../task-manager/sqlite-task-manager.ts';
 import { type LimitsRejectionReason } from '../limits/scheduler.ts';
 import { capacityRejectionMessage } from '../limits/admission.ts';
@@ -107,6 +107,26 @@ export interface LeaseDispatchExecutorOptions {
     taskId: string;
     contextId: string;
   }) => LimitsRejectionReason | null;
+  /**
+   * P1-12 (issue #121): loads the CURRENT persisted task snapshot so a
+   * pre-result refusal can publish the Task event BEFORE its terminal
+   * statusUpdate. The locked SDK's stream-pattern guard
+   * (`_advanceStreamPattern`, UNDETERMINED state) rejects any stream whose
+   * FIRST event is a statusUpdate with the opaque -32004
+   * "Received statusUpdate before initial 'Message'/'Task' event." — which
+   * used to mask the real capacity reason on every fresh streaming send.
+   * Only reachable on a fresh dispatch (the claim requires submitted →
+   * working), so the receiving stream's pattern is still UNDETERMINED and a
+   * task-first publication is always guard-legal there.
+   */
+  taskSnapshotLoader?: (taskId: string) => Promise<Task | undefined>;
+  /**
+   * P1-12 (issue #121): sink for pre-dispatch refusals (quota / capacity
+   * preflight / persisted cancel intent). The pure preflight check itself
+   * never touches the scheduler counters, so without this sink the refusal
+   * was invisible in the structured log. Content-free (ids + reason only).
+   */
+  onPreDispatchRefusal?: (info: { taskId: string; contextId: string; reason: string }) => void;
   /** Injectable clock (tests). */
   now?: () => number;
 }
@@ -153,6 +173,31 @@ function capacityRejectionStatusMessage(
   };
 }
 
+/**
+ * P1-12 (issue #121): publishes the persisted task snapshot BEFORE a
+ * terminal statusUpdate so the receiving fresh stream satisfies the locked
+ * SDK's stream-pattern guard (first event must be task/message). When the
+ * snapshot cannot be loaded the refusal keeps the historical bare-statusUpdate
+ * shape (anomaly fallback — never fabricate a task state that is not in the
+ * authoritative store).
+ */
+async function publishTaskFirst(
+  eventBus: ExecutionEventBus,
+  loader: ((taskId: string) => Promise<Task | undefined>) | undefined,
+  taskId: string,
+): Promise<void> {
+  if (loader === undefined) return;
+  try {
+    const snapshot = await loader(taskId);
+    if (snapshot !== undefined) {
+      eventBus.publish({ kind: 'task', data: snapshot });
+    }
+  } catch {
+    // Snapshot load is best-effort: the refusal statusUpdate below still
+    // settles the task (ResultManager re-loads from the store itself).
+  }
+}
+
 export function leaseDispatchExecutor(options: LeaseDispatchExecutorOptions): AgentExecutor {
   const { inner, taskManager } = options;
   const now = options.now ?? (() => Date.now());
@@ -179,6 +224,8 @@ export function leaseDispatchExecutor(options: LeaseDispatchExecutorOptions): Ag
         if (options.quotaGate) {
           const quota = options.quotaGate(taskId);
           if (!quota.allowed) {
+            options.onPreDispatchRefusal?.({ taskId, contextId, reason: 'quota_refused' });
+            await publishTaskFirst(eventBus, options.taskSnapshotLoader, taskId);
             eventBus.publish(statusUpdate(taskId, contextId, TaskState.TASK_STATE_REJECTED));
             return;
           }
@@ -188,9 +235,15 @@ export function leaseDispatchExecutor(options: LeaseDispatchExecutorOptions): Ag
         //     a refusal here settles on `submitted` where REJECTED is legal.
         //     Claiming first would strand the task in `working` forever
         //     (working → rejected is an illegal snapshot and gets discarded).
+        //     P1-12 (#121): the refusal publishes the task snapshot FIRST —
+        //     a bare statusUpdate as the first event of a fresh stream is
+        //     rejected by the locked SDK's stream-pattern guard with the
+        //     opaque -32004, masking the capacity reason from the client.
         if (options.capacityPreflight) {
           const reason = options.capacityPreflight({ taskId, contextId });
           if (reason !== null) {
+            options.onPreDispatchRefusal?.({ taskId, contextId, reason });
+            await publishTaskFirst(eventBus, options.taskSnapshotLoader, taskId);
             eventBus.publish(
               statusUpdate(
                 taskId,
@@ -228,6 +281,8 @@ export function leaseDispatchExecutor(options: LeaseDispatchExecutorOptions): Ag
         if (claim.outcome === 'canceled_pre_dispatch') {
           // Cancel intent persisted before dispatch: settle CANCELED here —
           // submitted → canceled is legal (§3) — and never start the Worker.
+          // P1-12 (#121): task-first publication (see publishTaskFirst).
+          await publishTaskFirst(eventBus, options.taskSnapshotLoader, taskId);
           eventBus.publish(statusUpdate(taskId, contextId, TaskState.TASK_STATE_CANCELED));
           return;
         }
@@ -239,6 +294,10 @@ export function leaseDispatchExecutor(options: LeaseDispatchExecutorOptions): Ag
           if (!decision.allowed) {
             // working → canceled is legal (§3); P1-03 semantic: revocation
             // settles CANCELED with no body.
+            // P1-12 (#121): task-first publication (see publishTaskFirst) —
+            // the claimed task sits in `working` and the fresh stream would
+            // otherwise open with a bare statusUpdate (guard -32004).
+            await publishTaskFirst(eventBus, options.taskSnapshotLoader, taskId);
             eventBus.publish(statusUpdate(taskId, contextId, TaskState.TASK_STATE_CANCELED));
             return;
           }
