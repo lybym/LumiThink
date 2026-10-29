@@ -24,11 +24,17 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * Also pinned here: the SSE silent-disconnect teardown itself (the abandoned
- * resubscribe/delivery generator is terminated on res 'close' — the SDK's
- * express handler drops writes on the destroyed socket and would otherwise
- * keep the generator + its ExecutionEventQueue subscribed until the task
- * settles), while 断流≠取消 (R8) and the slow-consumer delivery semantics
- * stay intact.
+ * resubscribe generator is terminated on res 'close' — the SDK's express
+ * handler drops writes on the destroyed socket and would otherwise keep the
+ * generator + its ExecutionEventQueue subscribed until the task settles),
+ * while 断流≠取消 (R8) and the slow-consumer delivery semantics stay intact.
+ * The SEND path is deliberately NOT torn down on disconnect: in the locked
+ * SDK the send delivery loop doubles as the task-state persistence pump
+ * (ResultManager.processEvent runs inside the generator loop), so closing
+ * the client-facing send stream early would starve the task's terminal
+ * settlement (observed: the xiaozhi real-link gate failed exactly this way
+ * before the passthrough correction). Resubscribe runs no ResultManager —
+ * tearing it down never affects persistence.
  */
 import test from 'node:test';
 import { strict as assert } from 'node:assert';
@@ -190,7 +196,7 @@ test('P1-12: after A→resubscribe B→abandon both, a NEW-task stream C (fresh 
   }
 });
 
-test('P1-12 teardown: silent disconnect terminates the delivery generators (no dangling consumer) while the task stays non-terminal', async () => {
+test('P1-12 teardown: silent disconnect terminates the resubscribe generator (no dangling consumer) while the task stays non-terminal', async () => {
   const service = await startTest();
   try {
     assert.equal(service.streamLifecycle.registered, 0);
@@ -203,10 +209,13 @@ test('P1-12 teardown: silent disconnect terminates the delivery generators (no d
 
     // The disconnect hook fires on res 'close' — BEFORE any task settlement
     // (A is still parked, so settlement cannot explain the teardown).
+    // Counters cover the RESUBSCRIBE surface only: the send path is a
+    // deliberate passthrough (the locked SDK's send delivery loop doubles as
+    // the task-state persistence pump — see the file header).
     await sleep(250);
-    assert.equal(service.streamLifecycle.registered, 2, 'both streaming generators registered a teardown');
-    assert.ok(service.streamLifecycle.tornDown >= 2,
-      `both abandoned generators were terminated by the disconnect hook (got ${service.streamLifecycle.tornDown})`);
+    assert.equal(service.streamLifecycle.registered, 1, 'the resubscribe generator registered a teardown');
+    assert.equal(service.streamLifecycle.tornDown, 1,
+      `the abandoned resubscribe generator was terminated by the disconnect hook (got ${service.streamLifecycle.tornDown})`);
     assert.equal(service.streamLifecycle.completed, 0, 'no natural completion was misattributed');
 
     // 断流≠取消 (R8): the teardown releases the DELIVERY side only — the
@@ -229,23 +238,21 @@ test('P1-12 teardown: silent disconnect terminates the delivery generators (no d
   }
 });
 
-test('P1-12: a slow but attached consumer keeps receiving every frame (teardown fires on disconnect, never on slowness)', async () => {
+test('P1-12: a slow but attached resubscribe consumer keeps receiving every frame (teardown fires on disconnect, never on slowness)', async () => {
   const service = await startTest();
   try {
     const tornDownBefore = service.streamLifecycle.tornDown;
-    const res = await rpcPost(service.base, {
-      jsonrpc: '2.0', id: 1, method: 'SendStreamingMessage',
-      params: { message: { messageId: 'p1-12-slow-1', role: 'ROLE_USER', parts: [{ text: '你好' }] } },
-    });
+    const completedBefore = service.streamLifecycle.completed;
+    const a = await openParkAndDrop(service, 'p1-12-slow-a');
+    await sleep(100);
+    const res = await rpcPost(service.base, { jsonrpc: '2.0', id: 2, method: 'SubscribeToTask', params: { id: a.taskId } });
     assert.equal(res.headers.get('content-type')?.includes('text/event-stream'), true);
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
     const frames: Record<string, unknown>[] = [];
-    const readSome = async (): Promise<void> => {
-      const { value, done } = await reader.read();
-      if (done) return;
-      buffer += decoder.decode(value, { stream: true });
+    const parseInto = (chunk: string): void => {
+      buffer += chunk;
       let boundary = buffer.indexOf('\n\n');
       while (boundary >= 0) {
         const event = buffer.slice(0, boundary);
@@ -256,19 +263,26 @@ test('P1-12: a slow but attached consumer keeps receiving every frame (teardown 
         boundary = buffer.indexOf('\n\n');
       }
     };
+    const readSome = async (): Promise<void> => {
+      const { value, done } = await reader.read();
+      if (done) return;
+      parseInto(decoder.decode(value, { stream: true }));
+    };
     await readSome();
-    assert.ok(frames.length >= 1, 'first frame arrived');
-    // Deliberately slow consumption: the executor has long finished; the
-    // stream must buffer and deliver every frame to the attached consumer.
+    assert.ok(frames.length >= 1, 'first frame (task snapshot) arrived');
+    // Deliberately slow consumption while the task stays parked, then settle
+    // the task UNDER the slow consumer: every frame (through the terminal
+    // settlement) must still reach the attached consumer.
     await sleep(300);
+    await rpcPost(service.base, { jsonrpc: '2.0', id: 3, method: 'CancelTask', params: { id: a.taskId } });
     while (true) {
-      const { done } = await reader.read().then(
+      const chunk = (await reader.read().then(
         (result) => result,
         () => ({ done: true }),
-      );
-      if (done) break;
+      )) as { value?: Uint8Array; done?: boolean };
+      if (chunk.done) break;
+      if (chunk.value !== undefined) parseInto(decoder.decode(chunk.value, { stream: true }));
     }
-    buffer = '';
     const states = frames.map((frame) => {
       const result = frame['result'] as Record<string, unknown> | undefined;
       if (result?.['statusUpdate'] !== undefined) {
@@ -276,10 +290,11 @@ test('P1-12: a slow but attached consumer keeps receiving every frame (teardown 
       }
       return undefined;
     }).filter((state) => state !== undefined);
-    assert.ok(states.includes('TASK_STATE_COMPLETED'), `the slow consumer still saw COMPLETED (states: ${states.join(',')})`);
+    assert.ok(states.includes('TASK_STATE_CANCELED'), `the slow consumer still saw the terminal settlement (states: ${states.join(',')})`);
     assert.equal(service.streamLifecycle.tornDown, tornDownBefore,
-      'a healthy (even slow) stream is never torn down by slowness');
-    assert.ok(service.streamLifecycle.completed >= 1, 'the stream counted as naturally completed');
+      'a healthy (even slow) resubscribe is never torn down by slowness');
+    assert.equal(service.streamLifecycle.completed, completedBefore + 1,
+      'the resubscribe counted as naturally completed');
   } finally {
     await stopA2aService(service);
   }

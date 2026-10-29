@@ -29,33 +29,42 @@
  * would therefore only increment counters — a false green for exactly the
  * parked-task scenario this issue reports.
  *
- * ── The fix ──────────────────────────────────────────────────────────────────
+ * ── The fix (and why the SEND path must stay passthrough) ───────────────────
  *   1. `attachStreamTeardownMiddleware` — mounted before the SDK handler,
- *      installs a `res.once('close')` handle for streaming requests
- *      (SendStreamingMessage / SubscribeToTask) and stashes it on the
- *      request;
+ *      installs a `res.once('close')` handle for the SubscribeToTask
+ *      request and stashes it on the request;
  *   2. `lumithinkUserBuilder` (identity/express-auth) carries the handle
  *      into the SDK `ServerCallContext.user` (the only correlation channel
  *      the SDK offers on this path — no abort signal, no disconnect hook,
  *      verified against the 1.3.0 bundle);
- *   3. `withStreamTeardown` decorates the two streaming handler methods:
- *        - resubscribe: a faithful reimplementation of the locked SDK's
- *          `DefaultRequestHandler.resubscribe` (same store, same bus
- *          manager, same terminal/not-found errors via the public
- *          `@a2a-js/sdk/errors` classes, same task-first snapshot and
- *          event filtering) that OWNS its `ExecutionEventQueue` (public
- *          export of `@a2a-js/sdk/server`) and stops it in a disconnect
- *          race — the abandoned consumer releases its bus subscription
- *          immediately instead of at task settlement. This is the fix the
- *          issue titles.
- *        - sendMessageStream: the SDK generator is pumped through a
- *          disconnect race so the client-facing stream terminates on
- *          `res.close` instead of lingering on a dead socket. The SDK
- *          generator itself creates its queue internally (`new
- *          ExecutionEventQueue(eventBus)` — no injection point), so its
- *          bus subscription still releases at task settlement; documented
- *          limitation, bounded by the task's own lifetime (断流≠取消, R8:
- *          the task settles through its own path either way).
+ *   3. `withStreamTeardown` decorates the resubscribe handler method with a
+ *      faithful reimplementation of the locked SDK's
+ *      `DefaultRequestHandler.resubscribe` (same store, same bus manager,
+ *      same terminal/not-found errors via the public `@a2a-js/sdk/errors`
+ *      classes, same task-first snapshot and event filtering) that OWNS its
+ *      `ExecutionEventQueue` (public export of `@a2a-js/sdk/server`) and
+ *      stops it in a disconnect race — the abandoned consumer releases its
+ *      bus subscription immediately instead of at task settlement. This is
+ *      the fix the issue titles.
+ *
+ *   SendStreamingMessage is deliberately PASSED THROUGH untouched. In the
+ *   locked SDK the streaming-send delivery loop is not just delivery: the
+ *   per-request `ResultManager.processEvent` runs INSIDE the generator's
+ *   `for await` loop (server/index.js L3163), and the ResultManager is the
+ *   taskStore writer that persists every task-state transition. The express
+ *   write loop's pending `next()` is the pump that drains bus events through
+ *   the ResultManager — terminating the client-facing stream on disconnect
+ *   starves that pump, and the task's terminal settlement (e.g. COMPLETED
+ *   published by the executor after the client left) is NEVER persisted:
+ *   the task stays `working` in the store. This is not hypothetical — it
+ *   failed the xiaozhi-a2a-provider real-link gate exactly this way (the
+ *   damaged-ledger full-chain test waits for the server task row to reach
+ *   `completed` after a mid-turn silent disconnect) on two consecutive CI
+ *   runs before this passthrough correction. The resubscribe path has NO
+ *   ResultManager (pure event forwarding, server/index.js L3335-3382), so
+ *   tearing IT down never affects persistence — which is exactly why the
+ *   issue's titular fix (terminate the resubscribe generator) is both safe
+ *   and sufficient here.
  *
  * Deliberately NOT touched: the executor side. 断流≠取消 (R8) — tearing
  * down the delivery generator never cancels the running execution; the
@@ -124,19 +133,22 @@ export function attachStreamTeardown(res: Response): StreamTeardownHandle {
   };
 }
 
-const STREAMING_METHODS = new Set(['SendStreamingMessage', 'SubscribeToTask']);
+const TEARDOWN_METHODS = new Set(['SubscribeToTask']);
 
 /**
  * Middleware mounted before the locked SDK handler: attaches the teardown
- * handle to streaming requests only. Non-streaming POSTs and GETs complete
- * within the request cycle and need no disconnect teardown. Mounted AFTER
- * the acceptance gate (body.method is final by then) and BEFORE the SDK
- * handler (whose user builder carries the handle into the call context).
+ * handle to the resubscribe request only. Mounted AFTER the acceptance gate
+ * (body.method is final by then) and BEFORE the SDK handler (whose user
+ * builder carries the handle into the call context).
+ *
+ * SendStreamingMessage is deliberately NOT attached: its delivery loop is
+ * the locked SDK's persistence pump (see the module docstring) and must keep
+ * the SDK's own disconnect behavior unchanged.
  */
 export function attachStreamTeardownMiddleware(): RequestHandler {
   return (req: Request, res: Response, next: NextFunction): void => {
     const body = req.body as { method?: unknown } | undefined;
-    if (typeof body?.method === 'string' && STREAMING_METHODS.has(body.method)) {
+    if (typeof body?.method === 'string' && TEARDOWN_METHODS.has(body.method)) {
       req.lumithinkStreamTeardown = attachStreamTeardown(res);
     }
     next();
@@ -145,11 +157,11 @@ export function attachStreamTeardownMiddleware(): RequestHandler {
 
 /** Content-free lifecycle counters (observability + regression evidence). */
 export interface StreamLifecycleCounters {
-  /** Streaming generators created with a disconnect handle attached (one per live stream). */
+  /** Resubscribe generators created with a disconnect handle attached (one per live stream). */
   registered: number;
-  /** Client-facing streams terminated because the client disconnected. */
+  /** Resubscribe generators terminated because the client disconnected. */
   tornDown: number;
-  /** Streams that ran to natural completion (client stayed attached). */
+  /** Resubscribe generators that ran to natural completion (client stayed attached). */
   completed: number;
 }
 
@@ -162,66 +174,6 @@ export interface ResubscribeTeardownDeps {
   taskStore: { load(taskId: string, context?: ServerCallContext): Promise<Task | undefined> };
   /** The SAME event bus manager the locked SDK handler was built with. */
   eventBusManager: ExecutionEventBusManager;
-}
-
-/**
- * Wraps a SendStreamingMessage delivery generator in a disconnect race:
- * the client-facing stream terminates as soon as `res.close` fires instead
- * of lingering until the task settles. The inner SDK generator created its
- * ExecutionEventQueue internally (no injection point in the locked SDK), so
- * its bus subscription releases at task settlement — bounded by the task's
- * own lifetime (断流≠取消), never by our teardown.
- */
-function pumpWithDisconnect(
-  inner: AsyncGenerator<StreamResponse, void, void>,
-  handle: StreamTeardownHandle | undefined,
-  counters: StreamLifecycleCounters,
-): AsyncGenerator<StreamResponse, void, void> {
-  if (handle === undefined) return inner;
-  // Narrowed capture AFTER the guard: the hoisted `function* pump` below does
-  // not inherit control-flow narrowing from this scope (service tsconfig).
-  const h: StreamTeardownHandle = handle;
-  counters.registered += 1;
-  let outcome: 'tornDown' | 'completed' | 'failed' = 'failed';
-  const disconnected = h.disconnected;
-  async function* pump(): AsyncGenerator<StreamResponse, void, void> {
-    const it = inner[Symbol.asyncIterator]();
-    try {
-      // Client already gone before the first pull: never start the SDK
-      // generator at all — nothing subscribes to the bus in the first place.
-      if (h.fired) {
-        outcome = 'tornDown';
-        return;
-      }
-      while (true) {
-        if (h.fired) {
-          outcome = 'tornDown';
-          return;
-        }
-        const next = it.next();
-        void next.catch(() => undefined); // stays handled if the race resolves via disconnect
-        const result = await Promise.race([next, disconnected]);
-        if (result === DISCONNECTED) {
-          outcome = 'tornDown';
-          return;
-        }
-        if (result.done) {
-          outcome = 'completed';
-          return;
-        }
-        yield result.value;
-      }
-    } finally {
-      if (outcome === 'tornDown') counters.tornDown += 1;
-      else if (outcome === 'completed') counters.completed += 1;
-      h.detach();
-      // Best-effort termination of the inner generator; while it is parked
-      // awaiting its queue the return() queues behind the pending next()
-      // and only lands at settlement (see module docstring).
-      void it.return?.().catch(() => undefined);
-    }
-  }
-  return pump();
 }
 
 /**
@@ -240,6 +192,10 @@ function pumpWithDisconnect(
  *   - no active bus → snapshot-only stream (ends);
  *   - statusUpdate/artifactUpdate/task frames filtered by taskId; message
  *     events skipped; unknown kinds rejected like `assertUnreachableEvent`.
+ *
+ * Safe to tear down (unlike the send path): resubscribe runs NO
+ * ResultManager — it only filters and forwards bus events, so terminating
+ * it never starves task-state persistence (see the module docstring).
  */
 async function* resubscribeWithTeardown(
   params: { id?: string },
@@ -323,31 +279,24 @@ async function* resubscribeWithTeardown(
 }
 
 /**
- * Wraps the request handler so every streaming generator
- * (SendStreamingMessage / SubscribeToTask) terminates when its client
- * disconnects (see the module docstring for the mechanism). All other
- * handler methods delegate through the prototype — the composition root
- * keeps passing ONE handler object to the locked SDK.
+ * Wraps the request handler so the resubscribe generator terminates when
+ * its client disconnects (see the module docstring for the mechanism and
+ * for why SendStreamingMessage must stay passthrough). All other handler
+ * methods — including sendMessageStream — delegate through the prototype
+ * unchanged; the composition root keeps passing ONE handler object to the
+ * locked SDK.
  */
 export function withStreamTeardown<T extends object>(
   handler: T,
   counters: StreamLifecycleCounters,
   deps: ResubscribeTeardownDeps,
 ): T {
-  const anyHandler = handler as {
-    sendMessageStream(params: unknown, context: unknown): AsyncGenerator<StreamResponse, void, void>;
-  };
   const handleOf = (context: unknown): StreamTeardownHandle | undefined =>
     (context as { user?: { streamTeardown?: StreamTeardownHandle } } | undefined)?.user
       ?.streamTeardown;
 
   const wrapped = Object.create(handler) as T;
   Object.defineProperties(wrapped, {
-    sendMessageStream: {
-      enumerable: false,
-      value: (params: unknown, context: unknown): AsyncGenerator<StreamResponse, void, void> =>
-        pumpWithDisconnect(anyHandler.sendMessageStream(params, context), handleOf(context), counters),
-    },
     resubscribe: {
       enumerable: false,
       value: (params: unknown, context: unknown): AsyncGenerator<StreamResponse, void, void> => {

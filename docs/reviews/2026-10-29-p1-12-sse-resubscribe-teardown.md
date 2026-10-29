@@ -9,7 +9,7 @@
 | 项 | 结果 |
 | --- | --- |
 | 复现顺序修复（流 A → 重订阅 B → 弃 B → 新流 C 同会话） | ✅ C 得到协议合法 SSE 流（task 首帧 + 显式 `TASK_STATE_REJECTED` 结算帧），不再出现不透明 `-32004` 守卫错误 |
-| 断开即终止（本 Issue 标题义务） | ✅ resubscribe 生成器在 `res.close` 即终止，`ExecutionEventQueue.stop()` 立即释放总线订阅；send 路径客户端侧同步收口（内层限制见 §5） |
+| 断开即终止（本 Issue 标题义务） | ✅ resubscribe 生成器在 `res.close` 即终止，`ExecutionEventQueue.stop()` 立即释放总线订阅；**send 路径刻意保持 SDK 原样直通**（见 §3.1 持久化泵发现——终止 send 交付循环会饿死任务终态落库） |
 | 语义不回退 | ✅ stream-resilience / acceptance-idempotency / protocol-errors / p1-07-cancel 等既有断言零削弱（全量套件见 §4.3）；断流≠取消（R8）、慢客户端有界交付、终态订阅 -32004、GetTask 恢复全部保持 |
 | 验证 | 新 spec 4/4 绿（红→绿见 §4）；根 `pnpm run typecheck` exit 0 |
 | 版本边界 | `@a2a-js/sdk@1.3.0`；仅使用其公共导出面（`@a2a-js/sdk/server` 的 `ExecutionEventQueue` / `ExecutionEventBusManager`、`@a2a-js/sdk/errors` 的公共错误类） |
@@ -52,10 +52,10 @@ A 泊住（`cancel-test` 场景：任务已领取、`working`、断流不取消�
 
 1. `attachStreamTeardownMiddleware` —— 挂在受理门之后、SDK handler 之前：对 `SendStreamingMessage`/`SubscribeToTask` 请求在 `res.once('close')` 上装断开把手（`StreamTeardownHandle`：`disconnected` promise + `fired` + `detach()`）；
 2. `lumithinkUserBuilder`（`src/identity/express-auth.ts`）—— 把把手经 `req.lumithinkStreamTeardown` 带进 SDK `ServerCallContext.user`（SDK 在该路径上唯一的相关性通道）；
-3. `withStreamTeardown(handler, counters, deps)` —— 以 `Object.create(handler)` + 两个自有方法包装 `DefaultRequestHandler`，其余方法全部走原型委托（SDK handler 仍只收到一个对象）：
+3. `withStreamTeardown(handler, counters, deps)` —— 以 `Object.create(handler)` + resubscribe 自有方法包装 `DefaultRequestHandler`，其余方法（含 sendMessageStream）全部走原型委托（SDK handler 仍只收到一个对象）：
 
-   - **resubscribe：自有队列 + 断开竞速 = 真终止**。对锁定 SDK `resubscribe`（L3335–3382）做**逐行为 1:1** 的忠实重实现：同一 guarded task store、同一 `eventBusManager.getByTaskId`（tenant 作用域一致）、缺任务 → `TaskNotFoundError`(-32001)、终态 → `UnsupportedOperationError`(-32004，同文案)、首帧恒为 store 任务快照、无活动 bus → 仅快照即止、`statusUpdate`/`artifactUpdate`/`task` 按 taskId 过滤转发、`message` 跳过、未知 kind 抛同文案 `Error`。差异只有生命周期：**队列由本层持有**，断开竞速命中即 `return`，`finally` 里 `eventQueue.stop()`——被弃消费者的总线订阅**立即**释放。错误类取自公共子路径 `@a2a-js/sdk/errors`（`A2AError` 品牌为 `Symbol.for` 全局符号，跨 bundle `instanceof` 语义不变），线上错误码与 SDK 原生抛出完全一致。
-   - **sendMessageStream：断开竞速泵**。SDK 生成器内部自建队列（`new ExecutionEventQueue(eventBus)`，无注入点），本层以 `Promise.race(内层.next(), disconnected)` 泵送：断开即向 express 写循环交付 `done`，客户端侧流即刻收口；内层 SDK 生成器与其队列按 SDK 自身语义在任务结算时释放（见 §5 局限）。客户端先于生成器启动即已断开的（`fired`）情形：泵根本不启动内层生成器，bus 上从未出现订阅。
+   - **resubscribe：自有队列 + 断开竞速 = 真终止**。对锁定 SDK `resubscribe`（L3335–3382）做**逐行为 1:1** 的忠实重实现：同一 guarded task store、同一 `eventBusManager.getByTaskId`（tenant 作用域一致）、缺任务 → `TaskNotFoundError`(-32001)、终态 → `UnsupportedOperationError`(-32004，同文案)、首帧恒为 store 任务快照、无活动 bus → 仅快照即止、`statusUpdate`/`artifactUpdate`/`task` 按 taskId 过滤转发、`message` 跳过、未知 kind 抛同文案 `Error`。差异只有生命周期：**队列由本层持有**，断开竞速命中即 `return`，`finally` 里 `eventQueue.stop()`——被弃消费者的总线订阅**立即**释放。错误类取自公共子路径 `@a2a-js/sdk/errors`（`A2AError` 品牌为 `Symbol.for` 全局符号，跨 bundle `instanceof` 语义不变），线上错误码与 SDK 原生抛出完全一致。resubscribe 无 ResultManager（纯事件转发），终止它**不可能**影响持久化——这正是收口面安全且充分的原因。
+   - **sendMessageStream：刻意直通（不收口）**。锁定 SDK 中 send 的交付循环不只是交付：每请求的 `ResultManager.processEvent` 就跑在生成器 `for await` 循环内（server/index.js L3163），而 ResultManager 是 taskStore 的任务态迁移写者；express 写循环挂起的 `next()` 正是把总线事件"泵"过 ResultManager 的持久化泵。断开时终止客户端侧流 = 饿死该泵 = **执行器在客户端离开后才发布的终态（如 COMPLETED）永不离库，任务永卡 `working`**。这不是推演——本 PR 中间版本（断开竞速泵）连续两轮 CI 在 `xiaozhi-a2a-provider` 真实链路门精确触发（`test_damaged_ledger_fails_closed_without_replay`：断开后等服务端任务行落 `completed` 15s 超时，provider 侧断言全过），随后以直通修正。send 路径被弃流的订阅仍按 SDK 原生语义在任务结算时释放（断流≠取消，生命期有界）。
 
 **关键工程发现（为什么不是 `yield*` + `it.return()`）**：委派式包装（`yield* inner`，teardown 里 `it.return()`）只在 wrapper **停在 yield 点**时立即穿透；真实流程中 express 写循环写完一帧立刻再拉下一帧，断开时刻 wrapper 处于**执行态**（正在 await 内层 `next()`），return 请求排在未决 `next()` 之后——Node 探针实测：yield 点 `return()` 即刻落定（true），执行态 300ms 内不落定（false，内层泊死时永不落定）。因此委派式 teardown 只会推高计数器，对"泊死任务"这一本 Issue 场景**零效果（假绿）**；这正是 resubscribe 必须自有队列的直接原因。
 
@@ -86,7 +86,7 @@ A 泊住（`cancel-test` 场景：任务已领取、`working`、断流不取消�
 - **GREEN**（本树）：4/4 通过——
   1. 复现序：C 得 SSE 流，帧 0 = task（同 contextId），帧 1 = 显式 `TASK_STATE_REJECTED` 结算，无错误帧，`GetTask` 恢复读 `REJECTED`；
   2. 新会话对照：新任务正常派发至 `COMPLETED`；
-  3. teardown 计时：`registered=2`、`tornDown>=2` 于 `res.close` 后 250ms 内成立（**任务仍 `working`**，结算不可能解释该终止——终止发生在断开时刻而非结算时刻），`completed=0`；任务保持 `WORKING`（断流≠取消）；同任务重新订阅仍交付快照；
+  3. teardown 计时：`registered=1`、`tornDown=1` 于 `res.close` 后 250ms 内成立（**任务仍 `working`**，结算不可能解释该终止——终止发生在断开时刻而非结算时刻），`completed=0`（计数面仅 resubscribe——send 路径为刻意直通，见 §3.1）；任务保持 `WORKING`（断流≠取消）；同任务重新订阅仍交付快照；
   4. 慢消费者（附着不弃）：逐帧收齐直至 `COMPLETED`，`tornDown` 不变、`completed` 计入——慢≠断开，不误杀。
 - **spec 自身修正（如实记录）**：前任留下的 spec 从未跑绿，含两处与类型标注不符的实现 bug——`openParkAndDrop` 声明返回 `{ taskId, contextId }` 实际 `return task`（形状 `{ id, contextId, state }`），导致后续 `params: { id: undefined }` 在线上序列化为 `params:{}`（`-32602 Task ID is required`）；两处把 `rpcPost` 的 fetch `Response` 当已解析 JSON body 读（`.body` 实为 ReadableStream）。已分别改为显式重 shaping 与 `rpcResultOf`。Node `--experimental-strip-types` 不做类型检查，故未被 tsc 拦截。
 
@@ -97,10 +97,10 @@ A 泊住（`cancel-test` 场景：任务已领取、`working`、断流不取消�
 ## 5. 版本边界与局限
 
 - `@a2a-js/sdk@1.3.0` 锁定未升级；仅使用公共导出面（`@a2a-js/sdk/server`：`ExecutionEventQueue`、`ExecutionEventBusManager`、类型；`@a2a-js/sdk/errors`：公共错误类）。若未来 SDK 提供断开钩子/abort 注入点或队列停止把手，应回归 SDK 原生路径并删除本层重实现。
-- **send 路径内层局限**：`sendMessageStream` 的 SDK 生成器内部自建队列且无注入点，断开竞速泵只能收口客户端侧；其总线订阅由 SDK 自身在任务结算时释放。由于断流≠取消，该泄漏窗口以任务自身生命期为界（结算、显式取消、死线、撤销），与修复前一致、不劣化。
-- teardown 中间件按 `req.body.method` 识别流式方法，挂在受理门之后（此时 `body.method` 已为最终形态）；重复请求由受理门直接短路，不经过本中间件，无需把手。
-- 计数器为进程生命期累计，不做重置；仅含计数、无任何正文/ID 内容。
-- 本层 resubscribe 重实现与 SDK 的行为等价性由既有套件锚定（stream-resilience fixture 10、protocol-errors fixture 10、official-client-roundtrip、identity-service-acl 跨户 `-32001`）；SDK 若变更 resubscribe 语义，需人工同步（已在上游跟踪项 §7 中列明）。
+- **send 路径为刻意直通**：send 的交付循环兼任任务态持久化泵（§3.1），终止它会饿死终态落库（CI 两轮实证）；send 被弃流的队列与 express 请求对象按 SDK 原生语义存活到任务结算（断流≠取消，生命期有界）。若未来要在 send 路径收口客户端侧，正确形态是"断开即向写循环交付 done + 后台继续泵送内层生成器至结算"（既释放客户端资源又不饿死持久化）——留作后续精化，不在本 Issue 最小面内。
+- **resubscribe 重实现的等价性维护**：与 SDK 行为等价由既有套件锚定（stream-resilience fixture 10、protocol-errors fixture 10、official-client-roundtrip、identity-service-acl 跨户 `-32001`）；SDK 若变更 resubscribe 语义需人工同步（已列于上游跟踪项 §7）。
+- teardown 中间件按 `req.body.method` 识别收口对象（现仅 `SubscribeToTask`），挂在受理门之后（此时 `body.method` 已为最终形态）；重复请求由受理门直接短路，不经过本中间件，无需把手。
+- 计数器为进程生命期累计，不做重置；仅含计数、无任何正文/ID 内容；现只覆盖 resubscribe 面。
 
 ## 6. 复现与验证命令
 
@@ -123,7 +123,7 @@ pnpm run typecheck
 >
 > **Suggested direction**: propagate response close (or a caller-supplied `AbortSignal` via `ServerCallContext`) into the stream generators created by `DefaultRequestHandler.sendMessageStream/resubscribe`, so the generator's `finally` (which already calls `eventQueue.stop()`) runs at disconnect time. Note for implementers: a delegating `yield*` wrapper cannot deliver `generator.return()` while the express loop is parked awaiting the next event (the return request queues behind the pending `next()`); the queue must be stopped directly (or the parked wait resolved) for prompt teardown.
 >
-> **Workaround we shipped** (server-side, no guard relaxation): own the resubscribe `ExecutionEventQueue` via the public `@a2a-js/sdk/server` exports and stop it in a `res.once('close')` race; pump the send-path generator against the same race to release the client side. Public exports currently make this possible but reach into per-request internals (`ResultManager`-less resubscribe is re-implemented 1:1); first-class disconnect support would remove the need.
+> **Workaround we shipped** (server-side, no guard relaxation): own the resubscribe `ExecutionEventQueue` via the public `@a2a-js/sdk/server` exports and stop it in a `res.once('close')` race. IMPORTANT scope note: only the RESUBSCRIBE path can be torn down this way — resubscribe runs no ResultManager (pure event forwarding), so terminating it never starves persistence. The SendStreamingMessage delivery loop MUST keep the SDK's own disconnect behavior: its per-request `ResultManager.processEvent` runs inside the generator's `for await` loop, and the express write loop's pending `next()` is the pump that persists task-state transitions — terminating it on disconnect leaves the task stuck in its last non-terminal state (verified: our first attempt did exactly that and failed a real-link consumer gate). First-class disconnect support upstream should therefore drain-or-forward events after client close (or expose a queue-stop injection point), not merely `generator.return()`.
 
 ## 8. 联动
 
