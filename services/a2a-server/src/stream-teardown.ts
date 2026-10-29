@@ -178,20 +178,23 @@ function pumpWithDisconnect(
   counters: StreamLifecycleCounters,
 ): AsyncGenerator<StreamResponse, void, void> {
   if (handle === undefined) return inner;
+  // Narrowed capture AFTER the guard: the hoisted `function* pump` below does
+  // not inherit control-flow narrowing from this scope (service tsconfig).
+  const h: StreamTeardownHandle = handle;
   counters.registered += 1;
   let outcome: 'tornDown' | 'completed' | 'failed' = 'failed';
-  const disconnected = handle.disconnected;
+  const disconnected = h.disconnected;
   async function* pump(): AsyncGenerator<StreamResponse, void, void> {
     const it = inner[Symbol.asyncIterator]();
     try {
       // Client already gone before the first pull: never start the SDK
       // generator at all — nothing subscribes to the bus in the first place.
-      if (handle.fired) {
+      if (h.fired) {
         outcome = 'tornDown';
         return;
       }
       while (true) {
-        if (handle.fired) {
+        if (h.fired) {
           outcome = 'tornDown';
           return;
         }
@@ -211,7 +214,7 @@ function pumpWithDisconnect(
     } finally {
       if (outcome === 'tornDown') counters.tornDown += 1;
       else if (outcome === 'completed') counters.completed += 1;
-      handle.detach();
+      h.detach();
       // Best-effort termination of the inner generator; while it is parked
       // awaiting its queue the return() queues behind the pending next()
       // and only lands at settlement (see module docstring).
