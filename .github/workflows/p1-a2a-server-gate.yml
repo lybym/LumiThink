@@ -6,7 +6,10 @@ name: P1 A2A server gate
 # runner: official @a2a-js/sdk client round-trip (Agent Card discovery,
 # blocking/streaming send, GetTask, CancelTask), standard error mapping
 # (fixtures 05–12 semantics), SSE-disconnect-never-cancels, Task-only
-# policy, auth/param failures never create tasks. Synthetic data only;
+# policy, auth/param failures never create tasks. Since P1-11 (issue #111)
+# the same gate also runs the official PYTHON client interop probe
+# (a2a-sdk==1.2.3 via setup-python, two runtime rounds: synthetic +
+# dsh-worker) against the real subprocess server. Synthetic data only;
 # loopback only; no DATABASE_URL and no provider credentials by design.
 #
 # The root-level static guard (tests/server/a2a-server-skeleton.spec.ts)
@@ -89,6 +92,14 @@ jobs:
       - name: Frozen-lockfile install (isolated package)
         working-directory: services/a2a-server
         run: pnpm install --frozen-lockfile
+
+      - name: Install exact Python 3.12 (official a2a-sdk interop probe, P1-11/#111)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the locked official Python SDK (a2a-sdk==1.2.3)
+        run: python -m pip install --disable-pip-version-check a2a-sdk==1.2.3
 
       - name: Typecheck (isolated tsconfig)
         working-directory: services/a2a-server
