@@ -85,6 +85,8 @@
 | R8 | 终态订阅返回 `-32004`；SSE 断开不自动取消 | §3 实测（规范 §9.4.6） | 客户端恢复路径必须走 `GetTask` 快照 + 新订阅；与设计 §9.2/§10.3 一致 | P1-06/#88、P1-07/#89 |
 | R9 | 官方 JS 客户端 blocking `sendMessage` 返回值是 Task/Message 对象本身（无 `result.task` 包装）；Python 客户端 `send_message` 返回 `AsyncIterator[StreamResponse]` | §3/§4 实测 | 各端适配层按各自 SDK 形态处理；线级契约以 JSON-RPC 外壳为准（fixtures 05–12） | 渠道适配（P2 小智 Provider） |
 
+> **2026-10-29 更新注记（P2-01/#113，不改写上表）**：R1–R3 的「判定与处置」已收敛——经源码评估（@748c7931 逐行）与隔离实验（冻结插件 client 直跑 + 官方 SDK 对照 + semver 判定，全部合成数据），放弃接入 `@ryubyte/dsh-a2a`，改用官方 `@a2a-js/sdk@1.3.0` 实现轻量 Client 适配（R1–R3 由 P2-02 适配层按 TASK_LIFECYCLE §5.3/§7.3/§7.4 显式承接）；证据与六点评估见 [ADR-0018](../adr/0018-dsh-a2a-client-selection.md)、过程记录见 [P2-01 评估记录](2026-10-29-p2-01-dsh-client-selection.md)。§7「候选插件 dsh-a2a 接入」一项随之关闭。
+
 ## 6. 可复现命令（隔离目录）
 
 ```powershell
