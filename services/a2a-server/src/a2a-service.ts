@@ -92,6 +92,11 @@ import {
   requireContextAccess,
   requireTwoTierAuth,
 } from './identity/express-auth.ts';
+import {
+  attachStreamTeardownMiddleware,
+  withStreamTeardown,
+  type StreamLifecycleCounters,
+} from './stream-teardown.ts';
 import { Authorizer } from './identity/authorizer.ts';
 import {
   IdentityStore,
@@ -162,6 +167,14 @@ export interface StartedA2aService {
   recovery?: StartupRecoveryReport;
   /** True when the service created (and owns/closes) the deletion ledger. */
   ownsDeletionLedger: boolean;
+  /**
+   * P1-12 (issue #121): content-free SSE stream lifecycle counters
+   * (registered = live streams that registered a disconnect teardown;
+   * tornDown = streams terminated because the client disconnected;
+   * completed = streams that ran to natural completion). Regression
+   * evidence for the teardown and an operational leak signal.
+   */
+  streamLifecycle: StreamLifecycleCounters;
   /** Resolves when the server has fully closed (after close()). */
   closed: Promise<void>;
   /**
@@ -319,6 +332,11 @@ export async function startA2aService(
     limits: config.limits,
     recorder,
     householdOf,
+    // P1-12 (#121): an admission refusal publishes the task snapshot before
+    // its FAILED statusUpdate (fresh streams must not open with a
+    // statusUpdate — locked SDK stream-pattern guard).
+    taskSnapshotLoader:
+      sqliteTaskManager === undefined ? undefined : (taskId) => sqliteTaskManager.load(taskId),
     now: nowMs,
   }) as AgentExecutor & Partial<LeaseAware>;
 
@@ -327,6 +345,24 @@ export async function startA2aService(
     taskManager: sqliteTaskManager,
     authorizationGate: (taskId) => identity.executorGate(taskId),
     quotaGate: options.quotaGate,
+    // P1-12 (#121): pre-result refusals publish the persisted task snapshot
+    // BEFORE the terminal statusUpdate (stream-pattern guard contract), and
+    // surface in the structured log (the pure preflight probe itself never
+    // touches the scheduler counters).
+    taskSnapshotLoader:
+      sqliteTaskManager === undefined ? undefined : (taskId) => sqliteTaskManager.load(taskId),
+    onPreDispatchRefusal: ({ taskId, contextId, reason }) => {
+      recorder.emit({
+        level: 'warn',
+        event: 'admission.decided',
+        taskId,
+        contextId,
+        householdId: householdOf(taskId),
+        decision: 'refused',
+        reason,
+        waitedMs: 0,
+      });
+    },
     capacityPreflight:
       sqliteTaskManager === undefined
         ? undefined
@@ -417,11 +453,25 @@ export async function startA2aService(
   // The handler keeps a reference to this card object; URL fields are
   // finalized in place once the loopback port is bound (P0-02 pattern).
   const agentCard = options.agentCard ?? buildLumithinkAgentCard(`http://${config.host}:0`);
-  const requestHandler = new DefaultRequestHandler(
-    agentCard,
-    guardedTaskStore,
-    executor,
-    new DefaultExecutionEventBusManager(),
+  // P1-12 (#121): the streaming methods are wrapped so every SSE generator
+  // is terminated when its client disconnects silently (the locked SDK's
+  // express handler never observes the disconnect; see stream-teardown.ts).
+  // The teardown shares the SAME bus manager and guarded task store with the
+  // locked SDK handler — the resubscribe path owns its ExecutionEventQueue
+  // through them and stops it on disconnect. All non-streaming methods
+  // delegate through the prototype — the SDK handler still receives exactly
+  // one handler object.
+  const streamLifecycle: StreamLifecycleCounters = { registered: 0, tornDown: 0, completed: 0 };
+  const streamBusManager = new DefaultExecutionEventBusManager();
+  const requestHandler = withStreamTeardown(
+    new DefaultRequestHandler(
+      agentCard,
+      guardedTaskStore,
+      executor,
+      streamBusManager,
+    ),
+    streamLifecycle,
+    { taskStore: guardedTaskStore, eventBusManager: streamBusManager },
   );
 
   const app = express();
@@ -486,6 +536,12 @@ export async function startA2aService(
     }
     return;
   });
+  // P1-12 (#121): SSE silent-disconnect teardown — attaches the per-request
+  // disconnect handle for streaming methods so the wrapped handler above can
+  // terminate the response generator on `res.close`. Mounted AFTER the
+  // acceptance gate (body.method is final by then) and BEFORE the SDK
+  // handler (whose user builder carries the handle into the call context).
+  app.use('/', attachStreamTeardownMiddleware());
   app.use('/', jsonRpcHandler({ requestHandler, userBuilder: lumithinkUserBuilder }));
   app.use('/', jsonRpcParseErrorHandler());
 
@@ -537,6 +593,7 @@ export async function startA2aService(
     deletionLedger,
     recovery,
     ownsDeletionLedger: deletionLedger !== undefined,
+    streamLifecycle,
     closed,
     admission: {
       scheduler,
