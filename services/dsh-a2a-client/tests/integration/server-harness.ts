@@ -87,7 +87,8 @@ export interface StartedServer {
   taskDbPath: string;
   identityDbPath: string;
   dir: string;
-  stop: () => Promise<void>;
+  /** Graceful stop (SIGTERM/terminate); `crash: true` = SIGKILL hard kill. */
+  stop: (options?: { crash?: boolean }) => Promise<void>;
   /** Wait for the process to exit (restart tests). */
   waitExit: () => Promise<void>;
 }
@@ -161,9 +162,18 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     identityDbPath,
     dir,
     waitExit: () => exited,
-    stop: async () => {
+    stop: async (options: { crash?: boolean } = {}) => {
       if (child.exitCode === null && child.signalCode === null) {
-        child.kill();
+        if (options.crash) {
+          // TRUE crash semantics: SIGKILL on POSIX (no graceful shutdown,
+          // no runtime dispose), TerminateProcess on Windows. Used by the
+          // restart-recovery test so the startup scan really sees an
+          // interrupted execution (a SIGTERM would settle sessions
+          // 'service_shutdown' first).
+          child.kill('SIGKILL');
+        } else {
+          child.kill();
+        }
       }
       const killer = setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');

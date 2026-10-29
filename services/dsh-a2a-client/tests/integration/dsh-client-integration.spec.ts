@@ -336,7 +336,10 @@ test('G6a: server restart → GetTask recovers true state, no duplicate inferenc
     assert.ok(doneHandle.taskId);
 
     const restartInfo = { dir: server.dir, taskDbPath: server.taskDbPath, identityDbPath: server.identityDbPath };
-    await server.stop(); // simulated crash of the server process
+    // TRUE crash (SIGKILL): a graceful stop would dispose sessions with
+    // 'service_shutdown' evidence and the startup scan would find nothing
+    // to abandon — the crash-restart contract needs the interrupted row.
+    await server.stop({ crash: true });
     killOrphanWorkers(); // the crashed server's parked worker would linger otherwise
 
     const restarted = await startServer({ workerBehavior: 'stop-on-cancel', reuse: restartInfo });
